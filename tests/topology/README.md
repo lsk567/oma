@@ -54,10 +54,10 @@ successfully after completing all effect contracts, print its completion marker,
 and produce every declared output expected by the test.
 
 The `Topology CI Test` GitHub Actions workflow runs the authenticated suite on
-trusted changes to topology code on `main` and `omar-lang`, on a weekly
-schedule, or by manual dispatch from `main`. It expects `OPENAI_API_KEY` and
-`ANTHROPIC_API_KEY` repository secrets. Secrets are not made available to the
-ordinary pull-request checks.
+trusted changes to topology code on `main`, on a weekly schedule, or by manual
+dispatch from `main` or the trusted `omar-lang` integration branch. It expects
+`OPENAI_API_KEY` and `ANTHROPIC_API_KEY` repository secrets. Secrets are not
+made available to the ordinary pull-request checks.
 
 The runner prints per-case duration and assertion counts, followed by an
 aggregate PASS/FAIL verdict. It exits nonzero if any case fails. Logs and a

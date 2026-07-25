@@ -2,7 +2,7 @@ name: Topology CI Test
 
 on:
   push:
-    branches: [main, omar-lang]
+    branches: [main]
     paths:
       - ".github/workflows/topology-ci-test.yml"
       - "Cargo.lock"
@@ -35,7 +35,10 @@ permissions:
 jobs:
   topology-ci-test:
     name: Topology CI Test
-    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/omar-lang'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:

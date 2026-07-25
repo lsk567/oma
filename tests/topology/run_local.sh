@@ -157,7 +157,11 @@ with open(log_path, "ab") as log:
             capture_agent_panes(elapsed)
             next_snapshot += 60
         time.sleep(1)
-raise SystemExit(process.returncode)
+status = process.returncode
+if status != 0 and peek_agents:
+    elapsed = int(time.monotonic() - started)
+    capture_agent_panes(elapsed)
+raise SystemExit(status)
 PY
 }
 
