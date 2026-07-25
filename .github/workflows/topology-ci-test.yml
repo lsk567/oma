@@ -1,46 +1,15 @@
-name: CI
+name: Topology Release Gate
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/topology-ci-test.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "Makefile"
-      - "lang/**"
-      - "src/config.rs"
-      - "src/manager/**"
-      - "src/mcp.rs"
-      - "src/tmux/**"
-      - "src/topology.rs"
-      - "tests/topology/**"
-  pull_request:
-    branches: [main]
-    paths:
-      - ".github/workflows/topology-ci-test.yml"
-      - "Cargo.lock"
-      - "Cargo.toml"
-      - "Makefile"
-      - "lang/**"
-      - "src/config.rs"
-      - "src/manager/**"
-      - "src/mcp.rs"
-      - "src/tmux/**"
-      - "src/topology.rs"
-      - "tests/topology/**"
-  schedule:
-    - cron: "0 3 * * 1"
-  workflow_dispatch:
-    inputs:
-      case:
-        description: "Run one topology case; leave empty to run the full suite"
-        required: false
-        default: ""
-        type: string
+  workflow_call:
+    secrets:
+      OPENAI_API_KEY:
+        required: true
+      ANTHROPIC_API_KEY:
+        required: true
 
 concurrency:
-  group: topology-ci-test-${{ github.event_name }}-${{ github.ref }}
+  group: topology-release-gate-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -49,16 +18,6 @@ permissions:
 jobs:
   topology-ci-test:
     name: Topology CI Test
-    if: >-
-      (
-        github.event_name != 'workflow_dispatch' ||
-        github.ref == 'refs/heads/main' ||
-        github.ref == 'refs/heads/omar-lang'
-      ) &&
-      (
-        github.event_name != 'pull_request' ||
-        github.event.pull_request.head.repo.full_name == github.repository
-      )
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -161,7 +120,6 @@ jobs:
           OMAR_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DISABLE_AUTOUPDATER: "1"
           DISABLE_LOGIN_COMMAND: "1"
-          OMAR_TEST_CASE: ${{ inputs.case }}
         run: |
           test -n "$OMAR_ANTHROPIC_API_KEY"
           ./tests/topology/run_local.sh

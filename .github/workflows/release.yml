@@ -8,8 +8,16 @@ permissions:
   contents: write
 
 jobs:
+  topology-ci-test:
+    name: Topology CI Test
+    uses: ./.github/workflows/topology-ci-test.yml
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
   build:
     name: Build (${{ matrix.suffix }})
+    needs: topology-ci-test
     strategy:
       matrix:
         include:
