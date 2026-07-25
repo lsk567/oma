@@ -40,8 +40,8 @@ jobs:
     timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always
-      CODEX_HOME: ${{ runner.temp }}/codex-home
-      OMAR_TEST_RESULTS_DIR: ${{ runner.temp }}/topology-tests
+      CODEX_HOME: /tmp/codex-home
+      OMAR_TEST_RESULTS_DIR: /tmp/topology-tests
 
     steps:
       - name: Check out trusted source
@@ -111,7 +111,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: topology-ci-test-${{ github.run_id }}
-          path: ${{ runner.temp }}/topology-tests/
+          path: /tmp/topology-tests/
           if-no-files-found: warn
           retention-days: 14
 
