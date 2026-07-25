@@ -1,0 +1,224 @@
+// OMAR topology integration source.
+/*
+Rationale
+---------
+In an actual business loop, a topology can have a large scatter-gather pattern
+whose output is a product delivery or decision. Each node may recur internally
+to improve quality until its own QA gate is met, much like a subteam iterating
+on its deliverable before handing it to a downstream team.
+
+Subteams also need synchronization. This example models:
+
+                         A (build <-> QA) ─────────────┐
+ brief -> scatter                                      ├-> D (integrate <-> QA) -> delivery
+                         B (build <-> QA) -> C (build <-> QA) ─┘
+
+A can finish independently, while B must finish before C starts. D is the sync
+point and may begin only after both A and C have passed their local QA gates.
+Then D iterates on the gathered product until its own final QA gate approves
+the external delivery.
+
+This kind of nested recurrence plus cross-subteam synchronization is difficult
+to express in most multi-agent frameworks. OMAR expresses each handoff as a
+typed action and each QA cycle as feedback through a prior reaction.
+
+As in LF, effects preserve logical time but advance the microstep, so the full
+tag is (logical time, microstep). A and C originate from the same input and keep
+the same logical time, but their unequal paths and independent QA recurrences
+do not guarantee the same microstep. A direct `prompt d(a_ready, c_ready)` would
+therefore fire under OR semantics when the first result arrives instead of
+waiting for the other one.
+
+Native bounded-join syntax is not implemented yet, so A and C use an
+offer-until-acknowledged handshake. Each approved result is re-emitted at every
+microstep until D observes both offers at the same full tag. D then emits stop
+signals and closes the join. This makes synchronization independent of which
+branch finishes first.
+
+This is an integration test, not an open-ended quality benchmark. Each local
+QA gate therefore requires exactly one short draft/rework cycle, identified by
+explicit DRAFT and FINAL markers. The bounded prompts exercise recurrence
+deterministically without allowing agents to grow documents indefinitely.
+*/
+team BusinessLoop(a_builder : Codex,
+                           a_qa : Codex,
+                           b_builder : Codex,
+                           b_qa : Codex,
+                           c_builder : Codex,
+                           c_qa : Codex,
+                           d_integrator : Codex,
+                           d_qa : Codex)
+{
+    input brief : string
+    output delivery : string
+
+    action scatter_a : string
+    action scatter_b : string
+
+    action a_candidate : string
+    action a_rework : string
+    action a_ready : string
+    action a_offer : string
+    action stop_a
+
+    action b_candidate : string
+    action b_rework : string
+    action b_ready : string
+
+    action c_candidate : string
+    action c_rework : string
+    action c_ready : string
+    action c_offer : string
+    action stop_c
+
+    action d_candidate : string
+    action d_rework : string
+    action sync_closed
+
+    // Scatter the business brief into two independent upstream workstreams.
+    prompt d_integrator(brief) -> scatter_a, scatter_b
+    "
+        Split this business brief into two complementary assignments:
+        $(brief)
+
+        Set `scatter_a` to one sentence of customer/product work for team A.
+        Set `scatter_b` to one sentence of research/risk work for team B.
+        Keep each assignment under 25 words.
+    "
+
+    // Team A iterates locally until its independent QA gate approves it.
+    prompt a_builder(scatter_a, a_rework) -> a_candidate
+    "
+        Team A assignment: $(scatter_a)
+        QA rework request: $(a_rework)
+
+        If the rework request is <absent>, set `a_candidate` to a proposal of
+        at most 45 words beginning exactly `DRAFT-A:`. Include a user and value
+        proposition, but omit a success metric.
+
+        Otherwise set `a_candidate` to a proposal of at most 60 words beginning
+        exactly `FINAL-A:`. Include a user, value proposition, and numeric
+        success metric. Do not add headings or commentary.
+    "
+
+    prompt a_qa(a_candidate) -> (a_rework | a_ready)
+    "
+        QA this team A proposal:
+        $(a_candidate)
+
+        If it begins `DRAFT-A:`, set `a_rework` to the short instruction
+        `Return FINAL-A with one numeric success metric.` If it begins
+        `FINAL-A:`, copy it unchanged to `a_ready`. Set exactly one effect.
+    "
+
+    // Keep the approved A result available until D acknowledges it.
+    prompt a_qa(a_ready, a_offer, stop_a) -> a_offer?
+    "
+        Approved A result: $(a_ready)
+        Previous A offer: $(a_offer)
+        Stop signal: $(stop_a)
+
+        If `stop_a` is present, complete without setting an effect. Otherwise
+        set `a_offer` to whichever approved or previous A value is present.
+        This repeats the offer until the downstream join closes.
+    "
+
+    // Team B also iterates locally. Its approved result starts team C.
+    prompt b_builder(scatter_b, b_rework) -> b_candidate
+    "
+        Team B assignment: $(scatter_b)
+        QA rework request: $(b_rework)
+
+        If the rework request is <absent>, set `b_candidate` to an assessment
+        of at most 45 words beginning exactly `DRAFT-B:`. Include evidence and
+        one risk, but omit mitigation.
+
+        Otherwise set `b_candidate` to an assessment of at most 60 words
+        beginning exactly `FINAL-B:`. Include evidence, one principal risk,
+        and one concrete mitigation. Do not add headings or commentary.
+    "
+
+    prompt b_qa(b_candidate) -> (b_rework | b_ready)
+    "
+        QA this team B assessment:
+        $(b_candidate)
+
+        If it begins `DRAFT-B:`, set `b_rework` to the short instruction
+        `Return FINAL-B with one concrete mitigation.` If it begins `FINAL-B:`,
+        copy it unchanged to `b_ready`. Set exactly one effect.
+    "
+
+    // Team C is downstream of B and performs its own build/QA recurrence.
+    prompt c_builder(b_ready, c_rework) -> c_candidate
+    "
+        Approved B assessment: $(b_ready)
+        Team C QA rework request: $(c_rework)
+
+        If the rework request is <absent>, set `c_candidate` to a plan of at
+        most 45 words beginning exactly `DRAFT-C:`. Include two milestones and
+        an owner, but omit verification.
+
+        Otherwise set `c_candidate` to a plan of at most 65 words beginning
+        exactly `FINAL-C:`. Include two milestones, one owner, and one numeric
+        verification criterion. Do not add headings or commentary.
+    "
+
+    prompt c_qa(c_candidate) -> (c_rework | c_ready)
+    "
+        QA this team C implementation plan:
+        $(c_candidate)
+
+        If it begins `DRAFT-C:`, set `c_rework` to the short instruction
+        `Return FINAL-C with one numeric verification criterion.` If it begins
+        `FINAL-C:`, copy it unchanged to `c_ready`. Set exactly one effect.
+    "
+
+    // Keep the approved C result available until D acknowledges it.
+    prompt c_qa(c_ready, c_offer, stop_c) -> c_offer?
+    "
+        Approved C result: $(c_ready)
+        Previous C offer: $(c_offer)
+        Stop signal: $(stop_c)
+
+        If `stop_c` is present, complete without setting an effect. Otherwise
+        set `c_offer` to whichever approved or previous C value is present.
+    "
+
+    // D is the synchronization point. A partial offer produces no effects.
+    // Once both offers coexist, D closes the handshake and begins integration.
+    // Later d_rework events iterate only D's candidate through its local QA.
+    prompt d_integrator(a_offer, c_offer, d_rework, sync_closed)
+        -> d_candidate?, stop_a?, stop_c?, sync_closed?
+    "
+        Team A offer: $(a_offer)
+        Team C offer: $(c_offer)
+        D QA rework request: $(d_rework)
+        Join already closed: $(sync_closed)
+
+        Follow these rules in order:
+        1. If `sync_closed` is present, set nothing.
+        2. If `d_rework` is present, set only `d_candidate` to a package of at
+           most 100 words beginning exactly `FINAL-D:`. It must name the
+           decision, A's product proposal, C's plan, one risk mitigation, and
+           one numeric success measure.
+        3. If both `a_offer` and `c_offer` are present, integrate them into one
+           package of at most 80 words beginning exactly `DRAFT-D:`. Name the
+           decision, A's proposal, and C's plan, but omit risk mitigation. Set
+           it as `d_candidate`, emit `stop_a` and `stop_c` as null signals, and
+           emit `sync_closed` as null so repeated offers cannot start a
+           duplicate integration.
+        4. If only one offer is present, set nothing and wait for a later tag.
+    "
+
+    // Team D has its own iterative QA loop before external delivery.
+    prompt d_qa(d_candidate) -> (d_rework | delivery)
+    "
+        QA the integrated delivery package:
+        $(d_candidate)
+
+        If it begins `DRAFT-D:`, set `d_rework` to at most 100 words beginning
+        `REVISE-D:` followed by the draft and the instruction to add one risk
+        mitigation and one numeric success measure. If it begins `FINAL-D:`,
+        copy it unchanged to `delivery`. Set exactly one effect.
+    "
+}

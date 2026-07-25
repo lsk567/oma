@@ -1,0 +1,30 @@
+// OMAR topology integration source.
+// Exercises same-agent serialization even when reactions write disjoint ports,
+// followed by fan-in where both actions arrive at the same tag.
+team SameAgentSerial(worker : Codex,
+                     collector : Codex)
+{
+    input request : string
+    output result : string
+    action left : string
+    action right : string
+
+    prompt worker(request) -> left
+    "
+        Set `left` to `left: $(request)`.
+    "
+
+    prompt worker(request) -> right
+    "
+        Set `right` to `right: $(request)`. This invocation must run after the
+        preceding invocation because both reactions use the same agent.
+    "
+
+    prompt collector(left, right) -> result
+    "
+        Both serialized effects commit at the same tag boundary.
+        left=$(left)
+        right=$(right)
+        Combine them and set `result`.
+    "
+}

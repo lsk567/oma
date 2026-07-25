@@ -1,0 +1,33 @@
+// Exercises superdense tags, fixed action delay, and delayed port routing.
+team SuperdenseTime(producer : Codex,
+                    fixed_consumer : Codex,
+                    connected_consumer : Codex)
+{
+    input start : int
+    output fixed_result : int
+    output connected_result : int
+
+    action immediate : int
+    action fixed(delay=2) : int
+    action connected(delay=1) : int
+
+    // `immediate` arrives at (0, 1). The connection delay of 3 and connected's
+    // fixed delay of 1 are additive, so `connected` arrives at (4, 0).
+    immediate -> connected after 3
+
+    prompt producer(start) -> immediate, fixed
+    "
+        Set both `immediate` and `fixed` to the integer $(start).
+    "
+
+    // `fixed` is scheduled directly by the producer and arrives at (2, 0).
+    prompt fixed_consumer(fixed) -> fixed_result
+    "
+        Copy $(fixed) to `fixed_result`.
+    "
+
+    prompt connected_consumer(connected) -> connected_result
+    "
+        Copy $(connected) to `connected_result`.
+    "
+}

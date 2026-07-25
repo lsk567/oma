@@ -1,0 +1,50 @@
+// OMAR topology integration source.
+team HR(manager   : Codex,
+        reviewer1 : Codex,
+        reviewer2 : Codex)
+{
+    input resume : path      // runtime validator checks if this is a valid file path.
+    output hired : bool      // runtime validator checks if this is a valid true/false.
+    action triage : string
+    action opinion1 : string
+    action opinion2 : string
+    action log : string
+    
+    prompt manager(resume)
+        -> (triage | hired = false), log? // can optionally not log, but must either triage or reject. Giving semantics to outputs seems useful.
+    "
+        We're hiring new employees and are looking for
+        someone who can program and understand how quant trading works.
+        Here is a resume.
+        $(resume
+        /* $(...) escapes from text. All inputs needs to be serializable */
+        // This is also a valid comment, since the closing parenthesis is on the next line.
+        )
+        Set `triage` to your initial assessment, or set `hired` to false to reject immediately.
+        You may also set `log`.
+    "
+
+    prompt reviewer1(triage) -> opinion1
+    "
+        Review the resume as a senior engineer.
+        The manager's initial assessment is: $(triage)
+        Focus on programming ability, systems thinking, and evidence of quantitative trading or similar analytical work.
+        Write a concise opinion in `opinion1`.
+    "
+
+    prompt reviewer2(triage) -> opinion2
+    "
+        Review the resume as a hiring partner.
+        The manager's initial assessment is: $(triage)
+        Focus on communication quality, practical judgment, and whether the candidate seems likely to thrive on a small agentic team.
+        Write a concise opinion in `opinion2`.
+    "
+
+    prompt manager(opinion1, opinion2) -> hired
+    "
+        Review both reviewer opinions and decide whether to hire the candidate.
+        Senior engineer: $(opinion1)
+        Hiring partner: $(opinion2)
+        Write true to hire and false otherwise.
+    "
+}

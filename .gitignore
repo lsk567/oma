@@ -1,6 +1,7 @@
 # Rust
 /target/
 **/target/
+/lang/.lake/
 Cargo.lock
 
 # IDE

@@ -483,6 +483,7 @@ pub fn run_server_with_default_context() -> Result<()> {
             .ok()
             .map(|server| server.trim().to_string())
             .filter(|server| !server.is_empty()),
+        topology: None,
     };
     OmarMcpServer::new(context).run()
 }
@@ -593,7 +594,14 @@ impl OmarMcpServer {
                     "instructions": SERVER_INSTRUCTIONS,
                 }),
             ),
-            "tools/list" => ok_response(id, json!({ "tools": tool_definitions() })),
+            "tools/list" => {
+                let tools = if self.context.topology.is_some() {
+                    topology_tool_definitions()
+                } else {
+                    tool_definitions()
+                };
+                ok_response(id, json!({ "tools": tools }))
+            }
             "tools/call" => match serde_json::from_value::<ToolCallRequest>(request.params) {
                 Ok(call) => ok_response(id, self.call_tool(call)),
                 Err(err) => {
@@ -613,37 +621,49 @@ impl OmarMcpServer {
             &self.context,
             &format!("tool_call name={} args={}", call.name, call.arguments),
         );
-        let result = match call.name.as_str() {
-            "list_backends" => self.list_backends(),
-            "list_eas" => self.list_eas(),
-            "get_active_ea" => self.get_active_ea(),
-            "switch_ea" => self.switch_ea(call.arguments),
-            "create_ea" => self.create_ea(call.arguments),
-            "delete_ea" => self.delete_ea(call.arguments),
-            "list_agents" => self.list_agents(),
-            "get_agent" => self.get_agent(call.arguments),
-            "get_agent_summary" => self.get_agent_summary(call.arguments),
-            "update_agent_status" => self.update_agent_status(call.arguments),
-            "spawn_agent" => self.spawn_agent(call.arguments),
-            "kill_agent" => self.kill_agent(call.arguments),
-            "send_input" => self.send_input(call.arguments),
-            "list_projects" => self.list_projects(),
-            "add_project" => self.add_project(call.arguments),
-            "complete_project" => self.complete_project(call.arguments),
-            "schedule_omar_event" => self.schedule_omar_event(call.arguments),
-            "list_events" => self.list_events(),
-            "cancel_event" => self.cancel_event(call.arguments),
-            "log_justification" => self.log_justification(call.arguments),
-            "slack_reply" => self.slack_reply(call.arguments),
-            "computer_status" => self.computer_status(),
-            "computer_lock_acquire" => self.computer_lock_acquire(call.arguments),
-            "computer_lock_release" => self.computer_lock_release(call.arguments),
-            "computer_screenshot" => self.computer_screenshot(call.arguments),
-            "computer_mouse" => self.computer_mouse(call.arguments),
-            "computer_keyboard" => self.computer_keyboard(call.arguments),
-            "computer_screen_size" => self.computer_screen_size(),
-            "computer_mouse_position" => self.computer_mouse_position(),
-            other => Err(anyhow!("Unknown tool '{}'", other)),
+        let result = if let Some(topology) = &self.context.topology {
+            match call.name.as_str() {
+                "omar_set_port" => crate::topology::mcp_set_port(topology, call.arguments),
+                "omar_complete" => crate::topology::mcp_complete(topology, call.arguments),
+                other => Err(anyhow!(
+                    "Tool '{}' is unavailable to topology agent '{}'",
+                    other,
+                    topology.agent
+                )),
+            }
+        } else {
+            match call.name.as_str() {
+                "list_backends" => self.list_backends(),
+                "list_eas" => self.list_eas(),
+                "get_active_ea" => self.get_active_ea(),
+                "switch_ea" => self.switch_ea(call.arguments),
+                "create_ea" => self.create_ea(call.arguments),
+                "delete_ea" => self.delete_ea(call.arguments),
+                "list_agents" => self.list_agents(),
+                "get_agent" => self.get_agent(call.arguments),
+                "get_agent_summary" => self.get_agent_summary(call.arguments),
+                "update_agent_status" => self.update_agent_status(call.arguments),
+                "spawn_agent" => self.spawn_agent(call.arguments),
+                "kill_agent" => self.kill_agent(call.arguments),
+                "send_input" => self.send_input(call.arguments),
+                "list_projects" => self.list_projects(),
+                "add_project" => self.add_project(call.arguments),
+                "complete_project" => self.complete_project(call.arguments),
+                "schedule_omar_event" => self.schedule_omar_event(call.arguments),
+                "list_events" => self.list_events(),
+                "cancel_event" => self.cancel_event(call.arguments),
+                "log_justification" => self.log_justification(call.arguments),
+                "slack_reply" => self.slack_reply(call.arguments),
+                "computer_status" => self.computer_status(),
+                "computer_lock_acquire" => self.computer_lock_acquire(call.arguments),
+                "computer_lock_release" => self.computer_lock_release(call.arguments),
+                "computer_screenshot" => self.computer_screenshot(call.arguments),
+                "computer_mouse" => self.computer_mouse(call.arguments),
+                "computer_keyboard" => self.computer_keyboard(call.arguments),
+                "computer_screen_size" => self.computer_screen_size(),
+                "computer_mouse_position" => self.computer_mouse_position(),
+                other => Err(anyhow!("Unknown tool '{}'", other)),
+            }
         };
 
         match result {
@@ -2329,6 +2349,35 @@ fn tool_definitions() -> Vec<Value> {
         .clone()
 }
 
+fn topology_tool_definitions() -> Vec<Value> {
+    vec![
+        tool(
+            "omar_set_port",
+            "Set one effect port for the active OMAR invocation. Calls are buffered until omar_complete; repeated writes to the same port use last-writer-wins semantics.",
+            json!({
+                "type":"object",
+                "properties":{
+                    "invocation_id":{"type":"string"},
+                    "port":{"type":"string"},
+                    "value":{}
+                },
+                "required":["invocation_id","port","value"],
+                "additionalProperties":false
+            }),
+        ),
+        tool(
+            "omar_complete",
+            "Complete the active OMAR invocation after setting its effects. The runtime validates the final effect snapshot and releases the tag barrier.",
+            json!({
+                "type":"object",
+                "properties":{"invocation_id":{"type":"string"}},
+                "required":["invocation_id"],
+                "additionalProperties":false
+            }),
+        ),
+    ]
+}
+
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     json!({
         "name": name,
@@ -2377,7 +2426,17 @@ mod tests {
             default_workdir: ".".to_string(),
             health_idle_warning: 15,
             tmux_server: None,
+            topology: None,
         }
+    }
+
+    #[test]
+    fn topology_scope_exposes_only_port_protocol_tools() {
+        let names: Vec<_> = topology_tool_definitions()
+            .into_iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["omar_set_port", "omar_complete"]);
     }
 
     #[test]

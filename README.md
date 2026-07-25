@@ -1,11 +1,10 @@
 <div align="center">
 
-# OMAR
+<img src="img/full-black-banner.jpg" alt="OMAR" width="250">
 
-**`omar` is a harness for creating powerful agentic workflows.**
+**`omar` is a harness for creating powerful multi-agent workflows.**
 
 Lead a team of 100 agents to solve humanity's biggest problems.
-
 
 <p align="center">
   <a href="https://omar.rs">omar.rs</a>&nbsp; • &nbsp;
@@ -49,7 +48,7 @@ Installs all binaries to `/usr/local/bin`.
 ### Homebrew
 
 ```bash
-brew install lsk567/omar/omar
+brew install omar-os/omar/omar
 ```
 
 ### Build from source
@@ -57,7 +56,7 @@ brew install lsk567/omar/omar
 Requires Rust 1.70+ and GNU Make.
 
 ```bash
-git clone https://github.com/lsk567/omar.git
+git clone https://github.com/omar-os/omar.git
 cd omar && make install
 ```
 
@@ -71,11 +70,11 @@ $ omar
 
 Go [here](#supported-agent-backends) to see how to launch with specific agent backends.
 
-#### Step 2: Tell your Executive Assistant (EA) to run a test prompt.
+#### Step 2: Tell the Executive Assistant (EA) to run a test prompt.
 
-Copy the following into your EA window:
+Copy the following into the EA window:
 ```
-Run https://github.com/lsk567/omar/blob/main/prompts/tests/project-factory.md
+Run https://github.com/omar-os/omar/blob/main/prompts/tests/project-factory.md
 ```
 
 You should see agents being spawned by the EA.
@@ -103,22 +102,12 @@ Shutdown the test project and its agents.
 
 BSD 3-Clause
 
-## Star History
-
-<a href="https://www.star-history.com/?type=date&legend=top-left&repos=lsk567%2Fomar">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=lsk567/omar&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=lsk567/omar&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=lsk567/omar&type=date&legend=top-left" />
- </picture>
-</a>
-
 ## Contributors
 
 Thanks to all of our amazing contributors!
 
-<a href="https://github.com/lsk567/omar/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=lsk567/omar" />
+<a href="https://github.com/omar-os/omar/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=omar-os/omar" />
 </a>
 
 ---

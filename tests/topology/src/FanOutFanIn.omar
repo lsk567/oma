@@ -1,0 +1,40 @@
+// OMAR topology integration source.
+// Exercises concurrent fan-out, a tag barrier, fan-in, and a multi-trigger
+// reaction receiving both values in one invocation.
+team FanOutFanIn(dispatcher : Codex,
+                 analyst : Codex,
+                 critic : Codex,
+                 aggregator : Codex)
+{
+    input request : string
+    output answer : string
+    action brief : string
+    action analysis : string
+    action criticism : string
+
+    prompt dispatcher(request) -> brief
+    "
+        Turn this request into a one-sentence brief and set `brief`:
+        $(request)
+    "
+
+    prompt analyst(brief) -> analysis
+    "
+        Produce a concise constructive analysis of this brief and set `analysis`:
+        $(brief)
+    "
+
+    prompt critic(brief) -> criticism
+    "
+        Identify the most important risk in this brief and set `criticism`:
+        $(brief)
+    "
+
+    prompt aggregator(analysis, criticism) -> answer
+    "
+        The tag barrier delivers both parallel results together.
+        Analysis: $(analysis)
+        Criticism: $(criticism)
+        Combine them into a concise final answer and set `answer`.
+    "
+}

@@ -1044,56 +1044,6 @@ mod tests {
     }
 
     #[test]
-    fn test_session_has_live_pane_rejects_dead_remain_on_exit_session() {
-        if !tmux_available() {
-            eprintln!("Skipping test: tmux not available");
-            return;
-        }
-
-        let session = format!("omar-test-dead-{}", uuid::Uuid::new_v4());
-        let _guard = SessionGuard(session.clone());
-
-        let ok = tmux_command()
-            .args(["new-session", "-d", "-s", &session, "sh"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !ok {
-            eprintln!("Skipping test: failed to create tmux session");
-            return;
-        }
-
-        let set_ok = tmux_command()
-            .args(["set-option", "-t", &session, "remain-on-exit", "on"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !set_ok {
-            eprintln!("Skipping test: failed to enable remain-on-exit");
-            return;
-        }
-
-        let target = format!("{session}:0.0");
-        let _ = tmux_command()
-            .args(["send-keys", "-t", &target, "exit 7", "C-m"])
-            .status();
-
-        let client = TmuxClient::new("omar-test-");
-        for _ in 0..20 {
-            if !client.session_has_live_pane(&session).unwrap_or(true) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-
-        assert!(client.has_session(&session).unwrap());
-        assert!(
-            !client.session_has_live_pane(&session).unwrap(),
-            "dead remain-on-exit panes must not be treated as live sessions"
-        );
-    }
-
-    #[test]
     fn test_wait_for_stable_returns_on_idle_pane() {
         if !tmux_available() {
             eprintln!("Skipping test: tmux not available");

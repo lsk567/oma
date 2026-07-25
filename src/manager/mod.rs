@@ -25,6 +25,16 @@ pub struct McpLaunchContext {
     pub health_idle_warning: i64,
     #[serde(default)]
     pub tmux_server: Option<String>,
+    #[serde(default)]
+    pub topology: Option<TopologyMcpContext>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TopologyMcpContext {
+    pub team: String,
+    pub agent: String,
+    pub endpoint: String,
+    pub token: String,
 }
 
 #[derive(Debug, Clone)]
@@ -305,7 +315,13 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 fn materialize_mcp_context_file(context: &McpLaunchContext) -> Option<PathBuf> {
     let dir = mcp_ea_dir(context)?;
-    let path = dir.join("context.json");
+    let path = match &context.topology {
+        Some(topology) => dir.join(format!(
+            "context-topology-{}-{}.json",
+            topology.team, topology.agent
+        )),
+        None => dir.join("context.json"),
+    };
     let json = serde_json::to_vec(context).ok()?;
     write_private_file(&path, &json).ok()?;
     Some(path)
@@ -371,7 +387,13 @@ fn materialize_claude_mcp_config(context: &McpLaunchContext) -> Option<PathBuf> 
     });
 
     let dir = mcp_ea_dir(context)?;
-    let path = dir.join("claude-mcp.json");
+    let path = match &context.topology {
+        Some(topology) => dir.join(format!(
+            "claude-mcp-topology-{}-{}.json",
+            topology.team, topology.agent
+        )),
+        None => dir.join("claude-mcp.json"),
+    };
     write_private_file(&path, &serde_json::to_vec(&json).ok()?).ok()?;
     Some(path)
 }
@@ -995,6 +1017,7 @@ pub fn ensure_manager_session(
             default_workdir: options.default_workdir.clone(),
             health_idle_warning: options.health_idle_warning,
             tmux_server: current_tmux_server(),
+            topology: None,
         },
     );
 
@@ -1288,6 +1311,7 @@ fn spawn_worker(
             default_workdir: ".".to_string(),
             health_idle_warning: 15,
             tmux_server: current_tmux_server(),
+            topology: None,
         },
     );
 
@@ -1420,6 +1444,7 @@ mod tests {
             default_workdir: ".".to_string(),
             health_idle_warning: 15,
             tmux_server: None,
+            topology: None,
         }
     }
 
@@ -1862,6 +1887,7 @@ mod tests {
                 default_workdir: ".".to_string(),
                 health_idle_warning: 15,
                 tmux_server: None,
+                topology: None,
             },
         );
 
