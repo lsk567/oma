@@ -116,6 +116,18 @@ jobs:
           }
           claude_state_path.write_text(json.dumps(claude_state))
           claude_state_path.chmod(0o600)
+
+          claude_config_dir = Path.home() / ".claude"
+          claude_config_dir.mkdir(mode=0o700, exist_ok=True)
+          claude_settings_path = claude_config_dir / "settings.json"
+          claude_settings_path.write_text(
+              json.dumps(
+                  {"apiKeyHelper": "printenv OMAR_ANTHROPIC_API_KEY"},
+                  indent=2,
+              )
+              + "\n"
+          )
+          claude_settings_path.chmod(0o600)
           PY
 
       - name: Verify live agent CLIs
@@ -125,11 +137,12 @@ jobs:
 
       - name: Run live topology suite
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OMAR_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DISABLE_AUTOUPDATER: "1"
+          DISABLE_LOGIN_COMMAND: "1"
           OMAR_TEST_CASE: ${{ inputs.case }}
         run: |
-          test -n "$ANTHROPIC_API_KEY"
+          test -n "$OMAR_ANTHROPIC_API_KEY"
           ./tests/topology/run_local.sh
 
       - name: Upload topology metrics and logs
