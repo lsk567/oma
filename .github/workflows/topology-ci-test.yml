@@ -89,7 +89,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           npm install --global @anthropic-ai/claude-code
 
-      - name: Authenticate Codex
+      - name: Configure agent CLIs
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
@@ -103,6 +103,19 @@ jobs:
           workspace = json.dumps(os.environ["GITHUB_WORKSPACE"])
           config = f'[projects.{workspace}]\ntrust_level = "trusted"\n'
           Path(os.environ["CODEX_HOME"], "config.toml").write_text(config)
+
+          claude_state_path = Path.home() / ".claude.json"
+          claude_state = {
+              "hasCompletedOnboarding": True,
+              "projects": {
+                  os.environ["GITHUB_WORKSPACE"]: {
+                      "hasTrustDialogAccepted": True,
+                      "projectOnboardingSeenCount": 1,
+                  }
+              },
+          }
+          claude_state_path.write_text(json.dumps(claude_state))
+          claude_state_path.chmod(0o600)
           PY
 
       - name: Verify live agent CLIs
