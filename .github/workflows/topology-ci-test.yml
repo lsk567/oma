@@ -41,6 +41,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CODEX_HOME: /tmp/codex-home
+      OMAR_TEST_PEEK_AGENTS: "1"
       OMAR_TEST_RESULTS_DIR: /tmp/topology-tests
 
     steps:

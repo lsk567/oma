@@ -67,6 +67,9 @@ run_with_timeout() {
 
   python3 - "$timeout" "$log" "$case_name" "$@" <<'PY'
 import subprocess
+import json
+import os
+import re
 import sys
 import time
 
@@ -74,11 +77,68 @@ timeout = int(sys.argv[1])
 log_path = sys.argv[2]
 case_name = sys.argv[3]
 command = sys.argv[4:]
+peek_agents = os.environ.get("OMAR_TEST_PEEK_AGENTS", "").lower() in {
+    "1", "true", "yes"
+}
+agent_names = set()
+if peek_agents:
+    try:
+        bytecode_path = command[command.index("run") + 1]
+        with open(bytecode_path, encoding="utf-8") as bytecode_file:
+            bytecode = json.load(bytecode_file)
+        agent_names = {
+            instruction["name"]
+            for instruction in bytecode["instructions"]
+            if instruction["op"] == "spawn_agent"
+        }
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        pass
+
+
+def capture_agent_panes(elapsed):
+    sessions = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        capture_output=True,
+        text=True,
+    )
+    if sessions.returncode != 0:
+        print(f"[{case_name}] no tmux agent sessions found", flush=True)
+        return
+
+    names = [
+        name for name in sessions.stdout.splitlines()
+        if name.startswith("omar-agent-")
+        and any(name.endswith(f"-{agent}") for agent in agent_names)
+    ]
+    group = os.environ.get("GITHUB_ACTIONS") == "true"
+    if group:
+        print(f"::group::{case_name} agent panes at {elapsed}s", flush=True)
+    else:
+        print(f"[{case_name}] agent panes at {elapsed}s", flush=True)
+
+    ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+    for name in names:
+        pane = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-t", name, "-S", "-20"],
+            capture_output=True,
+            text=True,
+        )
+        lines = [
+            ansi.sub("", line).rstrip()
+            for line in pane.stdout.splitlines()
+            if line.strip()
+        ][-20:]
+        print(f"--- {name} ---", flush=True)
+        print("\n".join(lines) if lines else "(empty pane)", flush=True)
+
+    if group:
+        print("::endgroup::", flush=True)
 
 with open(log_path, "ab") as log:
     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
     started = time.monotonic()
     next_heartbeat = 30
+    next_snapshot = 60
     while process.poll() is None:
         elapsed = int(time.monotonic() - started)
         if elapsed >= timeout:
@@ -91,8 +151,11 @@ with open(log_path, "ab") as log:
             log.write(f"\nCASE TIMEOUT after {timeout}s\n".encode())
             raise SystemExit(124)
         if elapsed >= next_heartbeat:
-            print(f"[{case_name}] still running ({elapsed}s elapsed)")
+            print(f"[{case_name}] still running ({elapsed}s elapsed)", flush=True)
             next_heartbeat += 30
+        if peek_agents and elapsed >= next_snapshot:
+            capture_agent_panes(elapsed)
+            next_snapshot += 60
         time.sleep(1)
 raise SystemExit(process.returncode)
 PY
