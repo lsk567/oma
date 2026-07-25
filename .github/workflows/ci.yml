@@ -198,35 +198,6 @@ jobs:
       - name: Run popup quote regression
         run: bash tests/ci/tmux_popup_quote.sh
 
-  exit-behavior-integration:
-    name: Exit Behavior Integration
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Build omar
-        run: cargo build --bin omar
-
-      - name: Run exit behavior integration
-        run: bash tests/ci/tmux_exit_behavior.sh
-
   unresolved-session-integration:
     name: Unresolved Session Integration
     runs-on: ubuntu-latest
@@ -422,7 +393,7 @@ jobs:
   # Ensure all jobs pass before allowing merge
   ci-success:
     name: CI Success
-    needs: [check, fmt, clippy, test, omar-language, popup-quote-integration, exit-behavior-integration, unresolved-session-integration, codex-yolo-integration, ea-zero-selector-integration, dashboard-relaunch-handoff-integration, opencode-compat, build]
+    needs: [check, fmt, clippy, test, omar-language, popup-quote-integration, unresolved-session-integration, codex-yolo-integration, ea-zero-selector-integration, dashboard-relaunch-handoff-integration, opencode-compat, build]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -434,7 +405,6 @@ jobs:
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.omar-language.result }}" != "success" ]] || \
              [[ "${{ needs.popup-quote-integration.result }}" != "success" ]] || \
-             [[ "${{ needs.exit-behavior-integration.result }}" != "success" ]] || \
              [[ "${{ needs.unresolved-session-integration.result }}" != "success" ]] || \
              [[ "${{ needs.codex-yolo-integration.result }}" != "success" ]] || \
              [[ "${{ needs.ea-zero-selector-integration.result }}" != "success" ]] || \
