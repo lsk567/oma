@@ -15,6 +15,20 @@ on:
       - "src/tmux/**"
       - "src/topology.rs"
       - "tests/topology/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/topology-ci-test.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Makefile"
+      - "lang/**"
+      - "src/config.rs"
+      - "src/manager/**"
+      - "src/mcp.rs"
+      - "src/tmux/**"
+      - "src/topology.rs"
+      - "tests/topology/**"
   schedule:
     - cron: "0 3 * * 1"
   workflow_dispatch:
@@ -36,9 +50,15 @@ jobs:
   topology-ci-test:
     name: Topology CI Test
     if: >-
-      github.event_name != 'workflow_dispatch' ||
-      github.ref == 'refs/heads/main' ||
-      github.ref == 'refs/heads/omar-lang'
+      (
+        github.event_name != 'workflow_dispatch' ||
+        github.ref == 'refs/heads/main' ||
+        github.ref == 'refs/heads/omar-lang'
+      ) &&
+      (
+        github.event_name != 'pull_request' ||
+        github.event.pull_request.head.repo.full_name == github.repository
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
