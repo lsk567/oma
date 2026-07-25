@@ -18,7 +18,7 @@ team HR(manager   : Codex,
         Here is a resume.
         $(resume
         /* $(...) escapes from text. All inputs needs to be serializable */
-        // This is also a valid comment, since close paranthesis is on the next line.
+        // This is also a valid comment, since the closing parenthesis is on the next line.
         )
         Set `triage` to your initial assessment, or set `hired` to false to reject immediately.
         You may also set `log`.
