@@ -135,7 +135,7 @@ run_case() {
   fi
 
   if [[ $status == PASS ]]; then
-    printf '[%s] running with local Codex agents\n' "$name"
+    printf '[%s] running with local agents\n' "$name"
     if run_with_timeout "$case_timeout" "$log" "$name" \
       "$omar" topology run "$bytecode" --replace \
       --timeout-seconds "$invocation_timeout" "$@"; then
@@ -212,6 +212,7 @@ run_case EffectContracts EffectContracts accepted \
   --input candidate='a careful systems engineer'
 run_case FanOutFanIn FanOutFanIn answer \
   --input request='design a resilient task queue'
+run_case HR HR hired --input "resume=$fixture"
 run_case HRCodex HR hired --input "resume=$fixture"
 run_case OrTriggers OrTriggers observation \
   --input request='compare the fast and slow paths'

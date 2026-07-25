@@ -1,0 +1,122 @@
+name: Topology CI Test
+
+on:
+  push:
+    branches: [main, omar-lang]
+    paths:
+      - ".github/workflows/topology-ci-test.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Makefile"
+      - "lang/**"
+      - "src/config.rs"
+      - "src/manager/**"
+      - "src/mcp.rs"
+      - "src/tmux/**"
+      - "src/topology.rs"
+      - "tests/topology/**"
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      case:
+        description: "Run one topology case; leave empty to run the full suite"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: topology-ci-test
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  topology-ci-test:
+    name: Topology CI Test
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      CODEX_HOME: ${{ runner.temp }}/codex-home
+      OMAR_TEST_RESULTS_DIR: ${{ runner.temp }}/topology-tests
+
+    steps:
+      - name: Check out trusted source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Lean
+        uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: lang
+          auto-config: false
+          build: false
+          test: false
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-topology-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-topology-cargo-
+            ${{ runner.os }}-cargo-
+
+      - name: Install Codex and Claude CLIs
+        env:
+          CODEX_NON_INTERACTIVE: "1"
+          DISABLE_AUTOUPDATER: "1"
+        run: |
+          mkdir -p "$CODEX_HOME"
+          curl -fsSL https://chatgpt.com/codex/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          npm install --global @anthropic-ai/claude-code
+
+      - name: Authenticate Codex
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          test -n "$OPENAI_API_KEY"
+          printf '%s' "$OPENAI_API_KEY" | "$HOME/.local/bin/codex" login --with-api-key
+
+      - name: Verify live agent CLIs
+        run: |
+          codex --version
+          claude --version
+
+      - name: Run live topology suite
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DISABLE_AUTOUPDATER: "1"
+          OMAR_TEST_CASE: ${{ inputs.case }}
+        run: |
+          test -n "$ANTHROPIC_API_KEY"
+          ./tests/topology/run_local.sh
+
+      - name: Upload topology metrics and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: topology-ci-test-${{ github.run_id }}
+          path: ${{ runner.temp }}/topology-tests/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Remove live credentials
+        if: always()
+        run: |
+          rm -rf "$CODEX_HOME"
+          tmux kill-server 2>/dev/null || true

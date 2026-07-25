@@ -1,9 +1,9 @@
 # OMAR topology integration corpus
 
-The `.omar` sources live in `tests/topology/src/`. Every executable scenario
-except the original heterogeneous `HR.omar` uses Codex for every agent. CI
-performs only login-free compiler and Rust VM dry-run checks. Authenticated
-end-to-end execution is a local integration suite.
+The `.omar` sources live in `tests/topology/src/`. Every scenario except the
+heterogeneous `HR.omar` uses Codex for every agent. CI performs login-free
+compiler and Rust VM dry-run checks on every pull request. The authenticated
+suite runs from trusted branches and can also be invoked locally.
 
 Coverage:
 
@@ -18,6 +18,7 @@ Coverage:
 - `SameAgentSerial.omar`: same-agent serialization and same-tag fan-in.
 - `SuperdenseTime.omar`: `(timestamp, microstep)` tags, fixed action delay,
   additive connection delay, and chronological delivery.
+- `HR.omar`: the heterogeneous hiring example using Claude and Codex.
 - `HRCodex.omar`: the original hiring example using Codex for every role.
 
 To compile and verify one scenario without launching agents:
@@ -29,12 +30,13 @@ cd ..
 cargo run -- topology apply /tmp/FanOutFanIn.json --dry-run
 ```
 
-To execute it with live Codex agents, replace the final command with
+To execute it with live agents, replace the final command with
 `omar topology run`, provide every declared input, and use `--replace` when
-reusing agent names. Live execution requires a configured Codex backend.
+reusing agent names. Live execution requires every backend declared by that
+topology to be installed and authenticated.
 
-To compile and execute the complete Codex-only corpus with representative
-inputs and local Codex agents:
+To compile and execute the complete corpus with representative inputs and local
+agents:
 
 ```sh
 make test-topology
@@ -46,11 +48,16 @@ Run one case while iterating:
 make test-topology CASE=BusinessLoop
 ```
 
-The suite intentionally excludes heterogeneous `HR.omar` and runs
-`HRCodex.omar` instead. It runs every case even if an earlier case fails. Each
-case must compile, exit successfully after completing all effect contracts,
-print its completion marker, and produce every declared output expected by the
-test.
+The suite includes both heterogeneous `HR.omar` and Codex-only `HRCodex.omar`.
+It runs every case even if an earlier case fails. Each case must compile, exit
+successfully after completing all effect contracts, print its completion marker,
+and produce every declared output expected by the test.
+
+The `Topology CI Test` GitHub Actions workflow runs the authenticated suite on
+trusted changes to topology code on `main` and `omar-lang`, on a weekly
+schedule, or by manual dispatch from `main`. It expects `OPENAI_API_KEY` and
+`ANTHROPIC_API_KEY` repository secrets. Secrets are not made available to the
+ordinary pull-request checks.
 
 The runner prints per-case duration and assertion counts, followed by an
 aggregate PASS/FAIL verdict. It exits nonzero if any case fails. Logs and a
