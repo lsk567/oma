@@ -1,0 +1,33 @@
+// OMAR topology integration source.
+// Exercises LF-style OR triggers at different microsteps and explicit absent
+// interpolation. The observer runs once for `fast` and later once for `slow`.
+team OrTriggers(splitter : Codex,
+                lagger : Codex,
+                observer : Codex)
+{
+    input request : string
+    output observation : string
+    action fast : string
+    action delay
+    action slow : string
+
+    prompt splitter(request) -> fast, delay
+    "
+        Set `fast` to a short immediate response to $(request).
+        Also emit the `delay` signal by setting it to null.
+    "
+
+    prompt lagger(delay) -> slow
+    "
+        The delay signal arrived. Set `slow` to `slow path complete`.
+    "
+
+    prompt observer(fast, slow) -> observation
+    "
+        This reaction fires when either trigger is present.
+        fast=$(fast)
+        slow=$(slow)
+        Set `observation` to name the trigger that is present. A missing trigger
+        is rendered as <absent>. The later invocation becomes the final output.
+    "
+}

@@ -1,0 +1,34 @@
+// OMAR topology integration source.
+// Exercises declaration-order scheduling for shared effects, an optional
+// writer that may preserve an earlier value, and deterministic last-writer wins.
+team OrderedWrites(first : Codex,
+                   optional : Codex,
+                   finalizer : Codex,
+                   reader : Codex)
+{
+    input request : string
+    output result : string
+    action shared : string
+
+    prompt first(request) -> shared
+    "
+        Set `shared` to `first: $(request)`.
+    "
+
+    prompt optional(request) -> shared?
+    "
+        Exercise an optional effect: do not set `shared`; just complete this
+        invocation. The earlier value must remain buffered for this tag.
+    "
+
+    prompt finalizer(request) -> shared
+    "
+        Set `shared` to `final: $(request)`. This reaction is declared last
+        among the shared writers, so its mandatory value must win.
+    "
+
+    prompt reader(shared) -> result
+    "
+        Copy the deterministic final shared value to `result`: $(shared)
+    "
+}

@@ -1,0 +1,19 @@
+// OMAR topology integration source.
+// Exercises an action feeding its own reaction across microsteps. This is the
+// recurrence pattern available before dedicated startup/bounds syntax lands.
+team Recurrence(counter : Codex)
+{
+    input start : int
+    output result : int
+    action next : int
+
+    prompt counter(start, next) -> (next | result)
+    "
+        Exactly one of these triggers is present:
+        start=$(start)
+        next=$(next)
+        Treat the present value as the current integer. If it is less than 3,
+        set `next` to current + 1. Otherwise set `result` to the current value.
+        Never set both effects. This should terminate with result 3.
+    "
+}

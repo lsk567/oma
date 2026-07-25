@@ -1,3 +1,4 @@
+// OMAR topology integration source.
 team HR(manager   : ClaudeCode,
         reviewer1 : Codex,
         reviewer2 : Opencode)

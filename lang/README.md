@@ -10,7 +10,7 @@ lake build
 Compile a program:
 
 ```sh
-lake exe omarc ../tests/topology/HR.omar /tmp/HR.bytecode.json
+lake exe omarc ../tests/topology/src/HR.omar /tmp/HR.bytecode.json
 ```
 
 Verify the bytecode with the Rust VM without spawning agents:

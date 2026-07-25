@@ -1,0 +1,33 @@
+// OMAR topology integration source.
+// Exercises required alternatives, optional alternative groups, typed and
+// signal actions, and constant boolean effects.
+team EffectContracts(decider : Codex)
+{
+    input candidate : string
+    output accepted : bool
+    action review : string
+    action rejected
+    action audit : string
+    action escalated
+
+    prompt decider(candidate)
+        -> (review | rejected), (audit | escalated)?
+    "
+        Evaluate $(candidate).
+        If it is suitable, set `review` to a concise justification; otherwise
+        emit the `rejected` signal by setting it to null. Optionally set `audit`
+        to a short note, but do not set both `audit` and `escalated`.
+    "
+
+    prompt decider(review) -> accepted = true
+    "
+        A positive review arrived: $(review)
+        Set `accepted` to true, as required by the constant effect contract.
+    "
+
+    prompt decider(rejected) -> accepted = false
+    "
+        The rejection signal arrived. Set `accepted` to false, as required by
+        the constant effect contract.
+    "
+}

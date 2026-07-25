@@ -1,0 +1,43 @@
+// OMAR topology integration source.
+/* Exercises every documented port type, nested generic type parsing,
+   /* including nested block comments, */ multiple required effects, and
+   interpolation of structured trigger values. */
+team AllTypes(codec : Codex)
+{
+    input bool_in : bool
+    input int_in : int
+    input float_in : float
+    input string_in : string
+    input path_in : path
+    input bytes_in : bytes
+    input list_in : list<int>
+    input option_in : option<string>
+    input nested_in : list<option<int>>
+
+    output bool_out : bool
+    output int_out : int
+    output float_out : float
+    output string_out : string
+    output path_out : path
+    output bytes_out : bytes
+    output list_out : list<int>
+    output option_out : option<string>
+    output nested_out : list<option<int>>
+
+    prompt codec(bool_in, int_in, float_in, string_in, path_in, bytes_in, list_in, option_in, nested_in)
+        -> bool_out, int_out, float_out, string_out, path_out, bytes_out, list_out, option_out, nested_out
+    "
+        Copy each present input to the output with the matching suffix.
+        bool=$(bool_in)
+        int=$(int_in)
+        float=$(float_in)
+        string=$(string_in)
+        path=$(path_in)
+        bytes=$(bytes_in)
+        list=$(list_in)
+        option=$(option_in)
+        nested=$(nested_in)
+        Prompt strings preserve escaped quotes like \"this\" and backslashes like \\.
+        All nine external inputs arrive at one tag, so set all nine outputs.
+    "
+}
