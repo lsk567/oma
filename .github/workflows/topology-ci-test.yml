@@ -92,6 +92,15 @@ jobs:
         run: |
           test -n "$OPENAI_API_KEY"
           printf '%s' "$OPENAI_API_KEY" | "$HOME/.local/bin/codex" login --with-api-key
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          workspace = json.dumps(os.environ["GITHUB_WORKSPACE"])
+          config = f'[projects.{workspace}]\ntrust_level = "trusted"\n'
+          Path(os.environ["CODEX_HOME"], "config.toml").write_text(config)
+          PY
 
       - name: Verify live agent CLIs
         run: |
