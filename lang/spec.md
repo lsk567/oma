@@ -167,6 +167,12 @@ value `null`; this preserves the distinction between absence and a signal.
 Writes remain private until `omar_complete`. Completion validates the final
 port snapshot against the contract. Calls after completion are rejected.
 
+The topology runner owns invocation records in memory. Topology-scoped MCP
+processes send authenticated commands to the runner over a loopback connection.
+Each active invocation has a completion channel, so `omar_complete` wakes the
+waiting reaction executor directly; invocation state is not persisted to or
+polled from the filesystem.
+
 If ordered invocations write the same port, the later declared invocation wins
 when it actually writes that port. A mandatory effect is guaranteed to replace
 the earlier value; an optional effect replaces it only when present.

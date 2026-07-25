@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -287,7 +290,7 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
     Ok(state)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 struct InvocationRecord {
     id: String,
     team: String,
@@ -299,64 +302,253 @@ struct InvocationRecord {
     completed: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SetPortArgs {
     invocation_id: String,
     port: String,
     value: Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct CompleteArgs {
     invocation_id: String,
 }
 
-struct InvocationLock {
-    path: PathBuf,
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum InvocationCommand {
+    SetPort(SetPortArgs),
+    Complete(CompleteArgs),
 }
 
-impl InvocationLock {
-    fn acquire(path: PathBuf) -> Result<Self> {
-        for _ in 0..500 {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
-                    writeln!(file, "{}", std::process::id())?;
-                    return Ok(Self { path });
+#[derive(Debug, Serialize, Deserialize)]
+struct InvocationRequest {
+    token: String,
+    team: String,
+    agent: String,
+    command: InvocationCommand,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct InvocationResponse {
+    result: Option<Value>,
+    error: Option<String>,
+}
+
+struct InvocationEntry {
+    record: InvocationRecord,
+    completion: Option<mpsc::SyncSender<BTreeMap<String, Value>>>,
+}
+
+#[derive(Clone, Default)]
+struct InvocationRegistry {
+    entries: Arc<Mutex<BTreeMap<String, InvocationEntry>>>,
+}
+
+impl InvocationRegistry {
+    fn register(
+        &self,
+        record: InvocationRecord,
+    ) -> Result<mpsc::Receiver<BTreeMap<String, Value>>> {
+        let id = record.id.clone();
+        let (completion, receiver) = mpsc::sync_channel(1);
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| anyhow::anyhow!("invocation registry lock poisoned"))?;
+        if entries.contains_key(&id) {
+            bail!("duplicate invocation '{id}'");
+        }
+        entries.insert(
+            id,
+            InvocationEntry {
+                record,
+                completion: Some(completion),
+            },
+        );
+        Ok(receiver)
+    }
+
+    fn remove(&self, invocation_id: &str) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.remove(invocation_id);
+        }
+    }
+
+    fn execute(&self, team: &str, agent: &str, command: InvocationCommand) -> Result<Value> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| anyhow::anyhow!("invocation registry lock poisoned"))?;
+        match command {
+            InvocationCommand::SetPort(args) => {
+                let invocation = entries
+                    .get_mut(&args.invocation_id)
+                    .with_context(|| format!("unknown invocation '{}'", args.invocation_id))?;
+                validate_invocation_owner(team, agent, &invocation.record)?;
+                if invocation.record.completed {
+                    bail!("invocation '{}' is already complete", invocation.record.id);
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    thread::sleep(Duration::from_millis(10));
+                let ty = invocation
+                    .record
+                    .allowed_effects
+                    .get(&args.port)
+                    .with_context(|| {
+                        format!("port '{}' is not an effect of this invocation", args.port)
+                    })?;
+                validate_value(ty, &args.value)
+                    .with_context(|| format!("invalid value for port '{}'", args.port))?;
+                invocation
+                    .record
+                    .writes
+                    .insert(args.port.clone(), args.value);
+                Ok(json!({"status":"buffered","port":args.port}))
+            }
+            InvocationCommand::Complete(args) => {
+                let invocation = entries
+                    .get_mut(&args.invocation_id)
+                    .with_context(|| format!("unknown invocation '{}'", args.invocation_id))?;
+                validate_invocation_owner(team, agent, &invocation.record)?;
+                if invocation.record.completed {
+                    return Ok(json!({"status":"already_complete"}));
                 }
-                Err(error) => return Err(error.into()),
+                validate_contract(&invocation.record.contract, &invocation.record.writes)
+                    .with_context(|| {
+                        format!(
+                            "reaction '{}' invocation '{}' failed",
+                            invocation.record.reaction, invocation.record.id
+                        )
+                    })?;
+                invocation.record.completed = true;
+                let writes = invocation.record.writes.clone();
+                let completion = invocation
+                    .completion
+                    .take()
+                    .context("invocation completion channel is unavailable")?;
+                completion
+                    .send(writes)
+                    .map_err(|_| anyhow::anyhow!("invocation is no longer active"))?;
+                Ok(json!({"status":"complete"}))
             }
         }
-        bail!("timed out waiting for invocation lock")
     }
 }
 
-impl Drop for InvocationLock {
+struct InvocationServer {
+    endpoint: String,
+    token: String,
+    registry: InvocationRegistry,
+    shutdown: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl InvocationServer {
+    fn start() -> Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .context("failed to bind topology invocation service")?;
+        let endpoint = listener.local_addr()?.to_string();
+        let token = Uuid::new_v4().to_string();
+        let registry = InvocationRegistry::default();
+        let thread_registry = registry.clone();
+        let thread_token = token.clone();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = shutdown.clone();
+        let thread = thread::spawn(move || {
+            for connection in listener.incoming() {
+                if thread_shutdown.load(Ordering::Acquire) {
+                    break;
+                }
+                match connection {
+                    Ok(stream) => {
+                        let _ =
+                            serve_invocation_connection(stream, &thread_token, &thread_registry);
+                    }
+                    Err(_) if thread_shutdown.load(Ordering::Acquire) => break,
+                    Err(_) => continue,
+                }
+            }
+        });
+        Ok(Self {
+            endpoint,
+            token,
+            registry,
+            shutdown,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for InvocationServer {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        self.shutdown.store(true, Ordering::Release);
+        let _ = TcpStream::connect(&self.endpoint);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
-fn invocation_path(runtime_dir: &Path, invocation_id: &str) -> Result<PathBuf> {
-    if !invocation_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
-        bail!("invalid invocation id");
-    }
-    Ok(runtime_dir
-        .join("invocations")
-        .join(format!("{invocation_id}.json")))
+fn serve_invocation_connection(
+    mut stream: TcpStream,
+    token: &str,
+    registry: &InvocationRegistry,
+) -> Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let mut request_line = String::new();
+    BufReader::new(stream.try_clone()?).read_line(&mut request_line)?;
+    let response = match serde_json::from_str::<InvocationRequest>(&request_line) {
+        Ok(request) if request.token == token => {
+            match registry.execute(&request.team, &request.agent, request.command) {
+                Ok(result) => InvocationResponse {
+                    result: Some(result),
+                    error: None,
+                },
+                Err(error) => InvocationResponse {
+                    result: None,
+                    error: Some(format!("{error:#}")),
+                },
+            }
+        }
+        Ok(_) => InvocationResponse {
+            result: None,
+            error: Some("invalid topology invocation token".into()),
+        },
+        Err(error) => InvocationResponse {
+            result: None,
+            error: Some(format!("invalid topology invocation request: {error}")),
+        },
+    };
+    serde_json::to_writer(&mut stream, &response)?;
+    writeln!(stream)?;
+    Ok(())
 }
 
-fn read_invocation(path: &Path) -> Result<InvocationRecord> {
-    serde_json::from_slice(
-        &fs::read(path)
-            .with_context(|| format!("invocation '{}' does not exist", path.display()))?,
-    )
-    .with_context(|| format!("invalid invocation record '{}'", path.display()))
+fn send_invocation_command(
+    context: &TopologyMcpContext,
+    command: InvocationCommand,
+) -> Result<Value> {
+    let mut stream = TcpStream::connect(&context.endpoint)
+        .with_context(|| format!("topology runtime '{}' is unavailable", context.endpoint))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let request = InvocationRequest {
+        token: context.token.clone(),
+        team: context.team.clone(),
+        agent: context.agent.clone(),
+        command,
+    };
+    serde_json::to_writer(&mut stream, &request)?;
+    writeln!(stream)?;
+    let mut response_line = String::new();
+    BufReader::new(stream).read_line(&mut response_line)?;
+    let response: InvocationResponse =
+        serde_json::from_str(&response_line).context("invalid response from topology runtime")?;
+    match (response.result, response.error) {
+        (Some(result), None) => Ok(result),
+        (_, Some(error)) => Err(anyhow::anyhow!(error)),
+        _ => bail!("topology runtime returned an empty response"),
+    }
 }
 
 fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -369,45 +561,21 @@ fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
 }
 
 pub(crate) fn mcp_set_port(context: &TopologyMcpContext, arguments: Value) -> Result<Value> {
-    let args: SetPortArgs = serde_json::from_value(arguments)?;
-    let path = invocation_path(&context.runtime_dir, &args.invocation_id)?;
-    let _lock = InvocationLock::acquire(path.with_extension("lock"))?;
-    let mut invocation = read_invocation(&path)?;
-    validate_invocation_owner(context, &invocation)?;
-    if invocation.completed {
-        bail!("invocation '{}' is already complete", invocation.id);
-    }
-    let ty = invocation
-        .allowed_effects
-        .get(&args.port)
-        .with_context(|| format!("port '{}' is not an effect of this invocation", args.port))?;
-    validate_value(ty, &args.value)
-        .with_context(|| format!("invalid value for port '{}'", args.port))?;
-    invocation.writes.insert(args.port.clone(), args.value);
-    write_json_atomic(&path, &invocation)?;
-    Ok(json!({"status":"buffered","port":args.port}))
+    send_invocation_command(
+        context,
+        InvocationCommand::SetPort(serde_json::from_value(arguments)?),
+    )
 }
 
 pub(crate) fn mcp_complete(context: &TopologyMcpContext, arguments: Value) -> Result<Value> {
-    let args: CompleteArgs = serde_json::from_value(arguments)?;
-    let path = invocation_path(&context.runtime_dir, &args.invocation_id)?;
-    let _lock = InvocationLock::acquire(path.with_extension("lock"))?;
-    let mut invocation = read_invocation(&path)?;
-    validate_invocation_owner(context, &invocation)?;
-    if invocation.completed {
-        return Ok(json!({"status":"already_complete"}));
-    }
-    validate_contract(&invocation.contract, &invocation.writes)?;
-    invocation.completed = true;
-    write_json_atomic(&path, &invocation)?;
-    Ok(json!({"status":"complete"}))
+    send_invocation_command(
+        context,
+        InvocationCommand::Complete(serde_json::from_value(arguments)?),
+    )
 }
 
-fn validate_invocation_owner(
-    context: &TopologyMcpContext,
-    invocation: &InvocationRecord,
-) -> Result<()> {
-    if invocation.team != context.team || invocation.agent != context.agent {
+fn validate_invocation_owner(team: &str, agent: &str, invocation: &InvocationRecord) -> Result<()> {
+    if invocation.team != team || invocation.agent != agent {
         bail!("invocation does not belong to this topology agent");
     }
     Ok(())
@@ -544,20 +712,17 @@ trait ReactionExecutor: Sync {
 
 struct TmuxReactionExecutor {
     client: TmuxClient,
-    runtime_dir: PathBuf,
+    team: String,
+    registry: InvocationRegistry,
     timeout: Duration,
 }
 
 impl ReactionExecutor for TmuxReactionExecutor {
     fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+        let invocation_id = invocation.id.clone();
         let record = InvocationRecord {
-            id: invocation.id.clone(),
-            team: self
-                .runtime_dir
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_string(),
+            id: invocation_id.clone(),
+            team: self.team.clone(),
             agent: invocation.agent.clone(),
             reaction: invocation.reaction_id.clone(),
             contract: invocation.contract.clone(),
@@ -565,8 +730,7 @@ impl ReactionExecutor for TmuxReactionExecutor {
             writes: BTreeMap::new(),
             completed: false,
         };
-        let path = invocation_path(&self.runtime_dir, &invocation.id)?;
-        write_json_atomic(&path, &record)?;
+        let completion = self.registry.register(record)?;
 
         let rendered = render_prompt(&invocation.prompt, &invocation.trigger_values)?;
         let message = format!(
@@ -578,25 +742,28 @@ impl ReactionExecutor for TmuxReactionExecutor {
             rendered
         );
         let session = format!("{}{}", self.client.prefix(), invocation.agent);
-        self.client
+        if let Err(error) = self
+            .client
             .deliver_prompt(&session, &message, &DeliveryOptions::default())
-            .with_context(|| format!("failed to deliver {}", invocation.reaction_id))?;
-
-        let start = Instant::now();
-        loop {
-            let current = read_invocation(&path)?;
-            if current.completed {
-                return Ok(current.writes);
-            }
-            if start.elapsed() >= self.timeout {
-                bail!(
-                    "invocation '{}' on agent '{}' timed out",
-                    invocation.id,
-                    invocation.agent
-                );
-            }
-            thread::sleep(Duration::from_millis(100));
+            .with_context(|| format!("failed to deliver {}", invocation.reaction_id))
+        {
+            self.registry.remove(&invocation_id);
+            return Err(error);
         }
+
+        let result = match completion.recv_timeout(self.timeout) {
+            Ok(writes) => Ok(writes),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow::anyhow!(
+                "invocation '{}' on agent '{}' timed out",
+                invocation_id,
+                invocation.agent
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow::anyhow!(
+                "topology invocation service stopped unexpectedly"
+            )),
+        };
+        self.registry.remove(&invocation_id);
+        result
     }
 }
 
@@ -616,13 +783,19 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
     let runtime_dir = crate::ea::ea_state_dir(config.ea_id, config.omar_dir)
         .join("topologies")
         .join(&state.team);
-    fs::create_dir_all(runtime_dir.join("invocations"))?;
+    fs::create_dir_all(&runtime_dir)?;
+    let obsolete_invocations = runtime_dir.join("invocations");
+    if obsolete_invocations.exists() {
+        fs::remove_dir_all(&obsolete_invocations)?;
+    }
+    let invocation_server = InvocationServer::start()?;
     let client = TmuxClient::new(crate::ea::ea_prefix(config.ea_id, config.base_prefix));
-    spawn_topology_agents(&state, &client, &runtime_dir, &config)?;
+    spawn_topology_agents(&state, &client, &runtime_dir, &invocation_server, &config)?;
     let inputs = parse_inputs(&state, config.inputs)?;
     let executor = TmuxReactionExecutor {
         client,
-        runtime_dir: runtime_dir.clone(),
+        team: state.team.clone(),
+        registry: invocation_server.registry.clone(),
         timeout: config.timeout,
     };
     let outputs = run_event_loop(&state, inputs, &executor)?;
@@ -638,6 +811,7 @@ fn spawn_topology_agents(
     state: &VmState,
     client: &TmuxClient,
     runtime_dir: &Path,
+    invocation_server: &InvocationServer,
     config: &TopologyRunConfig<'_>,
 ) -> Result<()> {
     let protocol = "You are an OMAR topology agent. Only act on OMAR INVOCATION messages. You cannot message other agents. For each invocation, use only omar_set_port to set allowed effects and omar_complete to finish. Port writes are buffered and repeated writes use last-writer-wins semantics.";
@@ -670,7 +844,8 @@ fn spawn_topology_agents(
             topology: Some(TopologyMcpContext {
                 team: state.team.clone(),
                 agent: name.clone(),
-                runtime_dir: runtime_dir.to_path_buf(),
+                endpoint: invocation_server.endpoint.clone(),
+                token: invocation_server.token.clone(),
             }),
         };
         let command = manager::build_agent_command(&base_command, &prompt_file, &[], &context);
@@ -1294,13 +1469,13 @@ mod tests {
     }
 
     #[test]
-    fn scoped_port_writes_are_last_writer_wins() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime_dir = temp.path();
+    fn reactive_scoped_port_writes_are_last_writer_wins() {
+        let server = InvocationServer::start().unwrap();
         let context = TopologyMcpContext {
             team: "Demo".into(),
             agent: "worker".into(),
-            runtime_dir: runtime_dir.into(),
+            endpoint: server.endpoint.clone(),
+            token: server.token.clone(),
         };
         let record = InvocationRecord {
             id: "invocation-1".into(),
@@ -1312,8 +1487,7 @@ mod tests {
             writes: BTreeMap::new(),
             completed: false,
         };
-        let path = invocation_path(runtime_dir, &record.id).unwrap();
-        write_json_atomic(&path, &record).unwrap();
+        let completion = server.registry.register(record).unwrap();
 
         for value in ["first", "second"] {
             mcp_set_port(
@@ -1324,8 +1498,57 @@ mod tests {
         }
         mcp_complete(&context, json!({"invocation_id":"invocation-1"})).unwrap();
 
-        let completed = read_invocation(&path).unwrap();
-        assert!(completed.completed);
-        assert_eq!(completed.writes["opinion"], json!("second"));
+        let writes = completion.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(writes["opinion"], json!("second"));
+        server.registry.remove("invocation-1");
+    }
+
+    #[test]
+    fn reactive_invocations_enforce_owner_and_contract() {
+        let server = InvocationServer::start().unwrap();
+        let context = TopologyMcpContext {
+            team: "Demo".into(),
+            agent: "worker".into(),
+            endpoint: server.endpoint.clone(),
+            token: server.token.clone(),
+        };
+        let record = InvocationRecord {
+            id: "invocation-2".into(),
+            team: "Demo".into(),
+            agent: "worker".into(),
+            reaction: "reaction.0".into(),
+            contract: "opinion".into(),
+            allowed_effects: BTreeMap::from([("opinion".into(), "string".into())]),
+            writes: BTreeMap::new(),
+            completed: false,
+        };
+        let completion = server.registry.register(record).unwrap();
+
+        let mut wrong_owner = context.clone();
+        wrong_owner.agent = "intruder".into();
+        let owner_error = mcp_set_port(
+            &wrong_owner,
+            json!({"invocation_id":"invocation-2", "port":"opinion", "value":"no"}),
+        )
+        .unwrap_err();
+        assert!(owner_error.to_string().contains("does not belong"));
+
+        let contract_error =
+            mcp_complete(&context, json!({"invocation_id":"invocation-2"})).unwrap_err();
+        assert!(
+            format!("{contract_error:#}").contains("effect contract 'opinion' is not satisfied")
+        );
+
+        mcp_set_port(
+            &context,
+            json!({"invocation_id":"invocation-2", "port":"opinion", "value":"yes"}),
+        )
+        .unwrap();
+        mcp_complete(&context, json!({"invocation_id":"invocation-2"})).unwrap();
+        assert_eq!(
+            completion.recv_timeout(Duration::from_secs(1)).unwrap(),
+            BTreeMap::from([("opinion".into(), json!("yes"))])
+        );
+        server.registry.remove("invocation-2");
     }
 }

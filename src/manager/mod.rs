@@ -33,7 +33,8 @@ pub struct McpLaunchContext {
 pub struct TopologyMcpContext {
     pub team: String,
     pub agent: String,
-    pub runtime_dir: PathBuf,
+    pub endpoint: String,
+    pub token: String,
 }
 
 #[derive(Debug, Clone)]
