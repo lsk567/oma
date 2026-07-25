@@ -40,8 +40,8 @@ on:
         type: string
 
 concurrency:
-  group: topology-ci-test
-  cancel-in-progress: false
+  group: topology-ci-test-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
