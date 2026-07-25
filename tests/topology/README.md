@@ -16,6 +16,8 @@ Coverage:
 - `OrderedWrites.omar`: shared-effect ordering, optional writes, last writer wins.
 - `Recurrence.omar`: self-triggered action flow across logical microsteps.
 - `SameAgentSerial.omar`: same-agent serialization and same-tag fan-in.
+- `SuperdenseTime.omar`: `(timestamp, microstep)` tags, fixed action delay,
+  additive connection delay, and chronological delivery.
 - `HRCodex.omar`: the original hiring example using Codex for every role.
 
 To compile and verify one scenario without launching agents:

@@ -20,10 +20,12 @@ program     = "team", identifier, "(", agents, ")",
 agents      = [ agent, { ",", agent } ] ;
 agent       = identifier, ":", identifier ;
 
-declaration = input | output | action | prompt ;
+declaration = input | output | action | connection | prompt ;
 input       = "input", identifier, ":", type ;
 output      = "output", identifier, ":", type ;
-action      = "action", identifier, [ ":", type ] ;
+action      = "action", identifier, [ "(", "delay", "=", natural, ")" ],
+              [ ":", type ] ;
+connection  = identifier, "->", identifier, "after", natural ;
 
 prompt      = "prompt", identifier, "(", triggers, ")",
               "->", effects, prompt-string ;
@@ -37,6 +39,7 @@ atom        = identifier, [ "=", literal ] ;
 type        = "bool" | "int" | "float" | "string" | "path" | "bytes"
             | "list", "<", type, ">"
             | "option", "<", type, ">" ;
+natural     = digit, { digit } ;
 ```
 
 Identifiers are case-sensitive. `//` starts a line comment and `/* ... */`
@@ -48,6 +51,10 @@ delimits a block comment.
 - `output` is a typed externally observable result.
 - `action` is a typed internal port.
 - An action without a type is a signal carrying no value.
+- `action a(delay=2) : int` gives `a` a fixed logical delay of two timestamp
+  units.
+- `a -> b after 3` copies each value present on `a` to `b` with an additional
+  logical delay of three timestamp units.
 - `prompt agent(a, b)` declares a reaction on `agent` triggered when port `a`
   or port `b` is present. If both are present at the same tag, the reaction is
   invoked once with both values.
@@ -74,7 +81,8 @@ The expression after `->` declares the ports a reaction may set:
 - A bare untyped action emits a signal.
 
 Every trigger must be an input or action. Every effect must be an output or
-action. Values must match their port types.
+action. A connection target must be an output or action, and its source and
+target types must match. Values must match their port types.
 
 ## 3. Compiled topology
 
@@ -84,11 +92,13 @@ The compiler produces a canonical topology containing:
 team
 agents
 typed ports
+delayed port connections
 prompt reactions in declaration order
 ```
 
-There are no dedicated point-to-point channels. The runtime derives a
-port-to-reaction subscription index from reaction triggers.
+The runtime derives a port-to-reaction subscription index from reaction
+triggers. Explicit connections copy values between compatible ports without
+invoking an agent.
 
 Prompt declaration order is semantically significant. It orders reactions that
 may write the same port. Unrelated reactions remain unordered and may run in
@@ -110,12 +120,25 @@ a reaction is statically guaranteed to replace an earlier value.
 The runtime owns one global event queue ordered by logical tag:
 
 ```text
-tag = (logical_time, microstep)
+tag = (timestamp, microstep)
 event = (tag, flow, port, value)
 ```
 
-An external input creates an event. Effects produced at `(t, m)` are enqueued at
-`(t, m + 1)`: the same logical time, next microstep.
+Logical time is a nonnegative integer timestamp. External inputs begin at
+`(0, 0)`. Scheduling uses the following rules:
+
+- An effect written to a port without a fixed delay at `(t, m)` is enqueued at
+  `(t, m + 1)`.
+- An effect written to `action a(delay=D)` with `D > 0` is enqueued at
+  `(t + D, 0)`.
+- A connection `a -> b after X` schedules `b` with logical delay `X`.
+- If `b` is an action with fixed delay `D`, connection and action delays are
+  additive: `b` is scheduled at `(t + X + D, 0)`.
+- A total logical delay of zero schedules the value at `(t, m + 1)`.
+
+Thus, zero-delay causality advances the microstep while positive logical delay
+advances the timestamp and resets the microstep, matching LF-style superdense
+time.
 
 At each tag, the runtime:
 
@@ -125,7 +148,8 @@ At each tag, the runtime:
 4. builds an invocation dependency DAG;
 5. executes the DAG;
 6. waits for every invocation at the tag to complete; and
-7. atomically enqueues the resulting port values at the next microstep.
+7. atomically enqueues resulting effects and connected values at their
+   calculated superdense tags.
 
 The runtime advances only after the global tag barrier closes.
 
@@ -208,8 +232,10 @@ BEGIN_PLAN team
 SPAWN_AGENT name backend
 KILL_AGENT name
 
-DEFINE_PORT kind name type
+DEFINE_PORT kind name type [delay]
 REMOVE_PORT name
+
+CONNECT_PORTS source target delay
 
 INSTALL_REACTION id agent triggers effects contract prompt
 UPDATE_REACTION id triggers effects contract prompt
@@ -221,10 +247,18 @@ ABORT_PLAN reason
 ```
 
 The initial construction subset consists of `BEGIN_PLAN`, `SPAWN_AGENT`,
-`DEFINE_PORT`, `INSTALL_REACTION`, and `COMMIT_PLAN`. Mutation instructions are
-reserved for the next implementation stage.
+`DEFINE_PORT`, `CONNECT_PORTS`, `INSTALL_REACTION`, and `COMMIT_PLAN`. Mutation
+instructions are reserved for the next implementation stage.
 
 JSON instruction fields are emitted in deterministic order with `op` first.
+Port and connection fields are ordered:
+
+```text
+op, kind, name, type, delay
+op, source, target, delay
+```
+
+The port `delay` field is omitted when no fixed delay is declared.
 Reaction fields are ordered:
 
 ```text

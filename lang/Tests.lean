@@ -12,6 +12,7 @@ structure TopologyCase where
   team : String
   agents : Nat
   ports : Nat
+  connections : Nat := 0
   reactions : Nat
   instructions : Nat
   codexOnly : Bool := true
@@ -36,7 +37,9 @@ def topologyCases : Array TopologyCase := #[
   { file := "Recurrence.omar", team := "Recurrence", agents := 1, ports := 3,
     reactions := 1, instructions := 7 },
   { file := "SameAgentSerial.omar", team := "SameAgentSerial", agents := 2, ports := 4,
-    reactions := 3, instructions := 11 }
+    reactions := 3, instructions := 11 },
+  { file := "SuperdenseTime.omar", team := "SuperdenseTime", agents := 3, ports := 6,
+    connections := 1, reactions := 3, instructions := 15 }
 ]
 
 def testTopology (test : TopologyCase) : IO Unit := do
@@ -48,6 +51,7 @@ def testTopology (test : TopologyCase) : IO Unit := do
   assertEqual s!"{test.file} team" program.team test.team
   assertEqual s!"{test.file} agent count" program.agents.size test.agents
   assertEqual s!"{test.file} port count" program.ports.size test.ports
+  assertEqual s!"{test.file} connection count" program.connections.size test.connections
   assertEqual s!"{test.file} reaction count" program.reactions.size test.reactions
   if test.codexOnly then
     for agent in program.agents do
@@ -67,6 +71,16 @@ def testTopology (test : TopologyCase) : IO Unit := do
     assertEqual "list type" (program.ports.any (·.type == "list<int>")) true
     assertEqual "option type" (program.ports.any (·.type == "option<string>")) true
     assertEqual "nested type" (program.ports.any (·.type == "list<option<int>>")) true
+  if test.file == "SuperdenseTime.omar" then
+    assertEqual "fixed action delay"
+      (program.ports.any fun port => port.name == "fixed" && port.delay == some 2) true
+    assertEqual "connected action delay"
+      (program.ports.any fun port => port.name == "connected" && port.delay == some 1) true
+    assertEqual "connection delay"
+      (program.connections.any fun connection =>
+        connection.source == "immediate" &&
+        connection.target == "connected" &&
+        connection.delay == 3) true
   IO.println s!"{test.file} compiler test passed"
 
 def main : IO UInt32 := do

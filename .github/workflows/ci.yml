@@ -131,10 +131,13 @@ jobs:
           import json
           import os
 
-          field_rank = {"op": 0, "kind": 1, "name": 2, "type": 3, "backend": 4}
+          field_rank = {
+              "op": 0, "kind": 1, "name": 2, "type": 3, "delay": 4, "backend": 5
+          }
           reaction_order = [
               "op", "id", "agent", "triggers", "effects", "contract", "prompt"
           ]
+          connection_order = ["op", "source", "target", "delay"]
           bytecodes = glob.glob("/tmp/omar-topology-suite/*.json")
           assert bytecodes, "topology compiler produced no bytecode"
           for path in bytecodes:
@@ -145,6 +148,13 @@ jobs:
                   assert keys[0] == "op", (path, keys)
                   ranked = [field_rank[key] for key in keys if key in field_rank]
                   assert ranked == sorted(ranked), (path, keys)
+                  if instruction["op"] == "define_port":
+                      assert keys in (
+                          ["op", "kind", "name", "type"],
+                          ["op", "kind", "name", "type", "delay"],
+                      ), (path, keys)
+                  if instruction["op"] == "connect_ports":
+                      assert keys == connection_order, (path, keys)
                   if instruction["op"] == "install_reaction":
                       assert keys == reaction_order, (path, keys)
                   if os.path.basename(path) != "HR.json" and instruction["op"] == "spawn_agent":

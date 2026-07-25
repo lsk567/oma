@@ -220,6 +220,7 @@ run_case OrderedWrites OrderedWrites result \
 run_case Recurrence Recurrence result --input start=0
 run_case SameAgentSerial SameAgentSerial result \
   --input request='serialize these reactions'
+run_case SuperdenseTime SuperdenseTime fixed_result,connected_result --input start=7
 
 if ((passed_cases + failed_cases == 0)); then
   printf 'No topology case named %s\n' "$case_filter" >&2

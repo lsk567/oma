@@ -40,6 +40,13 @@ pub enum Instruction {
         kind: PortKind,
         #[serde(rename = "type")]
         ty: String,
+        #[serde(default)]
+        delay: Option<u64>,
+    },
+    ConnectPorts {
+        source: String,
+        target: String,
+        delay: u64,
     },
     InstallReaction {
         id: String,
@@ -70,6 +77,15 @@ pub struct PortState {
     pub kind: PortKind,
     #[serde(rename = "type")]
     pub ty: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionState {
+    pub source: String,
+    pub target: String,
+    pub delay: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +104,7 @@ pub struct VmState {
     pub team: String,
     pub agents: BTreeMap<String, AgentState>,
     pub ports: BTreeMap<String, PortState>,
+    pub connections: Vec<ConnectionState>,
     pub reactions: BTreeMap<String, ReactionState>,
     #[serde(skip)]
     pub executed_instructions: usize,
@@ -155,6 +172,7 @@ pub fn execute<R: AgentRuntime>(bytecode: &Bytecode, runtime: &mut R) -> Result<
             }
             Instruction::BeginPlan { .. }
             | Instruction::DefinePort { .. }
+            | Instruction::ConnectPorts { .. }
             | Instruction::InstallReaction { .. }
             | Instruction::CommitPlan => {}
         }
@@ -189,6 +207,7 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
         team: bytecode.team.clone(),
         agents: BTreeMap::new(),
         ports: BTreeMap::new(),
+        connections: Vec::new(),
         reactions: BTreeMap::new(),
         executed_instructions: 0,
     };
@@ -219,10 +238,18 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                     bail!("duplicate agent '{name}'");
                 }
             }
-            Instruction::DefinePort { name, kind, ty } => {
+            Instruction::DefinePort {
+                name,
+                kind,
+                ty,
+                delay,
+            } => {
                 require_identifier("port", name)?;
                 if ty.trim().is_empty() {
                     bail!("port '{name}' has an empty type");
+                }
+                if delay.is_some() && *kind != PortKind::Action {
+                    bail!("only action ports may declare a fixed delay");
                 }
                 if state
                     .ports
@@ -231,12 +258,45 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                         PortState {
                             kind: *kind,
                             ty: ty.clone(),
+                            delay: *delay,
                         },
                     )
                     .is_some()
                 {
                     bail!("duplicate port '{name}'");
                 }
+            }
+            Instruction::ConnectPorts {
+                source,
+                target,
+                delay,
+            } => {
+                let source_port = state
+                    .ports
+                    .get(source)
+                    .with_context(|| format!("connection references unknown source '{source}'"))?;
+                let target_port = state
+                    .ports
+                    .get(target)
+                    .with_context(|| format!("connection references unknown target '{target}'"))?;
+                if target_port.kind == PortKind::Input {
+                    bail!("connection cannot target input '{target}'");
+                }
+                if source_port.ty != target_port.ty {
+                    bail!("connection type mismatch from '{source}' to '{target}'");
+                }
+                if state
+                    .connections
+                    .iter()
+                    .any(|connection| connection.source == *source && connection.target == *target)
+                {
+                    bail!("duplicate connection from '{source}' to '{target}'");
+                }
+                state.connections.push(ConnectionState {
+                    source: source.clone(),
+                    target: target.clone(),
+                    delay: *delay,
+                });
             }
             Instruction::InstallReaction {
                 id,
@@ -910,19 +970,77 @@ fn parse_input_value(ty: &str, value: &str) -> Result<Value> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Tag {
+    timestamp: u64,
+    microstep: u64,
+}
+
+impl Tag {
+    const START: Self = Self {
+        timestamp: 0,
+        microstep: 0,
+    };
+
+    fn advance(self, delay: u64) -> Result<Self> {
+        if delay == 0 {
+            Ok(Self {
+                timestamp: self.timestamp,
+                microstep: self
+                    .microstep
+                    .checked_add(1)
+                    .context("logical microstep overflow")?,
+            })
+        } else {
+            Ok(Self {
+                timestamp: self
+                    .timestamp
+                    .checked_add(delay)
+                    .context("logical timestamp overflow")?,
+                microstep: 0,
+            })
+        }
+    }
+}
+
+fn enqueue_event(
+    state: &VmState,
+    queue: &mut BTreeMap<Tag, BTreeMap<String, Value>>,
+    current_tag: Tag,
+    port: &str,
+    value: Value,
+    additional_delay: u64,
+) -> Result<()> {
+    let fixed_delay = state
+        .ports
+        .get(port)
+        .with_context(|| format!("unknown scheduled port '{port}'"))?
+        .delay
+        .unwrap_or(0);
+    let total_delay = fixed_delay
+        .checked_add(additional_delay)
+        .context("logical delay overflow")?;
+    let destination_tag = current_tag.advance(total_delay)?;
+    queue
+        .entry(destination_tag)
+        .or_default()
+        .insert(port.to_string(), value);
+    Ok(())
+}
+
 fn run_event_loop<E: ReactionExecutor>(
     state: &VmState,
     inputs: BTreeMap<String, Value>,
     executor: &E,
 ) -> Result<BTreeMap<String, Value>> {
-    let mut queue = BTreeMap::from([(0u64, inputs)]);
+    let mut queue = BTreeMap::from([(Tag::START, inputs)]);
     let mut outputs = BTreeMap::new();
     let mut steps = 0usize;
 
     while let Some((tag, events)) = queue.pop_first() {
         steps += 1;
         if steps > 1024 {
-            bail!("topology exceeded 1024 microsteps");
+            bail!("topology exceeded 1024 logical tags");
         }
         for (name, value) in &events {
             if state
@@ -931,6 +1049,19 @@ fn run_event_loop<E: ReactionExecutor>(
                 .is_some_and(|p| p.kind == PortKind::Output)
             {
                 outputs.insert(name.clone(), value.clone());
+            }
+        }
+
+        for connection in &state.connections {
+            if let Some(value) = events.get(&connection.source) {
+                enqueue_event(
+                    state,
+                    &mut queue,
+                    tag,
+                    &connection.target,
+                    value.clone(),
+                    connection.delay,
+                )?;
             }
         }
 
@@ -976,14 +1107,10 @@ fn run_event_loop<E: ReactionExecutor>(
         }
 
         completed.sort_by_key(|(order, _)| *order);
-        let next = queue.entry(tag + 1).or_default();
         for (_, writes) in completed {
             for (port, value) in writes {
-                next.insert(port, value);
+                enqueue_event(state, &mut queue, tag, &port, value, 0)?;
             }
-        }
-        if next.is_empty() {
-            queue.remove(&(tag + 1));
         }
     }
     Ok(outputs)
@@ -1291,6 +1418,7 @@ mod tests {
                 ),
             ]),
             ports: BTreeMap::new(),
+            connections: Vec::new(),
             reactions: BTreeMap::new(),
             executed_instructions: 0,
         };
@@ -1307,6 +1435,7 @@ mod tests {
                 PortState {
                     kind,
                     ty: ty.into(),
+                    delay: None,
                 },
             );
         }
@@ -1377,6 +1506,101 @@ mod tests {
         assert_eq!(calls.last().map(String::as_str), Some("reaction.3"));
         assert!(calls[1..3].contains(&"reaction.1".to_string()));
         assert!(calls[1..3].contains(&"reaction.2".to_string()));
+    }
+
+    #[test]
+    fn superdense_tags_advance_microstep_or_timestamp() {
+        let tag = Tag {
+            timestamp: 10,
+            microstep: 7,
+        };
+        assert_eq!(
+            tag.advance(0).unwrap(),
+            Tag {
+                timestamp: 10,
+                microstep: 8
+            }
+        );
+        assert_eq!(
+            tag.advance(2).unwrap(),
+            Tag {
+                timestamp: 12,
+                microstep: 0
+            }
+        );
+    }
+
+    struct SuperdenseExecutor {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl ReactionExecutor for SuperdenseExecutor {
+        fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(invocation.reaction_id.clone());
+            let writes = match invocation.reaction_id.as_str() {
+                "reaction.0" => {
+                    BTreeMap::from([("immediate".into(), json!(7)), ("fixed".into(), json!(7))])
+                }
+                "reaction.1" => BTreeMap::from([("fixed_result".into(), json!(7))]),
+                "reaction.2" => BTreeMap::from([("connected_result".into(), json!(7))]),
+                other => panic!("unexpected reaction {other}"),
+            };
+            validate_contract(&invocation.contract, &writes)?;
+            Ok(writes)
+        }
+    }
+
+    #[test]
+    fn fixed_and_connection_delays_order_reactions_by_timestamp() {
+        let bytecode: Bytecode = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Superdense",
+              "instructions": [
+                {"op":"begin_plan","team":"Superdense"},
+                {"op":"spawn_agent","name":"producer","backend":"Codex"},
+                {"op":"spawn_agent","name":"fixed_consumer","backend":"Codex"},
+                {"op":"spawn_agent","name":"connected_consumer","backend":"Codex"},
+                {"op":"define_port","kind":"input","name":"start","type":"int"},
+                {"op":"define_port","kind":"output","name":"fixed_result","type":"int"},
+                {"op":"define_port","kind":"output","name":"connected_result","type":"int"},
+                {"op":"define_port","kind":"action","name":"immediate","type":"int"},
+                {"op":"define_port","kind":"action","name":"fixed","type":"int","delay":2},
+                {"op":"define_port","kind":"action","name":"connected","type":"int","delay":1},
+                {"op":"connect_ports","source":"immediate","target":"connected","delay":3},
+                {"op":"install_reaction","id":"reaction.0","agent":"producer","triggers":["start"],"effects":["immediate","fixed"],"contract":"immediate , fixed","prompt":"produce"},
+                {"op":"install_reaction","id":"reaction.1","agent":"fixed_consumer","triggers":["fixed"],"effects":["fixed_result"],"contract":"fixed_result","prompt":"fixed"},
+                {"op":"install_reaction","id":"reaction.2","agent":"connected_consumer","triggers":["connected"],"effects":["connected_result"],"contract":"connected_result","prompt":"connected"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let state = verify(&bytecode).unwrap();
+        let executor = SuperdenseExecutor {
+            calls: Mutex::new(Vec::new()),
+        };
+        let outputs = run_event_loop(
+            &state,
+            BTreeMap::from([("start".into(), json!(7))]),
+            &executor,
+        )
+        .unwrap();
+
+        assert_eq!(
+            outputs,
+            BTreeMap::from([
+                ("connected_result".into(), json!(7)),
+                ("fixed_result".into(), json!(7)),
+            ])
+        );
+        assert_eq!(
+            *executor.calls.lock().unwrap(),
+            vec!["reaction.0", "reaction.1", "reaction.2"]
+        );
     }
 
     struct OrTriggerExecutor {

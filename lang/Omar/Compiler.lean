@@ -6,6 +6,7 @@ namespace Omar
 
 inductive Token where
   | word : String -> Token
+  | nat : Nat -> Token
   | text : String -> Token
   | sym : String -> Token
   deriving Repr, BEq
@@ -54,6 +55,12 @@ private partial def lexChars : List Char -> Except String (List Token)
       else if isWordStart c then
         let (suffix, tail) := takeWhile isWordRest rest
         do pure (Token.word (String.ofList (c :: suffix)) :: (← lexChars tail))
+      else if c.isDigit then
+        let (suffix, tail) := takeWhile (·.isDigit) rest
+        let value := String.ofList (c :: suffix)
+        match value.toNat? with
+        | some value => do pure (Token.nat value :: (← lexChars tail))
+        | none => throw s!"invalid natural number '{value}'"
       else if "(),:{}?|=<>".contains c then
         do pure (Token.sym c.toString :: (← lexChars rest))
       else
@@ -74,6 +81,13 @@ structure Port where
   name : String
   kind : PortKind
   type : String
+  delay : Option Nat := none
+  deriving Repr
+
+structure Connection where
+  source : String
+  target : String
+  delay : Nat
   deriving Repr
 
 structure Reaction where
@@ -89,6 +103,7 @@ structure Program where
   team : String
   agents : Array Agent
   ports : Array Port
+  connections : Array Connection
   reactions : Array Reaction
   deriving Repr
 
@@ -109,6 +124,10 @@ private def expectSym (expected : String) : Parser Unit
       if actual == expected then pure ((), rest)
       else throw s!"expected '{expected}', found '{actual}'"
   | tokens => throw s!"expected '{expected}', found {reprStr tokens.head?}"
+
+private def natural : Parser Nat
+  | Token.nat value :: rest => pure (value, rest)
+  | tokens => throw s!"expected natural number, found {reprStr tokens.head?}"
 
 private partial def parseType : Parser String
   | Token.word "bool" :: rest => pure ("bool", rest)
@@ -147,6 +166,7 @@ private def kindName : PortKind -> String
 
 private def tokenSource : Token -> String
   | .word value => value
+  | .nat value => toString value
   | .sym value => value
   | .text _ => "<prompt>"
 
@@ -181,30 +201,44 @@ private partial def parseDependencies (acc : Array String) : Parser (Array Strin
       | Token.sym ")" :: rest => pure (acc.push name, rest)
       | _ => throw "expected ',' or ')' in prompt dependencies"
 
+private def parseActionDelay : Parser (Option Nat)
+  | Token.sym "(" :: Token.word "delay" :: Token.sym "=" :: rest => do
+      let (delay, rest) ← natural rest
+      let (_, rest) ← expectSym ")" rest
+      pure (some delay, rest)
+  | tokens => pure (none, tokens)
+
 private partial def parseDeclarations
     (reactionIndex : Nat)
     (ports : Array Port)
+    (connections : Array Connection)
     (reactions : Array Reaction) :
-    List Token -> Except String (Array Port × Array Reaction × List Token)
-  | Token.sym "}" :: rest => pure (ports, reactions, rest)
+    List Token -> Except String (Array Port × Array Connection × Array Reaction × List Token)
+  | Token.sym "}" :: rest => pure (ports, connections, reactions, rest)
   | Token.word "input" :: rest => do
       let (name, rest) ← word rest
       let (_, rest) ← expectSym ":" rest
       let (type, rest) ← parseType rest
-      parseDeclarations reactionIndex (ports.push { name, kind := .input, type }) reactions rest
+      parseDeclarations reactionIndex (ports.push { name, kind := .input, type }) connections reactions rest
   | Token.word "output" :: rest => do
       let (name, rest) ← word rest
       let (_, rest) ← expectSym ":" rest
       let (type, rest) ← parseType rest
-      parseDeclarations reactionIndex (ports.push { name, kind := .output, type }) reactions rest
+      parseDeclarations reactionIndex (ports.push { name, kind := .output, type }) connections reactions rest
   | Token.word "action" :: rest => do
       let (name, rest) ← word rest
+      let (delay, rest) ← parseActionDelay rest
       match rest with
       | Token.sym ":" :: tail =>
           let (type, tail) ← parseType tail
-          parseDeclarations reactionIndex (ports.push { name, kind := .action, type }) reactions tail
+          parseDeclarations reactionIndex (ports.push { name, kind := .action, type, delay }) connections reactions tail
       | _ =>
-          parseDeclarations reactionIndex (ports.push { name, kind := .action, type := "signal" }) reactions rest
+          parseDeclarations reactionIndex (ports.push { name, kind := .action, type := "signal", delay }) connections reactions rest
+  | Token.word source :: Token.sym "->" :: rest => do
+      let (target, rest) ← word rest
+      let (_, rest) ← expectWord "after" rest
+      let (delay, rest) ← natural rest
+      parseDeclarations reactionIndex ports (connections.push { source, target, delay }) reactions rest
   | Token.word "prompt" :: rest => do
       let (agent, rest) ← word rest
       let (_, rest) ← expectSym "(" rest
@@ -217,7 +251,7 @@ private partial def parseDeclarations
         id := s!"reaction.{reactionIndex}"
         agent, triggers, effects, contract, prompt
       }
-      parseDeclarations (reactionIndex + 1) ports (reactions.push reaction) rest
+      parseDeclarations (reactionIndex + 1) ports connections (reactions.push reaction) rest
   | token :: _ => throw s!"unexpected token in team body: {reprStr token}"
   | [] => throw "unterminated team body"
 
@@ -235,8 +269,11 @@ private def ensureUnique (kind : String) (names : Array String) : Except String 
 private def validate (program : Program) : Except String Program := do
   let agentNames := program.agents.map (·.name)
   let portNames := program.ports.map (·.name)
+  let connectionNames := program.connections.map fun connection =>
+    s!"{connection.source}->{connection.target}"
   ensureUnique "agent" agentNames
   ensureUnique "port" portNames
+  ensureUnique "connection" connectionNames
   for reaction in program.reactions do
     if !containsName agentNames reaction.agent then
       throw s!"reaction names unknown agent '{reaction.agent}'"
@@ -248,6 +285,17 @@ private def validate (program : Program) : Except String Program := do
       let valid := program.ports.any fun port =>
         port.name == effect && port.kind != .input
       if !valid then throw s!"unknown output/action production '{effect}'"
+  for connection in program.connections do
+    let source ← match program.ports.find? (·.name == connection.source) with
+      | some port => pure port
+      | none => throw s!"connection names unknown source port '{connection.source}'"
+    let target ← match program.ports.find? (·.name == connection.target) with
+      | some port => pure port
+      | none => throw s!"connection names unknown target port '{connection.target}'"
+    if target.kind == .input then
+      throw s!"connection cannot target input port '{connection.target}'"
+    if source.type != target.type then
+      throw s!"connection type mismatch from '{connection.source}' to '{connection.target}'"
   pure program
 
 def parse (tokens : List Token) : Except String Program := do
@@ -257,9 +305,9 @@ def parse (tokens : List Token) : Except String Program := do
   let (agents, tokens) ← parseAgents tokens
   let (_, tokens) ← expectSym ")" tokens
   let (_, tokens) ← expectSym "{" tokens
-  let (ports, reactions, tokens) ← parseDeclarations 0 #[] #[] tokens
+  let (ports, connections, reactions, tokens) ← parseDeclarations 0 #[] #[] #[] tokens
   if !tokens.isEmpty then throw s!"unexpected tokens after team: {reprStr tokens.head?}"
-  validate { team, agents, ports, reactions }
+  validate { team, agents, ports, connections, reactions }
 
 private def jsonStringArray (values : Array String) : Json :=
   Json.arr (values.map toJson)
@@ -278,10 +326,19 @@ def compile (program : Program) : String :=
       ("backend", toJson agent.backend)
     ]
   let ports := program.ports.map fun port =>
-    instruction "define_port" [
+    let fields := [
       ("kind", toJson (kindName port.kind)),
       ("name", toJson port.name),
       ("type", toJson port.type)
+    ] ++ match port.delay with
+      | some delay => [("delay", toJson delay)]
+      | none => []
+    instruction "define_port" fields
+  let connections := program.connections.map fun connection =>
+    instruction "connect_ports" [
+      ("source", toJson connection.source),
+      ("target", toJson connection.target),
+      ("delay", toJson connection.delay)
     ]
   let reactions := program.reactions.map fun reaction =>
     instruction "install_reaction" [
@@ -293,7 +350,7 @@ def compile (program : Program) : String :=
       ("prompt", toJson reaction.prompt)
     ]
   let commit := instruction "commit_plan"
-  let instructions := #[begin] ++ agents ++ ports ++ reactions ++ #[commit]
+  let instructions := #[begin] ++ agents ++ ports ++ connections ++ reactions ++ #[commit]
   let rendered := String.intercalate ",\n    " instructions.toList
   "{\n  \"version\": 1,\n  \"team\": " ++ (toJson program.team).compress ++
     ",\n  \"instructions\": [\n    " ++ rendered ++ "\n  ]\n}\n"
