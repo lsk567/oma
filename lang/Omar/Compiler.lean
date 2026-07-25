@@ -54,7 +54,7 @@ private partial def lexChars : List Char -> Except String (List Token)
       else if isWordStart c then
         let (suffix, tail) := takeWhile isWordRest rest
         do pure (Token.word (String.ofList (c :: suffix)) :: (← lexChars tail))
-      else if "(),:{}?|=".contains c then
+      else if "(),:{}?|=<>".contains c then
         do pure (Token.sym c.toString :: (← lexChars rest))
       else
         throw s!"unexpected character '{c}'"
@@ -109,6 +109,22 @@ private def expectSym (expected : String) : Parser Unit
       if actual == expected then pure ((), rest)
       else throw s!"expected '{expected}', found '{actual}'"
   | tokens => throw s!"expected '{expected}', found {reprStr tokens.head?}"
+
+private partial def parseType : Parser String
+  | Token.word "bool" :: rest => pure ("bool", rest)
+  | Token.word "int" :: rest => pure ("int", rest)
+  | Token.word "float" :: rest => pure ("float", rest)
+  | Token.word "string" :: rest => pure ("string", rest)
+  | Token.word "path" :: rest => pure ("path", rest)
+  | Token.word "bytes" :: rest => pure ("bytes", rest)
+  | Token.word outer :: Token.sym "<" :: rest => do
+      if outer != "list" && outer != "option" then
+        throw s!"unknown generic type '{outer}'"
+      let (inner, rest) ← parseType rest
+      let (_, rest) ← expectSym ">" rest
+      pure (s!"{outer}<{inner}>", rest)
+  | Token.word value :: _ => throw s!"unknown port type '{value}'"
+  | tokens => throw s!"expected port type, found {reprStr tokens.head?}"
 
 private partial def parseAgents (tokens : List Token) : Except String (Array Agent × List Token) := do
   match tokens with
@@ -174,18 +190,18 @@ private partial def parseDeclarations
   | Token.word "input" :: rest => do
       let (name, rest) ← word rest
       let (_, rest) ← expectSym ":" rest
-      let (type, rest) ← word rest
+      let (type, rest) ← parseType rest
       parseDeclarations reactionIndex (ports.push { name, kind := .input, type }) reactions rest
   | Token.word "output" :: rest => do
       let (name, rest) ← word rest
       let (_, rest) ← expectSym ":" rest
-      let (type, rest) ← word rest
+      let (type, rest) ← parseType rest
       parseDeclarations reactionIndex (ports.push { name, kind := .output, type }) reactions rest
   | Token.word "action" :: rest => do
       let (name, rest) ← word rest
       match rest with
       | Token.sym ":" :: tail =>
-          let (type, tail) ← word tail
+          let (type, tail) ← parseType tail
           parseDeclarations reactionIndex (ports.push { name, kind := .action, type }) reactions tail
       | _ =>
           parseDeclarations reactionIndex (ports.push { name, kind := .action, type := "signal" }) reactions rest
