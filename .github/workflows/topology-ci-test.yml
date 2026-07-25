@@ -107,6 +107,7 @@ jobs:
           claude_state_path = Path.home() / ".claude.json"
           claude_state = {
               "hasCompletedOnboarding": True,
+              "bypassPermissionsModeAccepted": True,
               "projects": {
                   os.environ["GITHUB_WORKSPACE"]: {
                       "hasTrustDialogAccepted": True,
