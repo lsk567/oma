@@ -276,7 +276,7 @@ private def validate (program : Program) : Except String Program := do
   ensureUnique "connection" connectionNames
   for reaction in program.reactions do
     if !containsName agentNames reaction.agent then
-      throw s!"reaction names unknown agent '{reaction.agent}'"
+      throw s!"reaction references unknown agent '{reaction.agent}'"
     for trigger in reaction.triggers do
       let valid := program.ports.any fun port =>
         port.name == trigger && port.kind != .output

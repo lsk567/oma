@@ -194,7 +194,7 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
     match bytecode.instructions.first() {
         Some(Instruction::BeginPlan { team }) if team == &bytecode.team => {}
         Some(Instruction::BeginPlan { team }) => {
-            bail!("plan team '{team}' does not match '{}';", bytecode.team)
+            bail!("plan team '{team}' does not match '{}'", bytecode.team)
         }
         _ => bail!("bytecode must begin with begin_plan"),
     }
@@ -611,7 +611,7 @@ fn send_invocation_command(
     }
 }
 
-fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
+pub(crate) fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(".{}.tmp", Uuid::new_v4()));
@@ -642,22 +642,43 @@ fn validate_invocation_owner(team: &str, agent: &str, invocation: &InvocationRec
 }
 
 fn validate_value(ty: &str, value: &Value) -> Result<()> {
+    if let Some(inner) = generic_inner(ty, "list") {
+        let values = value
+            .as_array()
+            .with_context(|| format!("expected {ty}, got {value}"))?;
+        for (index, item) in values.iter().enumerate() {
+            validate_value(inner, item)
+                .with_context(|| format!("invalid element {index} of {ty}"))?;
+        }
+        return Ok(());
+    }
+    if let Some(inner) = generic_inner(ty, "option") {
+        return if value.is_null() {
+            Ok(())
+        } else {
+            validate_value(inner, value).with_context(|| format!("invalid value for {ty}"))
+        };
+    }
+
     let valid = match ty {
         "signal" => value.is_null(),
         "bool" => value.is_boolean(),
         "int" => value.as_i64().is_some(),
         "float" => value.as_f64().is_some(),
-        "string" | "path" => value.is_string(),
-        "bytes" => value.is_string(),
-        other if other.starts_with("list<") => value.is_array(),
-        other if other.starts_with("option<") => true,
+        "string" | "path" | "bytes" => value.is_string(),
         _ => false,
     };
-    if valid {
-        Ok(())
-    } else {
-        bail!("expected {ty}, got {value}")
+    if !valid {
+        bail!("expected {ty}, got {value}");
     }
+    Ok(())
+}
+
+fn generic_inner<'a>(ty: &'a str, outer: &str) -> Option<&'a str> {
+    ty.strip_prefix(outer)?
+        .strip_prefix('<')?
+        .strip_suffix('>')
+        .filter(|inner| !inner.is_empty())
 }
 
 #[derive(Debug)]
@@ -735,7 +756,20 @@ fn parse_literal(value: &str) -> Result<Value> {
 }
 
 fn validate_contract(contract: &str, writes: &BTreeMap<String, Value>) -> Result<()> {
-    for group in parse_contract(contract)? {
+    let groups = parse_contract(contract)?;
+    let contract_ports: BTreeSet<_> = groups
+        .iter()
+        .flat_map(|group| group.alternatives.iter())
+        .map(|(port, _)| port.as_str())
+        .collect();
+    if let Some(port) = writes
+        .keys()
+        .find(|port| !contract_ports.contains(port.as_str()))
+    {
+        bail!("effect '{port}' is not permitted by contract '{contract}'");
+    }
+
+    for group in groups {
         let present: Vec<_> = group
             .alternatives
             .iter()
@@ -1345,6 +1379,40 @@ mod tests {
         let mut runtime = DryRunAgentRuntime::default();
         assert!(execute(&program, &mut runtime).is_err());
         assert!(runtime.spawns.is_empty());
+    }
+
+    #[test]
+    fn validates_nested_list_and_option_values_recursively() {
+        validate_value("list<option<int>>", &json!([1, null, 2])).unwrap();
+        validate_value("option<list<bool>>", &Value::Null).unwrap();
+        validate_value("option<list<bool>>", &json!([true, false])).unwrap();
+
+        assert!(validate_value("list<option<int>>", &json!([1, "two"])).is_err());
+        assert!(validate_value("option<int>", &json!("one")).is_err());
+        assert!(validate_value("list<int>", &json!("not a list")).is_err());
+    }
+
+    #[test]
+    fn effect_contract_rejects_writes_to_unmentioned_ports() {
+        let writes = BTreeMap::from([
+            ("declared".to_string(), json!(true)),
+            ("omitted".to_string(), json!(true)),
+        ]);
+        let error = validate_contract("declared", &writes).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("effect 'omitted' is not permitted"));
+    }
+
+    #[test]
+    fn atomic_json_write_replaces_complete_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        write_json_atomic(&path, &json!({"revision": 1})).unwrap();
+        write_json_atomic(&path, &json!({"revision": 2, "ready": true})).unwrap();
+
+        let stored: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(stored, json!({"revision": 2, "ready": true}));
     }
 
     struct HrExecutor {

@@ -469,7 +469,7 @@ fn apply_topology(
         let topology_dir = ea::ea_state_dir(target.id, omar_dir).join("topologies");
         std::fs::create_dir_all(&topology_dir)?;
         let state_path = topology_dir.join(format!("{}.json", state.team));
-        std::fs::write(&state_path, serde_json::to_vec_pretty(&state)?)?;
+        topology::write_json_atomic(&state_path, &state)?;
         println!("Installed topology state: {}", state_path.display());
     }
     Ok(())
