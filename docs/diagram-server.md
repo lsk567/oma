@@ -8,7 +8,7 @@ It does not inspect or reconstruct the legacy tmux agent hierarchy.
 Start it with a topology run:
 
 ```bash
-omar topology run workflow.json \
+omar topology run workflow.omar \
   --input request='"Review this change"' \
   --diagram-server
 ```

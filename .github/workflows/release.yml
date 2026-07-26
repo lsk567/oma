@@ -30,7 +30,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             suffix: darwin-arm64
-          - os: macos-latest
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             suffix: darwin-amd64
     runs-on: ${{ matrix.os }}
@@ -42,6 +42,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Build OMAR compiler
+        uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: lang
+          auto-config: false
+          build: true
+          build-args: omarc
+          test: false
+
       - name: Install tmux (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y tmux
@@ -49,12 +58,20 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Verify direct source execution
+        env:
+          OMARC_BIN: ${{ github.workspace }}/lang/.lake/build/bin/omarc
+        run: |
+          target/${{ matrix.target }}/release/omar topology apply \
+            tests/topology/src/FanOutFanIn.omar --dry-run
+
       - name: Package
         run: |
           mkdir omar-${{ matrix.suffix }}
           cp target/${{ matrix.target }}/release/omar \
              target/${{ matrix.target }}/release/omar-slack \
              target/${{ matrix.target }}/release/omar-computer \
+             lang/.lake/build/bin/omarc \
              omar-${{ matrix.suffix }}/
           tar czf omar-${{ matrix.suffix }}.tar.gz omar-${{ matrix.suffix }}/
 
@@ -126,6 +143,11 @@ jobs:
                   r'(omar-' + re.escape(platform) + r'\.tar\.gz\"\n\s+sha256 \").*?(\")',
                   r'\g<1>' + sha + r'\2',
                   content
+              )
+          if 'bin.install \"omarc\"' not in content:
+              content = content.replace(
+                  '    bin.install \"omar\"',
+                  '    bin.install \"omar\"\\n    bin.install \"omarc\"'
               )
           with open('Formula/omar.rb', 'w') as f:
               f.write(content)

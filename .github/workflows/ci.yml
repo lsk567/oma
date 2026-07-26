@@ -124,6 +124,13 @@ jobs:
             lake exe omarc "$source" "/tmp/omar-topology-suite/$name.json"
           done
 
+      - name: Verify direct OMAR source execution
+        env:
+          OMARC_BIN: ${{ github.workspace }}/lang/.lake/build/bin/omarc
+        run: |
+          cargo run --quiet --bin omar -- topology apply \
+            tests/topology/src/FanOutFanIn.omar --dry-run
+
       - name: Check bytecode layout and Codex-only test agents
         run: |
           python3 - <<'PY'

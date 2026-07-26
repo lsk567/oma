@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -162,6 +163,82 @@ pub fn load_bytecode(path: &std::path::Path) -> Result<Bytecode> {
         .with_context(|| format!("failed to read bytecode {}", path.display()))?;
     serde_json::from_slice(&bytes)
         .with_context(|| format!("invalid bytecode JSON in {}", path.display()))
+}
+
+/// Load either an OMAR source program or previously compiled JSON bytecode.
+///
+/// Source programs are compiled into a process-scoped temporary file using
+/// `omarc`. Installed builds find the compiler beside the `omar` executable or
+/// on `PATH`; development builds also recognize the compiler built under
+/// `lang/.lake`.
+pub fn load_program(path: &Path) -> Result<Bytecode> {
+    load_program_with_compiler(path, None)
+}
+
+fn load_program_with_compiler(path: &Path, compiler: Option<&Path>) -> Result<Bytecode> {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("omar") {
+        return load_bytecode(path);
+    }
+
+    compile_source(path, compiler)
+}
+
+fn compile_source(source: &Path, compiler: Option<&Path>) -> Result<Bytecode> {
+    let output_file = crate::paths::create_private_temp_file("omar-compile", "json")
+        .context("failed to create temporary bytecode file")?;
+    let output_path = output_file.path();
+    let compiler = compiler
+        .map(Path::to_path_buf)
+        .unwrap_or_else(resolve_omarc);
+
+    let output = Command::new(&compiler)
+        .arg(source)
+        .arg(output_path)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to invoke OMAR compiler '{}'; install omarc beside omar, \
+                 add it to PATH, or set OMARC_BIN",
+                compiler.display()
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let details = if stderr.is_empty() { stdout } else { stderr };
+        if details.is_empty() {
+            bail!("omarc failed with status {}", output.status);
+        }
+        bail!("omarc failed: {details}");
+    }
+
+    load_bytecode(output_path)
+        .with_context(|| format!("omarc failed to compile {}", source.display()))
+}
+
+fn resolve_omarc() -> PathBuf {
+    if let Some(path) = std::env::var_os("OMARC_BIN") {
+        return PathBuf::from(path);
+    }
+
+    let executable_name = format!("omarc{}", std::env::consts::EXE_SUFFIX);
+    if let Ok(current_executable) = std::env::current_exe() {
+        if let Some(directory) = current_executable.parent() {
+            let sibling = directory.join(&executable_name);
+            if sibling.is_file() {
+                return sibling;
+            }
+        }
+    }
+
+    let development_compiler = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("lang/.lake/build/bin")
+        .join(&executable_name);
+    if development_compiler.is_file() {
+        return development_compiler;
+    }
+
+    PathBuf::from(executable_name)
 }
 
 pub fn execute<R: AgentRuntime>(bytecode: &Bytecode, runtime: &mut R) -> Result<VmState> {
@@ -1412,6 +1489,37 @@ mod tests {
             }"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn loads_compiled_json_without_invoking_omarc() {
+        let directory = tempfile::tempdir().unwrap();
+        let bytecode_path = directory.path().join("workflow.json");
+        fs::write(&bytecode_path, serde_json::to_vec(&program()).unwrap()).unwrap();
+
+        let loaded =
+            load_program_with_compiler(&bytecode_path, Some(Path::new("missing-omarc"))).unwrap();
+
+        assert_eq!(loaded.team, "Demo");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compiles_omar_source_before_loading_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("workflow.omar");
+        fs::write(&source_path, serde_json::to_vec(&program()).unwrap()).unwrap();
+        let compiler_path = directory.path().join("omarc");
+        fs::write(&compiler_path, "#!/bin/sh\ncp \"$1\" \"$2\"\n").unwrap();
+        let mut permissions = fs::metadata(&compiler_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&compiler_path, permissions).unwrap();
+
+        let loaded = load_program_with_compiler(&source_path, Some(&compiler_path)).unwrap();
+
+        assert_eq!(loaded.team, "Demo");
     }
 
     #[test]

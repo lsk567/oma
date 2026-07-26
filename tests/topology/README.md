@@ -24,16 +24,13 @@ Coverage:
 To compile and verify one scenario without launching agents:
 
 ```sh
-cd lang
-lake exe omarc ../tests/topology/src/FanOutFanIn.omar /tmp/FanOutFanIn.json
-cd ..
-cargo run -- topology apply /tmp/FanOutFanIn.json --dry-run
+cargo run -- topology apply tests/topology/src/FanOutFanIn.omar --dry-run
 ```
 
-To execute it with live agents, replace the final command with
-`omar topology run`, provide every declared input, and use `--replace` when
-reusing agent names. Live execution requires every backend declared by that
-topology to be installed and authenticated.
+To execute it with live agents, use `omar topology run` with the `.omar` source,
+provide every declared input, and use `--replace` when reusing agent names.
+OMAR invokes `omarc` internally. Live execution requires every backend declared
+by that topology to be installed and authenticated.
 
 To compile and execute the complete corpus with representative inputs and local
 agents:

@@ -4,13 +4,11 @@ set -uo pipefail
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/../.." && pwd)
 source_dir="$script_dir/src"
-bytecode_dir="$repo_root/target/topology-tests/bytecode"
 results_dir=${OMAR_TEST_RESULTS_DIR:-"$repo_root/target/topology-tests"}
 case_timeout=${OMAR_TEST_CASE_TIMEOUT_SECONDS:-900}
 invocation_timeout=${OMAR_TEST_INVOCATION_TIMEOUT_SECONDS:-300}
 case_filter=${OMAR_TEST_CASE:-}
 fixture="$script_dir/README.md"
-compiler="$repo_root/lang/.lake/build/bin/omarc"
 omar="$repo_root/target/debug/omar"
 summary="$results_dir/results.tsv"
 
@@ -21,7 +19,7 @@ failed_checks=0
 skipped_checks=0
 started_at=$SECONDS
 
-mkdir -p "$bytecode_dir" "$results_dir"
+mkdir -p "$results_dir"
 printf 'status\tcase\tseconds\tpassed\tfailed\tskipped\treason\tlog\n' >"$summary"
 
 verdict() {
@@ -83,14 +81,27 @@ peek_agents = os.environ.get("OMAR_TEST_PEEK_AGENTS", "").lower() in {
 agent_names = set()
 if peek_agents:
     try:
-        bytecode_path = command[command.index("run") + 1]
-        with open(bytecode_path, encoding="utf-8") as bytecode_file:
-            bytecode = json.load(bytecode_file)
-        agent_names = {
-            instruction["name"]
-            for instruction in bytecode["instructions"]
-            if instruction["op"] == "spawn_agent"
-        }
+        program_path = command[command.index("run") + 1]
+        if program_path.endswith(".omar"):
+            with open(program_path, encoding="utf-8") as source_file:
+                source = source_file.read()
+            agent_names = {
+                match.group(1)
+                for match in re.finditer(
+                    r"\b([A-Za-z_][A-Za-z0-9_]*)\s*:\s*"
+                    r"(?:Codex|Claude|ClaudeCode|OpenCode|Cursor|Agy)\b",
+                    source,
+                    re.IGNORECASE,
+                )
+            }
+        else:
+            with open(program_path, encoding="utf-8") as bytecode_file:
+                bytecode = json.load(bytecode_file)
+            agent_names = {
+                instruction["name"]
+                for instruction in bytecode["instructions"]
+                if instruction["op"] == "spawn_agent"
+            }
     except (OSError, ValueError, KeyError, json.JSONDecodeError):
         pass
 
@@ -176,7 +187,6 @@ run_case() {
   fi
 
   local source="$source_dir/$name.omar"
-  local bytecode="$bytecode_dir/$name.json"
   local log="$results_dir/$name.log"
   local case_started=$SECONDS
   local case_passed=0
@@ -191,8 +201,8 @@ run_case() {
   total_checks=$((3 + ${#expected_outputs[@]}))
   : >"$log"
 
-  printf '\n[%s] compiling\n' "$name"
-  if "$compiler" "$source" "$bytecode" >>"$log" 2>&1; then
+  printf '\n[%s] compiling and verifying through OMAR\n' "$name"
+  if "$omar" topology apply "$source" --dry-run >>"$log" 2>&1; then
     case_passed=$((case_passed + 1))
   else
     status=FAIL
@@ -204,7 +214,7 @@ run_case() {
   if [[ $status == PASS ]]; then
     printf '[%s] running with local agents\n' "$name"
     if run_with_timeout "$case_timeout" "$log" "$name" \
-      "$omar" topology run "$bytecode" --replace \
+      "$omar" topology run "$source" --replace \
       --timeout-seconds "$invocation_timeout" "$@"; then
       case_passed=$((case_passed + 1))
     else

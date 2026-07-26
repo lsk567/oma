@@ -226,6 +226,12 @@ An active invocation finishes against the topology revision on which it began.
 Bytecode describes topology lifecycle. Runtime event coordination is not
 encoded as bytecode instructions.
 
+The `omar topology apply` and `omar topology run` entry points accept either a
+`.omar` source program or precompiled JSON bytecode. For source input, the
+runtime invokes `omarc`, loads and verifies its temporary bytecode output, then
+removes that output. Precompiled JSON remains a compatibility and tooling
+boundary rather than a required user-facing step.
+
 ```text
 BEGIN_PLAN team
 

@@ -136,7 +136,7 @@ enum Commands {
         context_file: Option<String>,
     },
 
-    /// Construct an agent topology from compiled OMAR bytecode
+    /// Construct and run an OMAR agent topology
     Topology {
         #[command(subcommand)]
         action: TopologyAction,
@@ -147,8 +147,8 @@ enum Commands {
 enum TopologyAction {
     /// Verify and apply an initial topology
     Apply {
-        /// JSON bytecode produced by the Lean compiler
-        bytecode: PathBuf,
+        /// OMAR source (.omar) or compiled JSON bytecode
+        program: PathBuf,
 
         /// Verify and print operations without spawning agents
         #[arg(long)]
@@ -157,8 +157,8 @@ enum TopologyAction {
 
     /// Start a topology and run it to completion
     Run {
-        /// JSON bytecode produced by the Lean compiler
-        bytecode: PathBuf,
+        /// OMAR source (.omar) or compiled JSON bytecode
+        program: PathBuf,
 
         /// External input in NAME=VALUE form; repeat for multiple inputs
         #[arg(long = "input", required = true)]
@@ -379,12 +379,12 @@ async fn async_main() -> Result<()> {
             None => mcp::run_server_with_default_context(),
         },
         Some(Commands::Topology { action }) => match action {
-            TopologyAction::Apply { bytecode, dry_run } => {
+            TopologyAction::Apply { program, dry_run } => {
                 let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
-                apply_topology(&bytecode, dry_run, &target, &config, &omar_dir)
+                apply_topology(&program, dry_run, &target, &config, &omar_dir)
             }
             TopologyAction::Run {
-                bytecode,
+                program,
                 inputs,
                 replace,
                 timeout_seconds,
@@ -392,7 +392,7 @@ async fn async_main() -> Result<()> {
                 diagram_address,
             } => {
                 let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
-                let bytecode = topology::load_bytecode(&bytecode)?;
+                let bytecode = topology::load_program(&program)?;
                 topology::run_topology(
                     &bytecode,
                     topology::TopologyRunConfig {
@@ -452,13 +452,13 @@ async fn async_main() -> Result<()> {
 }
 
 fn apply_topology(
-    bytecode_path: &std::path::Path,
+    program_path: &std::path::Path,
     dry_run: bool,
     target: &ea::EaInfo,
     config: &Config,
     omar_dir: &std::path::Path,
 ) -> Result<()> {
-    let bytecode = topology::load_bytecode(bytecode_path)?;
+    let bytecode = topology::load_program(program_path)?;
     let state = if dry_run {
         topology::execute(&bytecode, &mut topology::DryRunAgentRuntime::default())?
     } else {
