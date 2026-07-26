@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::config;
+use crate::diagram::{DiagramServer, NoopTopologyObserver, TopologyObserver};
 use crate::manager::{self, McpLaunchContext, TopologyMcpContext};
 use crate::tmux::DeliveryOptions;
 use crate::tmux::TmuxClient;
@@ -870,6 +871,7 @@ pub struct TopologyRunConfig<'a> {
     pub inputs: &'a [String],
     pub replace: bool,
     pub timeout: Duration,
+    pub diagram_address: Option<std::net::SocketAddr>,
 }
 
 pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Result<()> {
@@ -882,6 +884,21 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
     if obsolete_invocations.exists() {
         fs::remove_dir_all(&obsolete_invocations)?;
     }
+    let diagram_server = config
+        .diagram_address
+        .map(|address| DiagramServer::start(&state, address))
+        .transpose()?;
+    if let Some(server) = &diagram_server {
+        println!("Diagram server: http://{}", server.address());
+    }
+    let diagram_publisher = diagram_server.as_ref().map(DiagramServer::publisher);
+    let noop_observer = NoopTopologyObserver;
+    let observer: &dyn TopologyObserver = diagram_publisher
+        .as_ref()
+        .map(|publisher| publisher as &dyn TopologyObserver)
+        .unwrap_or(&noop_observer);
+    observer.run_started();
+
     let invocation_server = InvocationServer::start()?;
     let client = TmuxClient::new(crate::ea::ea_prefix(config.ea_id, config.base_prefix));
     spawn_topology_agents(&state, &client, &runtime_dir, &invocation_server, &config)?;
@@ -892,7 +909,14 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
         registry: invocation_server.registry.clone(),
         timeout: config.timeout,
     };
-    let outputs = run_event_loop(&state, inputs, &executor)?;
+    let outputs = match run_event_loop_observed(&state, inputs, &executor, observer) {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            observer.run_failed(&error.to_string());
+            return Err(error);
+        }
+    };
+    observer.run_completed(&outputs);
     write_json_atomic(&runtime_dir.join("state.json"), &state)?;
     println!("Topology '{}' completed", state.team);
     for (port, value) in outputs {
@@ -1062,16 +1086,27 @@ fn enqueue_event(
     Ok(())
 }
 
+#[cfg(test)]
 fn run_event_loop<E: ReactionExecutor>(
     state: &VmState,
     inputs: BTreeMap<String, Value>,
     executor: &E,
+) -> Result<BTreeMap<String, Value>> {
+    run_event_loop_observed(state, inputs, executor, &NoopTopologyObserver)
+}
+
+fn run_event_loop_observed<E: ReactionExecutor>(
+    state: &VmState,
+    inputs: BTreeMap<String, Value>,
+    executor: &E,
+    observer: &dyn TopologyObserver,
 ) -> Result<BTreeMap<String, Value>> {
     let mut queue = BTreeMap::from([(Tag::START, inputs)]);
     let mut outputs = BTreeMap::new();
     let mut steps = 0usize;
 
     while let Some((tag, events)) = queue.pop_first() {
+        observer.tag_advanced(tag.timestamp, tag.microstep, &events);
         steps += 1;
         if steps > 1024 {
             bail!("topology exceeded 1024 logical tags");
@@ -1121,6 +1156,15 @@ fn run_event_loop<E: ReactionExecutor>(
                 .iter()
                 .map(|index| invocation_spec(state, enabled[*index], &events))
                 .collect::<Result<_>>()?;
+            for spec in &specs {
+                observer.reaction_started(
+                    tag.timestamp,
+                    tag.microstep,
+                    &spec.reaction_id,
+                    &spec.id,
+                );
+            }
+            let invocation_ids: Vec<_> = specs.iter().map(|spec| spec.id.clone()).collect();
             let results = thread::scope(|scope| {
                 let handles: Vec<_> = specs
                     .into_iter()
@@ -1135,7 +1179,16 @@ fn run_event_loop<E: ReactionExecutor>(
                     })
                     .collect::<Result<Vec<_>>>()
             })?;
-            for (index, writes) in layer.into_iter().zip(results) {
+            for ((index, invocation_id), writes) in
+                layer.into_iter().zip(invocation_ids).zip(results)
+            {
+                observer.reaction_completed(
+                    tag.timestamp,
+                    tag.microstep,
+                    enabled[index].0,
+                    &invocation_id,
+                    &writes,
+                );
                 completed.push((enabled[index].1.order, writes));
             }
         }

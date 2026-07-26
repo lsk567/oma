@@ -2,6 +2,7 @@ mod app;
 mod backend_probe;
 mod computer;
 mod config;
+mod diagram;
 mod ea;
 mod event;
 mod manager;
@@ -170,6 +171,14 @@ enum TopologyAction {
         /// Maximum time to wait for each prompt invocation
         #[arg(long, default_value_t = 300)]
         timeout_seconds: u64,
+
+        /// Expose the live topology diagram API while the run is active
+        #[arg(long)]
+        diagram_server: bool,
+
+        /// Address for the live topology diagram API
+        #[arg(long, default_value = "127.0.0.1:0")]
+        diagram_address: std::net::SocketAddr,
     },
 }
 
@@ -379,6 +388,8 @@ async fn async_main() -> Result<()> {
                 inputs,
                 replace,
                 timeout_seconds,
+                diagram_server,
+                diagram_address,
             } => {
                 let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
                 let bytecode = topology::load_bytecode(&bytecode)?;
@@ -393,6 +404,7 @@ async fn async_main() -> Result<()> {
                         inputs: &inputs,
                         replace,
                         timeout: Duration::from_secs(timeout_seconds),
+                        diagram_address: diagram_server.then_some(diagram_address),
                     },
                 )
             }
