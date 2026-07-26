@@ -5,11 +5,11 @@ derived from verified topology bytecode, so agents, ports, connections,
 reactions, triggers, and effects keep the same identity as the runtime model.
 It does not inspect or reconstruct the legacy tmux agent hierarchy.
 
-Start it with a topology run:
+Start it with an OMAR program:
 
 ```bash
-omar topology run workflow.omar \
-  --input request='"Review this change"' \
+omar run workflow.omar \
+  --input request='Review this change' \
   --diagram-server
 ```
 

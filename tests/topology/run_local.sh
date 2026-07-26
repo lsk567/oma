@@ -198,55 +198,43 @@ run_case() {
   local reason=-
 
   IFS=',' read -r -a expected_outputs <<<"$output_csv"
-  total_checks=$((3 + ${#expected_outputs[@]}))
+  total_checks=$((2 + ${#expected_outputs[@]}))
   : >"$log"
 
-  printf '\n[%s] compiling and verifying through OMAR\n' "$name"
-  if "$omar" topology apply "$source" --dry-run >>"$log" 2>&1; then
+  printf '\n[%s] running with local agents\n' "$name"
+  if run_with_timeout "$case_timeout" "$log" "$name" \
+    "$omar" run "$source" --replace \
+    --timeout-seconds "$invocation_timeout" "$@"; then
+    case_passed=$((case_passed + 1))
+  else
+    local runtime_status=$?
+    status=FAIL
+    if ((runtime_status == 124)); then
+      reason="case timed out"
+    else
+      reason="runtime exited $runtime_status"
+    fi
+    case_failed=$((case_failed + 1))
+  fi
+
+  if grep -Fq "Topology '$team' completed" "$log"; then
     case_passed=$((case_passed + 1))
   else
     status=FAIL
-    reason="compiler failed"
+    [[ $reason == - ]] && reason="missing completion marker"
     case_failed=$((case_failed + 1))
-    case_skipped=$((total_checks - 1))
   fi
 
-  if [[ $status == PASS ]]; then
-    printf '[%s] running with local agents\n' "$name"
-    if run_with_timeout "$case_timeout" "$log" "$name" \
-      "$omar" topology run "$source" --replace \
-      --timeout-seconds "$invocation_timeout" "$@"; then
-      case_passed=$((case_passed + 1))
-    else
-      local runtime_status=$?
-      status=FAIL
-      if ((runtime_status == 124)); then
-        reason="case timed out"
-      else
-        reason="runtime exited $runtime_status"
-      fi
-      case_failed=$((case_failed + 1))
-    fi
-
-    if grep -Fq "Topology '$team' completed" "$log"; then
+  local output
+  for output in "${expected_outputs[@]}"; do
+    if grep -Fq "Output $output =" "$log"; then
       case_passed=$((case_passed + 1))
     else
       status=FAIL
-      [[ $reason == - ]] && reason="missing completion marker"
+      [[ $reason == - ]] && reason="missing output $output"
       case_failed=$((case_failed + 1))
     fi
-
-    local output
-    for output in "${expected_outputs[@]}"; do
-      if grep -Fq "Output $output =" "$log"; then
-        case_passed=$((case_passed + 1))
-      else
-        status=FAIL
-        [[ $reason == - ]] && reason="missing output $output"
-        case_failed=$((case_failed + 1))
-      fi
-    done
-  fi
+  done
 
   local elapsed=$((SECONDS - case_started))
   passed_checks=$((passed_checks + case_passed))

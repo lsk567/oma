@@ -108,54 +108,6 @@ pub struct VmState {
     pub ports: BTreeMap<String, PortState>,
     pub connections: Vec<ConnectionState>,
     pub reactions: BTreeMap<String, ReactionState>,
-    #[serde(skip)]
-    pub executed_instructions: usize,
-}
-
-pub trait AgentRuntime {
-    fn spawn_agent(&mut self, name: &str, backend: &str) -> Result<()>;
-}
-
-pub struct TmuxAgentRuntime {
-    client: TmuxClient,
-    workdir: String,
-}
-
-impl TmuxAgentRuntime {
-    pub fn new(client: TmuxClient, workdir: String) -> Self {
-        Self { client, workdir }
-    }
-}
-
-impl AgentRuntime for TmuxAgentRuntime {
-    fn spawn_agent(&mut self, name: &str, backend: &str) -> Result<()> {
-        let session_name = format!("{}{}", self.client.prefix(), name);
-        if self.client.has_session(&session_name)? {
-            bail!("agent '{name}' already exists");
-        }
-
-        let backend = canonical_backend(backend);
-        let command = config::resolve_backend(backend)
-            .map_err(anyhow::Error::msg)
-            .with_context(|| format!("unsupported backend '{backend}' for agent '{name}'"))?;
-        self.client
-            .new_session(&session_name, &command, Some(&self.workdir))?;
-        println!("Spawned topology agent: {name} ({backend})");
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-pub struct DryRunAgentRuntime {
-    pub spawns: Vec<(String, String)>,
-}
-
-impl AgentRuntime for DryRunAgentRuntime {
-    fn spawn_agent(&mut self, name: &str, backend: &str) -> Result<()> {
-        println!("Would spawn topology agent: {name} ({backend})");
-        self.spawns.push((name.to_string(), backend.to_string()));
-        Ok(())
-    }
 }
 
 pub fn load_bytecode(path: &std::path::Path) -> Result<Bytecode> {
@@ -165,19 +117,20 @@ pub fn load_bytecode(path: &std::path::Path) -> Result<Bytecode> {
         .with_context(|| format!("invalid bytecode JSON in {}", path.display()))
 }
 
-/// Load either an OMAR source program or previously compiled JSON bytecode.
+/// Compile and load an OMAR source program.
 ///
-/// Source programs are compiled into a process-scoped temporary file using
-/// `omarc`. Installed builds find the compiler beside the `omar` executable or
-/// on `PATH`; development builds also recognize the compiler built under
-/// `lang/.lake`.
+/// Installed builds find `omarc` beside the `omar` executable or on `PATH`;
+/// development builds also recognize the compiler built under `lang/.lake`.
 pub fn load_program(path: &Path) -> Result<Bytecode> {
     load_program_with_compiler(path, None)
 }
 
 fn load_program_with_compiler(path: &Path, compiler: Option<&Path>) -> Result<Bytecode> {
     if path.extension().and_then(|extension| extension.to_str()) != Some("omar") {
-        return load_bytecode(path);
+        bail!(
+            "OMAR programs must use the .omar extension: {}",
+            path.display()
+        );
     }
 
     compile_source(path, compiler)
@@ -241,24 +194,6 @@ fn resolve_omarc() -> PathBuf {
     PathBuf::from(executable_name)
 }
 
-pub fn execute<R: AgentRuntime>(bytecode: &Bytecode, runtime: &mut R) -> Result<VmState> {
-    let mut state = verify(bytecode)?;
-    for instruction in &bytecode.instructions {
-        match instruction {
-            Instruction::SpawnAgent { name, backend } => {
-                runtime.spawn_agent(name, backend)?;
-            }
-            Instruction::BeginPlan { .. }
-            | Instruction::DefinePort { .. }
-            | Instruction::ConnectPorts { .. }
-            | Instruction::InstallReaction { .. }
-            | Instruction::CommitPlan => {}
-        }
-        state.executed_instructions += 1;
-    }
-    Ok(state)
-}
-
 pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
     if bytecode.version != 1 {
         bail!("unsupported bytecode version {}", bytecode.version);
@@ -287,7 +222,6 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
         ports: BTreeMap::new(),
         connections: Vec::new(),
         reactions: BTreeMap::new(),
-        executed_instructions: 0,
     };
     let mut committed = false;
 
@@ -1492,15 +1426,15 @@ mod tests {
     }
 
     #[test]
-    fn loads_compiled_json_without_invoking_omarc() {
+    fn rejects_compiled_json_as_a_user_program() {
         let directory = tempfile::tempdir().unwrap();
         let bytecode_path = directory.path().join("workflow.json");
         fs::write(&bytecode_path, serde_json::to_vec(&program()).unwrap()).unwrap();
 
-        let loaded =
-            load_program_with_compiler(&bytecode_path, Some(Path::new("missing-omarc"))).unwrap();
+        let error = load_program_with_compiler(&bytecode_path, Some(Path::new("missing-omarc")))
+            .unwrap_err();
 
-        assert_eq!(loaded.team, "Demo");
+        assert!(error.to_string().contains("must use the .omar extension"));
     }
 
     #[cfg(unix)]
@@ -1523,23 +1457,18 @@ mod tests {
     }
 
     #[test]
-    fn executes_verified_initial_topology() {
-        let mut runtime = DryRunAgentRuntime::default();
-        let state = execute(&program(), &mut runtime).unwrap();
-        assert_eq!(runtime.spawns, vec![("worker".into(), "Codex".into())]);
+    fn verifies_initial_topology() {
+        let state = verify(&program()).unwrap();
         assert_eq!(state.agents.len(), 1);
         assert_eq!(state.ports.len(), 2);
         assert_eq!(state.reactions.len(), 1);
-        assert_eq!(state.executed_instructions, program().instructions.len());
     }
 
     #[test]
-    fn verifies_before_spawning() {
+    fn rejects_incomplete_topology() {
         let mut program = program();
         program.instructions.pop();
-        let mut runtime = DryRunAgentRuntime::default();
-        assert!(execute(&program, &mut runtime).is_err());
-        assert!(runtime.spawns.is_empty());
+        assert!(verify(&program).is_err());
     }
 
     #[test]
@@ -1649,7 +1578,6 @@ mod tests {
             ports: BTreeMap::new(),
             connections: Vec::new(),
             reactions: BTreeMap::new(),
-            executed_instructions: 0,
         };
         for (name, kind, ty) in [
             ("resume", PortKind::Input, "path"),

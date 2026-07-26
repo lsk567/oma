@@ -555,7 +555,6 @@ mod tests {
                     prompt: "Respond".to_string(),
                 },
             )]),
-            executed_instructions: 0,
         }
     }
 

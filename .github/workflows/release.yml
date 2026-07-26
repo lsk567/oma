@@ -62,8 +62,10 @@ jobs:
         env:
           OMARC_BIN: ${{ github.workspace }}/lang/.lake/build/bin/omarc
         run: |
-          target/${{ matrix.target }}/release/omar topology apply \
-            tests/topology/src/FanOutFanIn.omar --dry-run
+          output=$(target/${{ matrix.target }}/release/omar run \
+            tests/ci/direct_run.omar --input request=hello --replace)
+          echo "$output"
+          grep -Fq 'Output result = "hello"' <<<"$output"
 
       - name: Package
         run: |

@@ -136,28 +136,9 @@ enum Commands {
         context_file: Option<String>,
     },
 
-    /// Construct and run an OMAR agent topology
-    Topology {
-        #[command(subcommand)]
-        action: TopologyAction,
-    },
-}
-
-#[derive(Subcommand)]
-enum TopologyAction {
-    /// Verify and apply an initial topology
-    Apply {
-        /// OMAR source (.omar) or compiled JSON bytecode
-        program: PathBuf,
-
-        /// Verify and print operations without spawning agents
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Start a topology and run it to completion
+    /// Run an OMAR program to completion
     Run {
-        /// OMAR source (.omar) or compiled JSON bytecode
+        /// OMAR source program
         program: PathBuf,
 
         /// External input in NAME=VALUE form; repeat for multiple inputs
@@ -378,37 +359,31 @@ async fn async_main() -> Result<()> {
             Some(path) => mcp::run_server_from_context_file(PathBuf::from(path)),
             None => mcp::run_server_with_default_context(),
         },
-        Some(Commands::Topology { action }) => match action {
-            TopologyAction::Apply { program, dry_run } => {
-                let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
-                apply_topology(&program, dry_run, &target, &config, &omar_dir)
-            }
-            TopologyAction::Run {
-                program,
-                inputs,
-                replace,
-                timeout_seconds,
-                diagram_server,
-                diagram_address,
-            } => {
-                let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
-                let bytecode = topology::load_program(&program)?;
-                topology::run_topology(
-                    &bytecode,
-                    topology::TopologyRunConfig {
-                        ea_id: target.id,
-                        omar_dir: &omar_dir,
-                        base_prefix: &config.dashboard.session_prefix,
-                        default_workdir: &config.agent.default_workdir,
-                        health_idle_warning: config.health.idle_warning,
-                        inputs: &inputs,
-                        replace,
-                        timeout: Duration::from_secs(timeout_seconds),
-                        diagram_address: diagram_server.then_some(diagram_address),
-                    },
-                )
-            }
-        },
+        Some(Commands::Run {
+            program,
+            inputs,
+            replace,
+            timeout_seconds,
+            diagram_server,
+            diagram_address,
+        }) => {
+            let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
+            let bytecode = topology::load_program(&program)?;
+            topology::run_topology(
+                &bytecode,
+                topology::TopologyRunConfig {
+                    ea_id: target.id,
+                    omar_dir: &omar_dir,
+                    base_prefix: &config.dashboard.session_prefix,
+                    default_workdir: &config.agent.default_workdir,
+                    health_idle_warning: config.health.idle_warning,
+                    inputs: &inputs,
+                    replace,
+                    timeout: Duration::from_secs(timeout_seconds),
+                    diagram_address: diagram_server.then_some(diagram_address),
+                },
+            )
+        }
         None => {
             if cli.agent.is_some() {
                 let (target, created) =
@@ -449,42 +424,6 @@ async fn async_main() -> Result<()> {
             }
         }
     }
-}
-
-fn apply_topology(
-    program_path: &std::path::Path,
-    dry_run: bool,
-    target: &ea::EaInfo,
-    config: &Config,
-    omar_dir: &std::path::Path,
-) -> Result<()> {
-    let bytecode = topology::load_program(program_path)?;
-    let state = if dry_run {
-        topology::execute(&bytecode, &mut topology::DryRunAgentRuntime::default())?
-    } else {
-        let client = TmuxClient::new(ea::ea_prefix(target.id, &config.dashboard.session_prefix));
-        let mut runtime =
-            topology::TmuxAgentRuntime::new(client, config.agent.default_workdir.clone());
-        topology::execute(&bytecode, &mut runtime)?
-    };
-
-    println!(
-        "Topology '{}': {} agents, {} ports, {} reactions; executed {} instructions",
-        state.team,
-        state.agents.len(),
-        state.ports.len(),
-        state.reactions.len(),
-        state.executed_instructions
-    );
-
-    if !dry_run {
-        let topology_dir = ea::ea_state_dir(target.id, omar_dir).join("topologies");
-        std::fs::create_dir_all(&topology_dir)?;
-        let state_path = topology_dir.join(format!("{}.json", state.team));
-        topology::write_json_atomic(&state_path, &state)?;
-        println!("Installed topology state: {}", state_path.display());
-    }
-    Ok(())
 }
 
 fn omar_dir() -> PathBuf {
