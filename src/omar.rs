@@ -14,6 +14,7 @@ mod paths;
 mod process;
 mod projects;
 mod scheduler;
+mod serve;
 mod tmux;
 mod topology;
 mod ui;
@@ -160,6 +161,13 @@ enum Commands {
         /// Address for the live topology diagram API
         #[arg(long, default_value = "127.0.0.1:0")]
         diagram_address: std::net::SocketAddr,
+    },
+
+    /// Accept OMAR programs over HTTP and supervise their runs
+    Serve {
+        /// Loopback address to bind the admission API
+        #[arg(long, default_value = "127.0.0.1:7340")]
+        address: std::net::SocketAddr,
     },
 }
 
@@ -381,8 +389,13 @@ async fn async_main() -> Result<()> {
                     replace,
                     timeout: Duration::from_secs(timeout_seconds),
                     diagram_address: diagram_server.then_some(diagram_address),
+                    diagram_ready: None,
                 },
             )
+        }
+        Some(Commands::Serve { address }) => {
+            let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
+            serve::run(address, &config, &omar_dir, target.id)
         }
         None => {
             if cli.agent.is_some() {

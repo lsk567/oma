@@ -31,3 +31,30 @@ lake exe omarc ../tests/topology/src/HR.omar /tmp/HR.bytecode.json
 The runtime starts topology-scoped agents, delivers enabled prompts at each
 logical tag, waits at the global tag barrier, and prints the final outputs.
 `--replace` is required when sessions with the same agent names already exist.
+
+## Serving programs over HTTP
+
+`omar run` binds a diagram server that dies with the run, so it cannot be where
+programs arrive. `omar serve` outlives individual runs and admits them:
+
+```sh
+omar serve --address 127.0.0.1:7340
+```
+
+```
+POST   /v1/runs      { program, inputs, replace?, timeout_seconds? }
+                     -> 201 { run_id, team, status, diagram_address, ... }
+GET    /v1/runs      -> { runs: [ ... ] }
+GET    /v1/runs/{id} -> one record, or 404
+GET    /health       -> { status, protocol_version }
+```
+
+`program` is `.omar` source. Compilation and input validation happen before the
+response, so a bad program is a 400 rather than a 201 that later fails. Each run
+gets its own ephemeral diagram server; `diagram_address` is where to fetch
+`/v1/diagram` and subscribe to `/v1/events`.
+
+Agent sessions are named `prefix + agent`, so concurrent runs of one team would
+collide. `serve` returns 409 while a team already has an active run.
+
+Loopback only: the surface executes arbitrary programs.

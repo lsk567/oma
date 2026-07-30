@@ -883,6 +883,9 @@ pub struct TopologyRunConfig<'a> {
     pub replace: bool,
     pub timeout: Duration,
     pub diagram_address: Option<std::net::SocketAddr>,
+    /// Receives the bound diagram address once the server is up. `omar serve`
+    /// needs it while the run is still in flight; `omar run` prints it instead.
+    pub diagram_ready: Option<mpsc::Sender<std::net::SocketAddr>>,
 }
 
 pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Result<()> {
@@ -901,6 +904,9 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
         .transpose()?;
     if let Some(server) = &diagram_server {
         println!("Diagram server: http://{}", server.address());
+        if let Some(sender) = &config.diagram_ready {
+            let _ = sender.send(server.address());
+        }
     }
     let diagram_publisher = diagram_server.as_ref().map(DiagramServer::publisher);
     let noop_observer = NoopTopologyObserver;
@@ -997,7 +1003,7 @@ fn spawn_topology_agents(
     Ok(())
 }
 
-fn parse_inputs(state: &VmState, raw_inputs: &[String]) -> Result<BTreeMap<String, Value>> {
+pub fn parse_inputs(state: &VmState, raw_inputs: &[String]) -> Result<BTreeMap<String, Value>> {
     let mut inputs = BTreeMap::new();
     for raw in raw_inputs {
         let (name, raw_value) = raw
