@@ -1,7 +1,7 @@
 // OMAR topology integration source.
 // Exercises an action feeding its own reaction across microsteps. This is the
 // recurrence pattern available before dedicated startup/bounds syntax lands.
-team Recurrence(counter : Codex)
+team Recurrence[counter : Codex]
 {
     input start : int
     output result : int

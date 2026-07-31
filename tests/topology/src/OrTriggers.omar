@@ -1,9 +1,9 @@
 // OMAR topology integration source.
 // Exercises LF-style OR triggers at different microsteps and explicit absent
 // interpolation. The observer runs once for `fast` and later once for `slow`.
-team OrTriggers(splitter : Codex,
+team OrTriggers[splitter : Codex,
                 lagger : Codex,
-                observer : Codex)
+                observer : Codex]
 {
     input request : string
     output observation : string

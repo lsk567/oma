@@ -284,6 +284,9 @@ run_case OrTriggers OrTriggers observation \
 run_case OrderedWrites OrderedWrites result \
   --input request='declaration order'
 run_case Recurrence Recurrence result --input start=0
+# Instantiated by a main block, so the program is 'main' and every port is
+# qualified. Only the seed is supplied; the other two inputs come off the ring.
+run_case Ring main n1.done --input n1.token=0
 run_case SameAgentSerial SameAgentSerial result \
   --input request='serialize these reactions'
 run_case SuperdenseTime SuperdenseTime fixed_result,connected_result --input start=7

@@ -1,0 +1,32 @@
+// OMAR topology integration source.
+// Exercises team parameters, bracketed agent declarations, and a main block
+// that instantiates one team three times and wires the instances into a ring.
+// The token travels round until a node stops forwarding it, so the run also
+// covers a feedback loop that crosses instance boundaries.
+team Node(idx : int)[agent : Codex]
+{
+    input token : int
+    output out : int
+    output done : int
+
+    prompt agent(token) -> (out | done)
+    "
+        You are node $(idx) of a three-node ring.
+        The token you received is $(token).
+        If $(token) is less than 6, set the `out` effect to $(token) plus 1 and
+        leave `done` absent. Otherwise set `done` to $(token) and leave `out`
+        absent. Set exactly one of the two, never both.
+        Your effects are named for your instance, so use the names exactly as
+        the invocation's allowed effects give them.
+    "
+}
+
+main {
+    n1 = Node(1)
+    n2 = Node(2)
+    n3 = Node(3)
+
+    n1.out -> n2.token
+    n2.out -> n3.token
+    n3.out -> n1.token
+}

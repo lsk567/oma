@@ -1,7 +1,7 @@
 // OMAR topology integration source.
 // Exercises required alternatives, optional alternative groups, typed and
 // signal actions, and constant boolean effects.
-team EffectContracts(decider : Codex)
+team EffectContracts[decider : Codex]
 {
     input candidate : string
     output accepted : bool

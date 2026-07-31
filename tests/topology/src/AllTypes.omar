@@ -2,7 +2,7 @@
 /* Exercises every documented port type, nested generic type parsing,
    /* including nested block comments, */ multiple required effects, and
    interpolation of structured trigger values. */
-team AllTypes(codec : Codex)
+team AllTypes[codec : Codex]
 {
     input bool_in : bool
     input int_in : int

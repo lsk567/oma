@@ -1,7 +1,7 @@
 // Exercises superdense tags, fixed action delay, and delayed port routing.
-team SuperdenseTime(producer : Codex,
+team SuperdenseTime[producer : Codex,
                     fixed_consumer : Codex,
-                    connected_consumer : Codex)
+                    connected_consumer : Codex]
 {
     input start : int
     output fixed_result : int

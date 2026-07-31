@@ -1,10 +1,10 @@
 // OMAR topology integration source.
 // Exercises declaration-order scheduling for shared effects, an optional
 // writer that may preserve an earlier value, and deterministic last-writer wins.
-team OrderedWrites(first : Codex,
+team OrderedWrites[first : Codex,
                    optional : Codex,
                    finalizer : Codex,
-                   reader : Codex)
+                   reader : Codex]
 {
     input request : string
     output result : string
