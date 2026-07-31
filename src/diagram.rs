@@ -695,7 +695,10 @@ mod tests {
         let mut seen = String::new();
         read_until(&mut reader, &mut seen, ": connected");
         publisher.run_started();
-        read_until(&mut reader, &mut seen, "event: run_started");
+        // Read to the payload, not to the `event:` line — a frame can arrive
+        // split across segments, and stopping at the header leaves the `data:`
+        // line still in flight.
+        read_until(&mut reader, &mut seen, "\"protocol_version\":1");
         assert!(seen.contains("text/event-stream"), "{seen}");
         assert!(seen.contains(": connected"), "{seen}");
         assert!(seen.contains("event: run_started"), "{seen}");
