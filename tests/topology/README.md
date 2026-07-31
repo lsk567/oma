@@ -21,19 +21,10 @@ Coverage:
 - `HR.omar`: the heterogeneous hiring example using Claude and Codex.
 - `HRCodex.omar`: the original hiring example using Codex for every role.
 
-To compile and verify one scenario without launching agents:
-
-```sh
-cd lang
-lake exe omarc ../tests/topology/src/FanOutFanIn.omar /tmp/FanOutFanIn.json
-cd ..
-cargo run -- topology apply /tmp/FanOutFanIn.json --dry-run
-```
-
-To execute it with live agents, replace the final command with
-`omar topology run`, provide every declared input, and use `--replace` when
-reusing agent names. Live execution requires every backend declared by that
-topology to be installed and authenticated.
+To execute one scenario with live agents, use `omar run` with the `.omar`
+source, provide every declared input, and use `--replace` when reusing agent
+names. OMAR invokes `omarc` internally. Live execution requires every backend
+declared by that topology to be installed and authenticated.
 
 To compile and execute the complete corpus with representative inputs and local
 agents:

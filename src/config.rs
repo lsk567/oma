@@ -152,6 +152,7 @@ fn default_command() -> String {
 /// - `"cursor"` → `"cursor agent --yolo"`
 /// - `"opencode"` → `"opencode"` (opencode has no permission-skip flag)
 /// - `"agy"` → `"agy --dangerously-skip-permissions"`
+/// - `"stub"` → the model-free test agent
 /// - anything else → error
 pub fn resolve_backend(name: &str) -> Result<String, String> {
     match name {
@@ -162,8 +163,11 @@ pub fn resolve_backend(name: &str) -> Result<String, String> {
         "cursor" => Ok("cursor agent --yolo".to_string()),
         "opencode" => Ok("opencode".to_string()),
         "agy" => Ok("agy --dangerously-skip-permissions".to_string()),
+        // Answers invocations without a model, so a run can be exercised end to
+        // end in a test. Resolved to this binary in `build_agent_command`.
+        "stub" => Ok("omar stub-agent".to_string()),
         other => Err(format!(
-            "Unknown backend '{}'. Supported: claude, codex, cursor, opencode, agy",
+            "Unknown backend '{}'. Supported: claude, codex, cursor, opencode, agy, stub",
             other
         )),
     }

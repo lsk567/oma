@@ -553,6 +553,7 @@ impl App {
                 .map(|server| server.trim().to_string())
                 .filter(|server| !server.is_empty()),
             topology: None,
+            serve: None,
         };
 
         let (cmd, workspace_cwd) = if inject_prompt {
