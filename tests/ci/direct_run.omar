@@ -1,8 +1,12 @@
 // Login-free smoke test for `omar run <program.omar>`.
-team DirectRun()
+team DirectRun
 {
     input request : string
     output result : string
 
     request -> result after 0
+}
+
+main {
+    run = DirectRun()
 }

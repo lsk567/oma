@@ -116,10 +116,15 @@ def capture_agent_panes(elapsed):
         print(f"[{case_name}] no tmux agent sessions found", flush=True)
         return
 
+    # Instance-qualified agents reach tmux with '.' flattened to '_', so
+    # `n1.agent` is stored as `…-n1_agent`.
     names = [
         name for name in sessions.stdout.splitlines()
         if name.startswith("omar-agent-")
-        and any(name.endswith(f"-{agent}") for agent in agent_names)
+        and any(
+            name.endswith(f"-{agent}") or name.endswith(f"_{agent}")
+            for agent in agent_names
+        )
     ]
     group = os.environ.get("GITHUB_ACTIONS") == "true"
     if group:
@@ -259,34 +264,40 @@ run_case() {
 
 build_prerequisites
 
+# Every program instantiates its teams in a main block, so ports are named
+# `instance.port` and the program takes its source file's name.
 run_case AllTypes AllTypes \
-  bool_out,int_out,float_out,string_out,path_out,bytes_out,list_out,option_out,nested_out \
-  --input bool_in=true \
-  --input int_in=7 \
-  --input float_in=2.5 \
-  --input string_in=hello \
-  --input "path_in=$fixture" \
-  --input bytes_in=SGVsbG8= \
-  --input 'list_in=[1,2,3]' \
-  --input 'option_in="present"' \
-  --input 'nested_in=[1,null,3]'
+  types.bool_out,types.int_out,types.float_out,types.string_out,types.path_out,types.bytes_out,types.list_out,types.option_out,types.nested_out \
+  --input types.bool_in=true \
+  --input types.int_in=7 \
+  --input types.float_in=2.5 \
+  --input types.string_in=hello \
+  --input "types.path_in=$fixture" \
+  --input types.bytes_in=SGVsbG8= \
+  --input 'types.list_in=[1,2,3]' \
+  --input 'types.option_in="present"' \
+  --input 'types.nested_in=[1,null,3]'
 
-run_case BusinessLoop BusinessLoop delivery \
-  --input brief='Launch a reliable self-service analytics product for small retailers'
-run_case EffectContracts EffectContracts accepted \
-  --input candidate='a careful systems engineer'
-run_case FanOutFanIn FanOutFanIn answer \
-  --input request='design a resilient task queue'
-run_case HR HR hired --input "resume=$fixture"
-run_case HRCodex HR hired --input "resume=$fixture"
-run_case OrTriggers OrTriggers observation \
-  --input request='compare the fast and slow paths'
-run_case OrderedWrites OrderedWrites result \
-  --input request='declaration order'
-run_case Recurrence Recurrence result --input start=0
-run_case SameAgentSerial SameAgentSerial result \
-  --input request='serialize these reactions'
-run_case SuperdenseTime SuperdenseTime fixed_result,connected_result --input start=7
+run_case BusinessLoop BusinessLoop biz.delivery \
+  --input biz.brief='Launch a reliable self-service analytics product for small retailers'
+run_case EffectContracts EffectContracts contracts.accepted \
+  --input contracts.candidate='a careful systems engineer'
+run_case FanOutFanIn FanOutFanIn fan.answer \
+  --input fan.request='design a resilient task queue'
+run_case HR HR hr.hired --input "hr.resume=$fixture"
+run_case HRCodex HRCodex hr.hired --input "hr.resume=$fixture"
+run_case OrTriggers OrTriggers triggers.observation \
+  --input triggers.request='compare the fast and slow paths'
+run_case OrderedWrites OrderedWrites writes.result \
+  --input writes.request='declaration order'
+run_case Recurrence Recurrence rec.result --input rec.start=0
+# Three instances wired into a ring. Only the seed is supplied; the other two
+# inputs come off the ring itself.
+run_case Ring Ring n1.done --input n1.token=0
+run_case SameAgentSerial SameAgentSerial serial.result \
+  --input serial.request='serialize these reactions'
+run_case SuperdenseTime SuperdenseTime time.fixed_result,time.connected_result \
+  --input time.start=7
 
 if ((passed_cases + failed_cases == 0)); then
   printf 'No topology case named %s\n' "$case_filter" >&2

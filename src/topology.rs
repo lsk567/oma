@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::config;
 use crate::diagram::{DiagramServer, NoopTopologyObserver, TopologyObserver};
 use crate::manager::{self, McpLaunchContext, TopologyMcpContext};
+use crate::tmux::flatten_agent_name;
 use crate::tmux::DeliveryOptions;
 use crate::tmux::TmuxClient;
 
@@ -237,6 +238,16 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                 if backend.trim().is_empty() {
                     bail!("agent '{name}' has an empty backend");
                 }
+                // Agents live in tmux sessions, and qualification is flattened
+                // to get there, so two names that differ only by a '.' would
+                // land in one session and answer each other's invocations.
+                if let Some(clash) = state
+                    .agents
+                    .keys()
+                    .find(|existing| flatten_agent_name(existing) == flatten_agent_name(name))
+                {
+                    bail!("agents '{clash}' and '{name}' need the same tmux session");
+                }
                 if state
                     .agents
                     .insert(
@@ -291,9 +302,8 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                     .ports
                     .get(target)
                     .with_context(|| format!("connection references unknown target '{target}'"))?;
-                if target_port.kind == PortKind::Input {
-                    bail!("connection cannot target input '{target}'");
-                }
+                // Targeting an input is how one instance feeds the next, so it
+                // is allowed; the port kinds only have to agree on type.
                 if source_port.ty != target_port.ty {
                     bail!("connection type mismatch from '{source}' to '{target}'");
                 }
@@ -847,7 +857,7 @@ impl ReactionExecutor for TmuxReactionExecutor {
             invocation.contract,
             rendered
         );
-        let session = format!("{}{}", self.client.prefix(), invocation.agent);
+        let session = self.client.session_for(&invocation.agent);
         if let Err(error) = self
             .client
             .deliver_prompt(&session, &message, &DeliveryOptions::default())
@@ -965,7 +975,7 @@ fn spawn_topology_agents(
 ) -> Result<()> {
     let protocol = "You are an OMAR topology agent. Only act on OMAR INVOCATION messages. You cannot message other agents. For each invocation, use only omar_set_port to set allowed effects and omar_complete to finish. Port writes are buffered and repeated writes use last-writer-wins semantics.";
     for (name, agent) in &state.agents {
-        let session = format!("{}{}", client.prefix(), name);
+        let session = client.session_for(name);
         if client.has_session(&session)? {
             if !config.replace {
                 bail!(
@@ -1008,7 +1018,7 @@ fn spawn_topology_agents(
         let markers = crate::tmux::backend_readiness_markers(canonical_backend(&agent.backend));
         if !markers.is_empty()
             && !client.wait_for_markers(
-                &format!("{}{}", client.prefix(), name),
+                &client.session_for(name),
                 markers,
                 Duration::from_secs(60),
                 Duration::from_millis(250),
@@ -1044,7 +1054,14 @@ pub fn parse_inputs(state: &VmState, raw_inputs: &[String]) -> Result<BTreeMap<S
         inputs.insert(name.to_string(), value);
     }
     for (name, port) in &state.ports {
-        if port.kind == PortKind::Input && !inputs.contains_key(name) {
+        // An input fed by a connection gets its value from inside the topology,
+        // so the operator has nothing to supply. Supplying one anyway is still
+        // allowed: that is how a feedback loop is seeded.
+        let connected = state
+            .connections
+            .iter()
+            .any(|connection| connection.target == *name);
+        if port.kind == PortKind::Input && !connected && !inputs.contains_key(name) {
             bail!("missing input '{name}'");
         }
     }
@@ -1406,8 +1423,14 @@ fn valid_identifier(value: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// `instance.member`, the name a team instance gives what it declares. Plain
+/// identifiers are qualified names with nothing to qualify.
+fn valid_qualified_name(value: &str) -> bool {
+    !value.is_empty() && value.split('.').all(valid_identifier)
+}
+
 fn require_identifier(kind: &str, value: &str) -> Result<()> {
-    if valid_identifier(value) {
+    if valid_qualified_name(value) {
         Ok(())
     } else {
         bail!("invalid {kind} name '{value}'")
@@ -1709,6 +1732,136 @@ mod tests {
                 microstep: 0
             }
         );
+    }
+
+    /// A ring node: forward the token until it reaches the limit, then stop.
+    /// Effects are qualified by instance, so this also proves the runtime
+    /// carries qualified names through invocation and contract checking.
+    struct RingExecutor {
+        limit: i64,
+        hops: Mutex<Vec<String>>,
+    }
+
+    impl ReactionExecutor for RingExecutor {
+        fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+            self.hops
+                .lock()
+                .unwrap()
+                .push(invocation.reaction_id.clone());
+            let node = invocation
+                .reaction_id
+                .split('.')
+                .next()
+                .expect("reaction ids are qualified");
+            let token = invocation
+                .trigger_values
+                .get(&format!("{node}.token"))
+                .and_then(Value::as_i64)
+                .expect("the token arrives under its qualified name");
+            let writes = if token < self.limit {
+                BTreeMap::from([(format!("{node}.out"), json!(token + 1))])
+            } else {
+                BTreeMap::from([(format!("{node}.done"), json!(token))])
+            };
+            validate_contract(&invocation.contract, &writes)?;
+            Ok(writes)
+        }
+    }
+
+    fn ring_bytecode() -> Bytecode {
+        // As `omarc` elaborates tests/topology/src/Ring.omar: one team, three
+        // instances, wired head to tail.
+        serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Ring",
+              "instructions": [
+                {"op":"begin_plan","team":"Ring"},
+                {"op":"spawn_agent","name":"n1.agent","backend":"Codex"},
+                {"op":"spawn_agent","name":"n2.agent","backend":"Codex"},
+                {"op":"spawn_agent","name":"n3.agent","backend":"Codex"},
+                {"op":"define_port","kind":"input","name":"n1.token","type":"int"},
+                {"op":"define_port","kind":"output","name":"n1.out","type":"int"},
+                {"op":"define_port","kind":"output","name":"n1.done","type":"int"},
+                {"op":"define_port","kind":"input","name":"n2.token","type":"int"},
+                {"op":"define_port","kind":"output","name":"n2.out","type":"int"},
+                {"op":"define_port","kind":"output","name":"n2.done","type":"int"},
+                {"op":"define_port","kind":"input","name":"n3.token","type":"int"},
+                {"op":"define_port","kind":"output","name":"n3.out","type":"int"},
+                {"op":"define_port","kind":"output","name":"n3.done","type":"int"},
+                {"op":"connect_ports","source":"n1.out","target":"n2.token","delay":0},
+                {"op":"connect_ports","source":"n2.out","target":"n3.token","delay":0},
+                {"op":"connect_ports","source":"n3.out","target":"n1.token","delay":0},
+                {"op":"install_reaction","id":"n1.reaction.0","agent":"n1.agent","triggers":["n1.token"],"effects":["n1.out","n1.done"],"contract":"( n1.out | n1.done )","prompt":"ring"},
+                {"op":"install_reaction","id":"n2.reaction.0","agent":"n2.agent","triggers":["n2.token"],"effects":["n2.out","n2.done"],"contract":"( n2.out | n2.done )","prompt":"ring"},
+                {"op":"install_reaction","id":"n3.reaction.0","agent":"n3.agent","triggers":["n3.token"],"effects":["n3.out","n3.done"],"contract":"( n3.out | n3.done )","prompt":"ring"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_ring_of_instances_passes_a_token_until_a_node_stops_forwarding() {
+        let state = verify(&ring_bytecode()).unwrap();
+        let executor = RingExecutor {
+            limit: 6,
+            hops: Mutex::new(Vec::new()),
+        };
+
+        let outputs = run_event_loop(
+            &state,
+            BTreeMap::from([("n1.token".into(), json!(0))]),
+            &executor,
+        )
+        .unwrap();
+
+        // Three laps: each hop is a connection with no delay, which lands on
+        // the next microstep, so the loop makes progress instead of deadlocking.
+        let hops = executor.hops.lock().unwrap().clone();
+        assert_eq!(
+            hops,
+            [
+                "n1.reaction.0",
+                "n2.reaction.0",
+                "n3.reaction.0",
+                "n1.reaction.0",
+                "n2.reaction.0",
+                "n3.reaction.0",
+                "n1.reaction.0",
+            ]
+        );
+        assert_eq!(outputs.get("n1.done"), Some(&json!(6)));
+        assert_eq!(outputs.get("n2.done"), None);
+    }
+
+    #[test]
+    fn a_connection_fed_input_needs_no_value_from_the_operator() {
+        // n2 and n3 are fed by the ring; only the seed is the operator's to
+        // give. Requiring all three would make instance wiring pointless.
+        let state = verify(&ring_bytecode()).unwrap();
+
+        let inputs = parse_inputs(&state, &["n1.token=0".to_string()]).unwrap();
+        assert_eq!(inputs.get("n1.token"), Some(&json!(0)));
+        assert_eq!(inputs.len(), 1);
+    }
+
+    #[test]
+    fn agents_that_would_share_a_tmux_session_are_rejected() {
+        // tmux flattens '.' to '_', so these two would answer for each other.
+        let mut bytecode = ring_bytecode();
+        bytecode.instructions.insert(
+            2,
+            Instruction::SpawnAgent {
+                name: "n1_agent".to_string(),
+                backend: "Codex".to_string(),
+            },
+        );
+
+        let error = verify(&bytecode).unwrap_err().to_string();
+
+        assert!(error.contains("same tmux session"), "{error}");
     }
 
     struct SuperdenseExecutor {

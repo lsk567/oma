@@ -1,7 +1,7 @@
 // OMAR topology integration source.
-team HR(manager   : ClaudeCode,
+team HR[manager   : ClaudeCode,
         reviewer1 : Codex,
-        reviewer2 : ClaudeCode)
+        reviewer2 : ClaudeCode]
 {
     input resume : path      // runtime validator checks if this is a valid file path.
     output hired : bool      // runtime validator checks if this is a valid true/false.
@@ -47,4 +47,8 @@ team HR(manager   : ClaudeCode,
         Hiring partner: $(opinion2)
         Write true to hire and false otherwise.
     "
+}
+
+main {
+    hr = HR()
 }

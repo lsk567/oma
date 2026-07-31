@@ -2,7 +2,7 @@
 /* Exercises every documented port type, nested generic type parsing,
    /* including nested block comments, */ multiple required effects, and
    interpolation of structured trigger values. */
-team AllTypes(codec : Codex)
+team AllTypes[codec : Codex]
 {
     input bool_in : bool
     input int_in : int
@@ -40,4 +40,8 @@ team AllTypes(codec : Codex)
         Prompt strings preserve escaped quotes like \"this\" and backslashes like \\.
         All nine external inputs arrive at one tag, so set all nine outputs.
     "
+}
+
+main {
+    types = AllTypes()
 }

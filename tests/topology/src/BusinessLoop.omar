@@ -40,14 +40,14 @@ QA gate therefore requires exactly one short draft/rework cycle, identified by
 explicit DRAFT and FINAL markers. The bounded prompts exercise recurrence
 deterministically without allowing agents to grow documents indefinitely.
 */
-team BusinessLoop(a_builder : Codex,
+team BusinessLoop[a_builder : Codex,
                            a_qa : Codex,
                            b_builder : Codex,
                            b_qa : Codex,
                            c_builder : Codex,
                            c_qa : Codex,
                            d_integrator : Codex,
-                           d_qa : Codex)
+                           d_qa : Codex]
 {
     input brief : string
     output delivery : string
@@ -221,4 +221,8 @@ team BusinessLoop(a_builder : Codex,
         mitigation and one numeric success measure. If it begins `FINAL-D:`,
         copy it unchanged to `delivery`. Set exactly one effect.
     "
+}
+
+main {
+    biz = BusinessLoop()
 }
