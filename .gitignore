@@ -21,3 +21,8 @@ junk/
 
 # Node lockfile from tooling experiments; this is a Rust workspace.
 /package-lock.json
+
+# A sketch of language features that do not exist yet (parameterised teams, a
+# `main` block). CI compiles every program in this directory, so tracking it
+# breaks the build. Ignored so it cannot be swept in again by `git add -A`.
+/tests/topology/src/Ring.omar
