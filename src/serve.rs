@@ -147,6 +147,13 @@ pub enum AttachEa {
     /// Running, but launched without a serve context, so it has no way to reply
     /// or propose designs.
     AlreadyRunningWithoutServe(String),
+    /// Launched, but the context its MCP sidecar will read does not carry this
+    /// server. The EA will follow instructions to use `omar_reply` and find no
+    /// such tool, answering into a terminal nobody reads.
+    LaunchedWithoutServe {
+        session: String,
+        reason: String,
+    },
 }
 
 pub struct Serve {
@@ -263,7 +270,34 @@ impl Serve {
                 }),
             },
         )?;
-        Ok(AttachEa::Attached(session))
+        match self.verify_ea_context(omar_dir, ea_id) {
+            Ok(()) => Ok(AttachEa::Attached(session)),
+            Err(reason) => Ok(AttachEa::LaunchedWithoutServe {
+                session,
+                reason: reason.to_string(),
+            }),
+        }
+    }
+
+    /// Read back what the EA's MCP sidecar will actually load.
+    ///
+    /// A stale `omar` on PATH writes a context without this field and exposes
+    /// no operator tools, and nothing downstream notices: the EA simply answers
+    /// where no one is looking. Catch it at startup instead.
+    fn verify_ea_context(&self, omar_dir: &Path, ea_id: EaId) -> Result<()> {
+        let path = crate::manager::ea_mcp_context_path(omar_dir, ea_id);
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("no MCP context at {}", path.display()))?;
+        let context: Value = serde_json::from_str(&raw).context("MCP context is not valid JSON")?;
+        match context.get("serve").and_then(|serve| serve.get("token")) {
+            Some(Value::String(token)) if *token == self.agent_token => Ok(()),
+            Some(_) => anyhow::bail!("{} carries a different server's token", path.display()),
+            None => anyhow::bail!(
+                "{} has no serve context; the `omar` that launched the agent is \
+                 older than this one",
+                path.display()
+            ),
+        }
     }
 
     /// Block until the accept loop stops, which for the CLI means forever.
@@ -300,6 +334,13 @@ pub fn run(
             "Executive assistant '{session}' is already running and was launched without this \
              server, so it cannot reply or propose designs. Restart it with \
              `omar serve --restart-ea` to enable them."
+        ),
+        Ok(AttachEa::LaunchedWithoutServe { session, reason }) => eprintln!(
+            "Executive assistant '{session}' started, but will NOT see omar_reply or \
+             omar_propose_design: {reason}.\nIt answers in its terminal instead, where the \
+             operator cannot see it. Reinstall the runtime (`cargo install --path . --force`) \
+             so every entry point launches agents with this build, then restart with \
+             `omar serve --restart-ea`."
         ),
         Err(error) => eprintln!("Executive assistant unavailable: {error:#}"),
     }
@@ -989,6 +1030,41 @@ mod tests {
         assert!(envelope.contains("MCP TOOL"));
         assert!(envelope.contains("mcp__omar__omar_reply"));
         assert!(envelope.contains("NOT a shell command"));
+    }
+
+    #[test]
+    fn a_context_without_this_server_is_caught_at_startup() {
+        let server = test_server();
+        let omar_dir = std::env::temp_dir().join(format!("omar-ctx-{}", Uuid::new_v4()));
+        let path = crate::manager::ea_mcp_context_path(&omar_dir, 0);
+        std::fs::create_dir_all(path.parent().expect("context dir")).expect("dir");
+
+        // What a runtime older than the EA tools writes: no `serve` at all.
+        std::fs::write(&path, r#"{"ea_id":0,"topology":null}"#).expect("write");
+        let error = server
+            .verify_ea_context(&omar_dir, 0)
+            .expect_err("a context without serve is rejected");
+        assert!(error.to_string().contains("no serve context"), "{error}");
+
+        // A live context from some other server must not pass either.
+        std::fs::write(
+            &path,
+            r#"{"serve":{"endpoint":"127.0.0.1:1","token":"other"}}"#,
+        )
+        .expect("write");
+        let error = server
+            .verify_ea_context(&omar_dir, 0)
+            .expect_err("a foreign token is rejected");
+        assert!(error.to_string().contains("different server"), "{error}");
+
+        // Our own token passes.
+        std::fs::write(
+            &path,
+            json!({"serve": {"endpoint": "127.0.0.1:1", "token": server.agent_token}}).to_string(),
+        )
+        .expect("write");
+        assert!(server.verify_ea_context(&omar_dir, 0).is_ok());
+        let _ = std::fs::remove_dir_all(&omar_dir);
     }
 
     #[test]

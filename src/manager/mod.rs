@@ -266,6 +266,15 @@ fn materialize_prompt_file(prompt_file: &Path, substitutions: &[(&str, &str)]) -
 /// MCP state directory for a given EA. Stable per-EA path — avoids leaking
 /// files into world-readable `/tmp` and prevents unbounded growth from
 /// per-spawn UUID filenames.
+/// Path of the MCP context an EA's sidecar reads, for callers that need to
+/// check what the launched agent actually received.
+pub fn ea_mcp_context_path(omar_dir: &Path, ea_id: EaId) -> PathBuf {
+    omar_dir
+        .join("mcp")
+        .join(format!("ea-{ea_id}"))
+        .join("context.json")
+}
+
 fn mcp_ea_dir(context: &McpLaunchContext) -> Option<PathBuf> {
     let dir = context
         .omar_dir
