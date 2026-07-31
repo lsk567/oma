@@ -562,7 +562,7 @@ fn spawn_agent(
     command: &str,
     workdir: Option<&str>,
 ) -> Result<()> {
-    let full_name = format!("{}{}", client.prefix(), name);
+    let full_name = client.session_for(name);
 
     if client.has_session(&full_name)? {
         anyhow::bail!("Session '{}' already exists", name);
@@ -579,7 +579,7 @@ fn kill_agent(
     scheduler: &scheduler::Scheduler,
     ea_id: ea::EaId,
 ) -> Result<()> {
-    let full_name = format!("{}{}", client.prefix(), name);
+    let full_name = client.session_for(name);
 
     if !client.has_session(&full_name)? {
         anyhow::bail!("Session '{}' not found", name);

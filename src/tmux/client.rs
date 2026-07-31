@@ -105,6 +105,17 @@ pub struct TmuxClient {
     prefix: String,
 }
 
+/// An agent name as tmux will store it.
+///
+/// tmux reads `.` in a target as the window/pane separator, so a name carrying
+/// one has to be flattened first: `new-session -s a.b` silently creates `a_b`,
+/// and every later lookup for `a.b` then misses. Team instances qualify their
+/// agents as `instance.agent`, which makes this the only spelling that
+/// survives a round trip.
+pub fn flatten_agent_name(agent: &str) -> String {
+    agent.replace('.', "_")
+}
+
 pub fn tmux_command() -> Command {
     let mut cmd = Command::new("tmux");
     if let Ok(server) = std::env::var("OMAR_TMUX_SERVER") {
@@ -163,6 +174,11 @@ impl TmuxClient {
 
     pub fn prefix(&self) -> &str {
         &self.prefix
+    }
+
+    /// The session an agent runs in.
+    pub fn session_for(&self, agent: &str) -> String {
+        format!("{}{}", self.prefix, flatten_agent_name(agent))
     }
 
     fn run(&self, args: &[&str]) -> Result<String> {
@@ -762,6 +778,17 @@ impl TmuxClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_qualified_agent_name_survives_the_round_trip_to_tmux() {
+        // tmux would store `n1.agent` as `n1_agent` and then fail every lookup
+        // for the name it was given, so the flattening has to happen here.
+        let client = TmuxClient::new("omar-agent-0-");
+        assert_eq!(client.session_for("n1.agent"), "omar-agent-0-n1_agent");
+        // Unqualified names, which is every agent outside a main block, are
+        // untouched.
+        assert_eq!(client.session_for("worker"), "omar-agent-0-worker");
+    }
 
     #[test]
     fn test_client_creation() {

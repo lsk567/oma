@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::config;
 use crate::diagram::{DiagramServer, NoopTopologyObserver, TopologyObserver};
 use crate::manager::{self, McpLaunchContext, TopologyMcpContext};
+use crate::tmux::flatten_agent_name;
 use crate::tmux::DeliveryOptions;
 use crate::tmux::TmuxClient;
 
@@ -240,9 +241,11 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                 // Agents live in tmux sessions, and qualification is flattened
                 // to get there, so two names that differ only by a '.' would
                 // land in one session and answer each other's invocations.
-                if let Some(clash) = state.agents.keys().find(|existing| {
-                    agent_session_name("", existing) == agent_session_name("", name)
-                }) {
+                if let Some(clash) = state
+                    .agents
+                    .keys()
+                    .find(|existing| flatten_agent_name(existing) == flatten_agent_name(name))
+                {
                     bail!("agents '{clash}' and '{name}' need the same tmux session");
                 }
                 if state
@@ -854,7 +857,7 @@ impl ReactionExecutor for TmuxReactionExecutor {
             invocation.contract,
             rendered
         );
-        let session = agent_session_name(self.client.prefix(), &invocation.agent);
+        let session = self.client.session_for(&invocation.agent);
         if let Err(error) = self
             .client
             .deliver_prompt(&session, &message, &DeliveryOptions::default())
@@ -972,7 +975,7 @@ fn spawn_topology_agents(
 ) -> Result<()> {
     let protocol = "You are an OMAR topology agent. Only act on OMAR INVOCATION messages. You cannot message other agents. For each invocation, use only omar_set_port to set allowed effects and omar_complete to finish. Port writes are buffered and repeated writes use last-writer-wins semantics.";
     for (name, agent) in &state.agents {
-        let session = agent_session_name(client.prefix(), name);
+        let session = client.session_for(name);
         if client.has_session(&session)? {
             if !config.replace {
                 bail!(
@@ -1015,7 +1018,7 @@ fn spawn_topology_agents(
         let markers = crate::tmux::backend_readiness_markers(canonical_backend(&agent.backend));
         if !markers.is_empty()
             && !client.wait_for_markers(
-                &agent_session_name(client.prefix(), name),
+                &client.session_for(name),
                 markers,
                 Duration::from_secs(60),
                 Duration::from_millis(250),
@@ -1432,15 +1435,6 @@ fn require_identifier(kind: &str, value: &str) -> Result<()> {
     } else {
         bail!("invalid {kind} name '{value}'")
     }
-}
-
-/// The tmux session an agent runs in.
-///
-/// tmux reads `.` in a target as the window/pane separator, so a qualified
-/// agent name has to be flattened: `new-session -s a.b` silently creates `a_b`,
-/// and every later lookup for `a.b` then fails to find it.
-pub fn agent_session_name(prefix: &str, agent: &str) -> String {
-    format!("{prefix}{}", agent.replace('.', "_"))
 }
 
 fn canonical_backend(backend: &str) -> &str {
