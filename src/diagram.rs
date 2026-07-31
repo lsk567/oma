@@ -687,22 +687,15 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("timeout");
 
-        // Give the subscriber time to register before anything is published,
-        // since the stream carries no history.
-        thread::sleep(Duration::from_millis(150));
-        publisher.run_started();
-
+        // The stream carries no history, so the subscriber must be registered
+        // before anything is published. `: connected` is written immediately
+        // after registration, which makes it a signal rather than a guess —
+        // sleeping instead is a race that a slower machine loses.
         let mut reader = BufReader::new(stream);
         let mut seen = String::new();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !seen.contains("event: run_started") && std::time::Instant::now() < deadline {
-            let mut chunk = [0u8; 512];
-            match std::io::Read::read(&mut reader, &mut chunk) {
-                Ok(0) => break,
-                Ok(read) => seen.push_str(&String::from_utf8_lossy(&chunk[..read])),
-                Err(_) => break,
-            }
-        }
+        read_until(&mut reader, &mut seen, ": connected");
+        publisher.run_started();
+        read_until(&mut reader, &mut seen, "event: run_started");
         assert!(seen.contains("text/event-stream"), "{seen}");
         assert!(seen.contains(": connected"), "{seen}");
         assert!(seen.contains("event: run_started"), "{seen}");
@@ -752,6 +745,19 @@ mod tests {
         assert!(error
             .to_string()
             .contains("must bind to a loopback address"));
+    }
+
+    /// Accumulate from the stream until `marker` appears or the deadline passes.
+    fn read_until(reader: &mut BufReader<TcpStream>, seen: &mut String, marker: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !seen.contains(marker) && std::time::Instant::now() < deadline {
+            let mut chunk = [0u8; 512];
+            match std::io::Read::read(reader, &mut chunk) {
+                Ok(0) => break,
+                Ok(read) => seen.push_str(&String::from_utf8_lossy(&chunk[..read])),
+                Err(_) => break,
+            }
+        }
     }
 
     fn get(address: SocketAddr, path: &str) -> String {
