@@ -149,7 +149,7 @@ def testRejection (label : String) (source : String) (expected : String) : IO Un
       else throw (IO.userError s!"{label}: expected '{expected}', got '{message}'")
 
 /-- A team with neither parameters nor agents needs neither bracket pair, and
-    the program is named for its file rather than for any team it declares. -/
+    an unnamed main takes the fallback name — its source file's. -/
 def testBareTeamHeader : IO Unit :=
   let source := "team Bare { input a : int output b : int a -> b after 0 }
                  main { only = Bare() }"
@@ -159,6 +159,14 @@ def testBareTeamHeader : IO Unit :=
       assertEqual "instance-qualified port" (program.ports.any (·.name == "only.a")) true
   | .error message => throw (IO.userError s!"bare team header: {message}")
 
+/-- A named main wins over the fallback, which is the only name a program
+    submitted over the wire has. -/
+def testNamedMain : IO Unit :=
+  let source := "team Bare { input a : int } main Payroll { only = Bare() }"
+  match lex source >>= parse "temp-file-name" with
+  | .ok program => assertEqual "named main" program.team "Payroll"
+  | .error message => throw (IO.userError s!"named main: {message}")
+
 def main : IO UInt32 := do
   try
     for test in topologyCases do
@@ -166,6 +174,7 @@ def main : IO UInt32 := do
     for (label, source, expected) in rejectionCases do
       testRejection label source expected
     testBareTeamHeader
+    testNamedMain
     IO.println "compiler rejection tests passed"
     pure 0
   catch error =>

@@ -140,6 +140,9 @@ structure InstanceConnection where
   deriving Repr
 
 structure Main where
+  /-- `main Name { … }` names the program. Without one it takes its source
+      file's name, which a program submitted over the wire does not have. -/
+  name : Option String
   instances : Array Instance
   connections : Array InstanceConnection
   deriving Repr
@@ -381,9 +384,12 @@ private partial def parseMainBody
 
 private def parseMain : Parser Main := fun tokens => do
   let (_, tokens) ← expectWord "main" tokens
+  let (name, tokens) := match tokens with
+    | Token.word name :: rest => (some name, rest)
+    | _ => (none, tokens)
   let (_, tokens) ← expectSym "{" tokens
   let (instances, connections, tokens) ← parseMainBody #[] #[] tokens
-  pure ({ instances, connections }, tokens)
+  pure ({ name, instances, connections }, tokens)
 
 private partial def parseTeams (acc : Array TeamDecl) :
     List Token -> Except String (Array TeamDecl × List Token)
@@ -529,9 +535,10 @@ private def elaborate (programName : String) (teams : Array TeamDecl) (main : Ma
     reactions := parts.foldl (fun acc part => acc ++ part.2.2.2) #[]
   }
 
-/-- The program is named for its source file, the way a C binary is named for
-    its file rather than for `main`. Every program has a `main` block, so the
-    name can never come from a team. -/
+/-- `programName` is the fallback when `main` is not named: the source file,
+    the way a C binary is named for its file rather than for `main`. A program
+    that arrives over the wire has no file, which is why `main` can name
+    itself. -/
 def parse (programName : String) (tokens : List Token) : Except String Program := do
   let (teams, tokens) ← parseTeams #[] tokens
   if teams.isEmpty then throw "program declares no team"
@@ -543,7 +550,7 @@ def parse (programName : String) (tokens : List Token) : Except String Program :
   if !tokens.isEmpty then throw s!"unexpected tokens after main: {reprStr tokens.head?}"
   if main.instances.isEmpty then
     throw "main instantiates no team; a program with no instance has nothing to run"
-  validate (← elaborate programName teams main)
+  validate (← elaborate (main.name.getD programName) teams main)
 
 private def jsonStringArray (values : Array String) : Json :=
   Json.arr (values.map toJson)
