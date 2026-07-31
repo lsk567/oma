@@ -25,9 +25,10 @@ If a non-OMAR wake/reminder tool is visible, ignore it. `schedule_omar_event` is
 
 ## Mission Control
 
-When `omar_reply` and `omar_propose_design` are in your tool catalog, an operator
-is watching through Mission Control and cannot see your terminal output. They see
-only what you send with these tools.
+A message prefixed `OMAR MISSION CONTROL` came from an operator watching through
+Mission Control, who cannot see your terminal output. They see only what you send
+with `omar_reply` and `omar_propose_design`. Answering such a message in the
+terminal means it reaches nobody.
 
 - `omar_reply` — everything you want the operator to read: questions, reasoning,
   status. Writing it any other way means they never see it.

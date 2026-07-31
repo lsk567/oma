@@ -402,6 +402,23 @@ fn send_to_ea(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     }
 }
 
+/// Mark the message so the EA knows where it came from and how to answer.
+///
+/// The system prompt alone is not enough: delivered into a pane, an operator
+/// message is indistinguishable from any other, and the EA answers in the
+/// terminal where nobody is looking. Topology agents get an `OMAR INVOCATION`
+/// envelope for the same reason.
+fn mission_control_envelope(text: &str) -> String {
+    format!(
+        "OMAR MISSION CONTROL\n\
+         The operator sent this from Mission Control and cannot see this terminal. \
+         They see only what you send with omar_reply, so answer with omar_reply — \
+         including questions. To offer a workflow, call omar_propose_design with a \
+         complete OMAR program; the operator approves and runs it, you do not.\n\n\
+         {text}"
+    )
+}
+
 fn deliver_to_ea(context: &Arc<Context_>, text: &str) -> Result<()> {
     let client = TmuxClient::new(crate::ea::ea_prefix(context.ea_id, &context.session_prefix));
     let session = crate::ea::ea_manager_session(context.ea_id, &context.session_prefix);
@@ -409,7 +426,11 @@ fn deliver_to_ea(context: &Arc<Context_>, text: &str) -> Result<()> {
         client.has_session(&session)?,
         "the executive assistant is not running; start it with `omar` first"
     );
-    client.deliver_prompt(&session, text, &DeliveryOptions::default())?;
+    client.deliver_prompt(
+        &session,
+        &mission_control_envelope(text),
+        &DeliveryOptions::default(),
+    )?;
     Ok(())
 }
 
@@ -948,6 +969,16 @@ mod tests {
             "{manager} unexpectedly sits under {prefix}; prefix-scoped lookups \
              would now work and this guard is obsolete"
         );
+    }
+
+    #[test]
+    fn operator_messages_are_labelled_with_how_to_answer() {
+        // Without this the EA answers in its pane, where nobody is looking.
+        let envelope = mission_control_envelope("review the release plan");
+        assert!(envelope.starts_with("OMAR MISSION CONTROL"));
+        assert!(envelope.contains("omar_reply"));
+        assert!(envelope.contains("omar_propose_design"));
+        assert!(envelope.ends_with("review the release plan"));
     }
 
     #[test]
