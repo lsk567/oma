@@ -206,10 +206,6 @@ pub struct DiagramPublisher {
 }
 
 impl DiagramPublisher {
-    fn publish(&self, kind: &str, tag: Option<DiagramTag>, payload: Value) {
-        self.publish_with(kind, tag, payload, |_| {});
-    }
-
     /// Apply a snapshot change and stamp it with the event's sequence under one
     /// lock. Doing them separately lets `/v1/diagram` return updated state
     /// carrying the previous sequence, which breaks the versioning contract
@@ -242,18 +238,19 @@ impl DiagramPublisher {
         subscribers.retain(|subscriber| subscriber.try_send(event.clone()).is_ok());
     }
 
-    fn set_status(&self, status: &str) {
-        self.snapshot
-            .write()
-            .expect("diagram snapshot poisoned")
-            .status = status.to_string();
+    /// Status is part of the snapshot, so it advances with the sequence like
+    /// every other field — setting it on its own would let `/v1/diagram`
+    /// report a finished run under the sequence it had while running.
+    fn publish_status(&self, kind: &str, status: &str, payload: Value) {
+        self.publish_with(kind, None, payload, |snapshot| {
+            snapshot.status = status.to_string();
+        });
     }
 }
 
 impl TopologyObserver for DiagramPublisher {
     fn run_started(&self) {
-        self.set_status("running");
-        self.publish("run_started", None, json!({}));
+        self.publish_status("run_started", "running", json!({}));
     }
 
     fn tag_advanced(&self, timestamp: u64, microstep: u64, ports: &BTreeMap<String, Value>) {
@@ -341,13 +338,11 @@ impl TopologyObserver for DiagramPublisher {
     }
 
     fn run_completed(&self, outputs: &BTreeMap<String, Value>) {
-        self.set_status("completed");
-        self.publish("run_completed", None, json!({ "outputs": outputs }));
+        self.publish_status("run_completed", "completed", json!({ "outputs": outputs }));
     }
 
     fn run_failed(&self, message: &str) {
-        self.set_status("failed");
-        self.publish("run_failed", None, json!({ "message": message }));
+        self.publish_status("run_failed", "failed", json!({ "message": message }));
     }
 }
 
@@ -703,6 +698,64 @@ mod tests {
         assert!(seen.contains(": connected"), "{seen}");
         assert!(seen.contains("event: run_started"), "{seen}");
         assert!(seen.contains("\"protocol_version\":1"), "{seen}");
+    }
+
+    #[test]
+    fn every_status_change_is_announced_and_advances_the_sequence() {
+        // A reader polling /v1/diagram uses `sequence` to tell whether it has
+        // seen the current state, so a status that changes without advancing it
+        // is a status the reader never learns about.
+        //
+        // This does not cover the ordering of the two — that window is a few
+        // instructions wide and no polling client can reliably observe it. It
+        // is closed by construction instead: `publish_status` is the only way
+        // to set status, and it mutates under the same lock that stamps the
+        // sequence.
+        let server = DiagramServer::start(
+            &sample_state(),
+            "127.0.0.1:0".parse().expect("valid address"),
+        )
+        .expect("server starts");
+        let publisher = server.publisher();
+
+        for (act, status) in [
+            (
+                Box::new(|p: &DiagramPublisher| p.run_started()) as Box<dyn Fn(&DiagramPublisher)>,
+                "running",
+            ),
+            (
+                Box::new(|p: &DiagramPublisher| p.run_failed("boom")),
+                "failed",
+            ),
+            (
+                Box::new(|p: &DiagramPublisher| p.run_completed(&BTreeMap::new())),
+                "completed",
+            ),
+        ] {
+            let before = get(server.address(), "/v1/diagram");
+            act(&publisher);
+            let after = get(server.address(), "/v1/diagram");
+            assert!(
+                after.contains(&format!("\"status\":\"{status}\"")),
+                "{after}"
+            );
+            assert_ne!(
+                sequence_of(&before),
+                sequence_of(&after),
+                "status became {status} without advancing the sequence"
+            );
+        }
+    }
+
+    /// The `sequence` field of a `/v1/diagram` response body.
+    fn sequence_of(response: &str) -> u64 {
+        let body = response
+            .split_once("\r\n\r\n")
+            .expect("response has a body")
+            .1;
+        serde_json::from_str::<Value>(body).expect("valid json")["sequence"]
+            .as_u64()
+            .expect("sequence is a number")
     }
 
     #[test]

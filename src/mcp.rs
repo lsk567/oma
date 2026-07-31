@@ -2445,9 +2445,16 @@ fn serve_tool_call(
         "omar_propose_design" => "/v1/agent/proposals",
         other => bail!("unknown serve tool '{other}'"),
     };
-    let mut body = arguments;
-    body["token"] = json!(serve.token);
-    post_json(&serve.endpoint, path, &body)?;
+    // Arguments come from a model, so the shape is not guaranteed. Indexing a
+    // non-object `Value` panics, and a panic here takes the MCP server down
+    // with it — refuse the call instead.
+    let mut body = match arguments {
+        Value::Object(fields) => fields,
+        Value::Null => serde_json::Map::new(),
+        other => bail!("{name} expects an object of arguments, got {other}"),
+    };
+    body.insert("token".to_string(), json!(serve.token));
+    post_json(&serve.endpoint, path, &Value::Object(body))?;
     Ok(json!({"status":"delivered"}))
 }
 
@@ -2583,6 +2590,32 @@ mod tests {
             ..test_context()
         });
         assert_eq!(workflow, ["omar_set_port", "omar_complete"]);
+    }
+
+    #[test]
+    fn malformed_ea_arguments_are_refused_rather_than_fatal() {
+        // Arguments are model output. Indexing a non-object `Value` to attach
+        // the token would panic, and this runs inside the MCP server, so a
+        // malformed call would take the EA's whole tool channel down.
+        let server = OmarMcpServer::new(McpLaunchContext {
+            serve: Some(crate::manager::ServeMcpContext {
+                // Unroutable: reaching the post at all would be the bug.
+                endpoint: "127.0.0.1:1".to_string(),
+                token: "t".to_string(),
+            }),
+            ..test_context()
+        });
+        for arguments in [json!("hello"), json!([1, 2]), json!(7), json!(true)] {
+            let result = server.call_tool(ToolCallRequest {
+                name: "omar_reply".to_string(),
+                arguments: arguments.clone(),
+            });
+            let rendered = serde_json::to_string(&result).unwrap();
+            assert!(
+                rendered.contains("expects an object of arguments"),
+                "{arguments} should be refused, got {rendered}"
+            );
+        }
     }
 
     #[test]
