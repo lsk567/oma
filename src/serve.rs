@@ -81,6 +81,9 @@ pub struct ProposedDesign {
     pub program: String,
     #[serde(default)]
     pub inputs: BTreeMap<String, Value>,
+    /// The compiled topology, so the operator sees what they are approving
+    /// before any run exists.
+    pub preview: crate::diagram::DiagramSnapshot,
 }
 
 #[derive(Debug, Deserialize)]
@@ -429,15 +432,34 @@ fn agent_proposal(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     if proposal.token != context.agent_token {
         return (403, json!({"error": "forbidden"}));
     }
+    // Compile before publishing. The operator never sees an unbuildable
+    // program, and the EA gets the compiler's diagnostic back as its tool
+    // result, so it can correct the program itself.
+    let state = match compile_preview(context, &proposal.program) {
+        Ok(state) => state,
+        Err(error) => return (400, json!({"error": format!("{error:#}")})),
+    };
     context.publish(
         "assistant",
         proposal.summary,
         Some(ProposedDesign {
             program: proposal.program,
             inputs: proposal.inputs,
+            preview: crate::diagram::DiagramSnapshot::from_vm_state(&state),
         }),
     );
     (202, json!({"status": "proposed"}))
+}
+
+fn compile_preview(context: &Arc<Context_>, program: &str) -> Result<VmState> {
+    let dir = crate::ea::ea_state_dir(context.ea_id, &context.omar_dir).join("proposals");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{}.omar", Uuid::new_v4()));
+    fs::write(&path, program)?;
+    let bytecode = topology::load_program(&path)?;
+    let state = topology::verify(&bytecode)?;
+    let _ = fs::remove_file(&path);
+    Ok(state)
 }
 
 fn stream_chat(mut stream: TcpStream, context: &Arc<Context_>) -> Result<()> {
@@ -892,24 +914,22 @@ mod tests {
     }
 
     #[test]
-    fn a_proposal_reaches_the_conversation_without_running_anything() {
+    fn an_unbuildable_proposal_never_reaches_the_operator() {
+        // The EA gets the compiler diagnostic back as its tool result, so it
+        // can correct the program rather than the operator seeing a broken one.
         let server = test_server();
         let body = json!({
             "token": server.agent_token,
-            "program": "team ReviewFlow() {}",
-            "summary": "A review loop",
-            "inputs": {"request": "check the plan"},
+            "program": "team Broken( {{{",
+            "summary": "nonsense",
         })
         .to_string();
         let response = request(server.address(), "POST", "/v1/agent/proposals", Some(&body));
-        assert!(response.starts_with("HTTP/1.1 202 Accepted"), "{response}");
-
-        let chat = request(server.address(), "GET", "/v1/chat", None);
-        assert!(chat.contains("A review loop"));
-        assert!(chat.contains("team ReviewFlow() {}"));
-        assert!(chat.contains("\"role\":\"assistant\""));
-        // Proposing is not executing: the operator still has to admit the run.
-        assert!(request(server.address(), "GET", "/v1/runs", None).contains("\"runs\":[]"));
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "{response}"
+        );
+        assert!(request(server.address(), "GET", "/v1/chat", None).contains("\"messages\":[]"));
     }
 
     #[test]
