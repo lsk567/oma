@@ -241,7 +241,10 @@ impl Serve {
             if !restart {
                 return Ok(AttachEa::AlreadyRunningWithoutServe(existing));
             }
-            client.ensure_session_not_attached(&existing)?;
+            // Not `ensure_session_not_attached`: that resolves through the
+            // prefix-filtered session list, and the manager session is named
+            // `<prefix>ea-<id>`, which never matches the agent prefix. Kill it
+            // directly, as `ensure_manager_session` itself does.
             client.kill_session(&existing)?;
         }
         let (session, _) = crate::manager::ensure_manager_session(
@@ -930,6 +933,21 @@ mod tests {
             "{response}"
         );
         assert!(request(server.address(), "GET", "/v1/chat", None).contains("\"messages\":[]"));
+    }
+
+    #[test]
+    fn the_manager_session_is_not_under_the_agent_prefix() {
+        // `TmuxClient` resolves most lookups through a prefix-filtered session
+        // list, but the EA is named `<base>ea-<id>` while agents are
+        // `<base><id>-<name>`. Anything reaching for the manager session must
+        // use an exact tmux query, or it silently reports "not found".
+        let prefix = crate::ea::ea_prefix(0, "omar-agent-");
+        let manager = crate::ea::ea_manager_session(0, "omar-agent-");
+        assert!(
+            !manager.starts_with(&prefix),
+            "{manager} unexpectedly sits under {prefix}; prefix-scoped lookups \
+             would now work and this guard is obsolete"
+        );
     }
 
     #[test]
