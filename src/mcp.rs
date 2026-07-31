@@ -2,7 +2,7 @@
 //!
 //! This replaces the legacy REST surface with a typed MCP tool interface.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -484,6 +484,7 @@ pub fn run_server_with_default_context() -> Result<()> {
             .map(|server| server.trim().to_string())
             .filter(|server| !server.is_empty()),
         topology: None,
+        serve: None,
     };
     OmarMcpServer::new(context).run()
 }
@@ -598,7 +599,14 @@ impl OmarMcpServer {
                 let tools = if self.context.topology.is_some() {
                     topology_tool_definitions()
                 } else {
-                    tool_definitions()
+                    let mut tools = tool_definitions();
+                    // Only the EA converses with the operator, and only when
+                    // `omar serve` launched it. Workflow agents and plain
+                    // spawned agents never see these.
+                    if self.context.serve.is_some() {
+                        tools.extend(ea_tool_definitions());
+                    }
+                    tools
                 };
                 ok_response(id, json!({ "tools": tools }))
             }
@@ -633,6 +641,15 @@ impl OmarMcpServer {
             }
         } else {
             match call.name.as_str() {
+                // Refused rather than merely unlisted, so an agent that learned
+                // the names elsewhere still cannot reach the operator.
+                "omar_reply" | "omar_propose_design" => match &self.context.serve {
+                    Some(serve) => serve_tool_call(serve, &call.name, call.arguments),
+                    None => Err(anyhow!(
+                        "Tool '{}' is only available to the executive assistant",
+                        call.name
+                    )),
+                },
                 "list_backends" => self.list_backends(),
                 "list_eas" => self.list_eas(),
                 "get_active_ea" => self.get_active_ea(),
@@ -2349,6 +2366,98 @@ fn tool_definitions() -> Vec<Value> {
         .clone()
 }
 
+/// Tools for the executive assistant only, gated on a `serve` context.
+///
+/// The EA proposes; it never executes. A human approves the design in Mission
+/// Control, which then admits the run itself, so nothing here can start work.
+fn ea_tool_definitions() -> Vec<Value> {
+    vec![
+        tool(
+            "omar_reply",
+            "Send a message to the operator in Mission Control. This is the only way they see what you say. Set progress=true for a running commentary while you work — what you are doing and what you have found — so the operator is not left watching a spinner. Leave it unset for anything you want an answer to, or that concludes a turn.",
+            json!({
+                "type":"object",
+                "properties":{
+                    "text":{"type":"string"},
+                    "progress":{
+                        "type":"boolean",
+                        "description":"A note in passing rather than a reply; the operator stays shown as waiting."
+                    }
+                },
+                "required":["text"],
+                "additionalProperties":false
+            }),
+        ),
+        tool(
+            "omar_propose_design",
+            "Submit an OMAR program to the operator for approval. Does not run anything: the operator reviews the program in Mission Control and starts the run themselves. Include every input the program declares.",
+            json!({
+                "type":"object",
+                "properties":{
+                    "program":{"type":"string","description":"Complete .omar source"},
+                    "summary":{"type":"string","description":"One or two sentences on what it does"},
+                    "inputs":{"type":"object","description":"Values for the program's declared input ports"}
+                },
+                "required":["program","summary"],
+                "additionalProperties":false
+            }),
+        ),
+    ]
+}
+
+/// Minimal HTTP POST. `omar serve` is loopback-only and the payloads are tiny,
+/// so this avoids pulling in an HTTP client, matching how topology agents reach
+/// the invocation server over a raw socket.
+fn post_json(endpoint: &str, path: &str, body: &Value) -> Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let payload = serde_json::to_vec(body)?;
+    let mut stream = TcpStream::connect(endpoint)
+        .with_context(|| format!("omar serve at '{endpoint}' is unavailable"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    write!(
+        stream,
+        "POST {path} HTTP/1.1\r\nHost: {endpoint}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    )?;
+    stream.write_all(&payload)?;
+    stream.flush()?;
+
+    let mut status = String::new();
+    BufReader::new(&mut stream).read_line(&mut status)?;
+    if !status.contains(" 200") && !status.contains(" 201") && !status.contains(" 202") {
+        bail!("omar serve rejected {path}: {}", status.trim());
+    }
+    Ok(())
+}
+
+/// Forward an EA tool call to `omar serve` over its loopback admin endpoint.
+fn serve_tool_call(
+    serve: &crate::manager::ServeMcpContext,
+    name: &str,
+    arguments: Value,
+) -> Result<Value> {
+    let path = match name {
+        "omar_reply" => "/v1/agent/reply",
+        "omar_propose_design" => "/v1/agent/proposals",
+        other => bail!("unknown serve tool '{other}'"),
+    };
+    // Arguments come from a model, so the shape is not guaranteed. Indexing a
+    // non-object `Value` panics, and a panic here takes the MCP server down
+    // with it — refuse the call instead.
+    let mut body = match arguments {
+        Value::Object(fields) => fields,
+        Value::Null => serde_json::Map::new(),
+        other => bail!("{name} expects an object of arguments, got {other}"),
+    };
+    body.insert("token".to_string(), json!(serve.token));
+    post_json(&serve.endpoint, path, &Value::Object(body))?;
+    Ok(json!({"status":"delivered"}))
+}
+
 fn topology_tool_definitions() -> Vec<Value> {
     vec![
         tool(
@@ -2427,6 +2536,116 @@ mod tests {
             health_idle_warning: 15,
             tmux_server: None,
             topology: None,
+            serve: None,
+        }
+    }
+
+    fn listed_tools(context: McpLaunchContext) -> Vec<String> {
+        let server = OmarMcpServer::new(context);
+        let response = server
+            .handle_request(JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(1)),
+                method: "tools/list".to_string(),
+                params: json!({}),
+            })
+            .expect("tools/list responds");
+        response.result.expect("tools result")["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn ea_context() -> McpLaunchContext {
+        McpLaunchContext {
+            serve: Some(crate::manager::ServeMcpContext {
+                endpoint: "127.0.0.1:1".to_string(),
+                token: "test-token".to_string(),
+            }),
+            ..test_context()
+        }
+    }
+
+    #[test]
+    fn only_the_executive_assistant_sees_the_operator_tools() {
+        let ea = listed_tools(ea_context());
+        assert!(ea.contains(&"omar_reply".to_string()));
+        assert!(ea.contains(&"omar_propose_design".to_string()));
+
+        // A plain spawned agent has no serve context, so it must not see them.
+        let agent = listed_tools(test_context());
+        assert!(!agent.contains(&"omar_reply".to_string()));
+        assert!(!agent.contains(&"omar_propose_design".to_string()));
+
+        // Workflow agents are restricted to the port protocol.
+        let workflow = listed_tools(McpLaunchContext {
+            topology: Some(crate::manager::TopologyMcpContext {
+                team: "T".to_string(),
+                agent: "a".to_string(),
+                endpoint: "127.0.0.1:1".to_string(),
+                token: "t".to_string(),
+            }),
+            ..test_context()
+        });
+        assert_eq!(workflow, ["omar_set_port", "omar_complete"]);
+    }
+
+    #[test]
+    fn malformed_ea_arguments_are_refused_rather_than_fatal() {
+        // Arguments are model output. Indexing a non-object `Value` to attach
+        // the token would panic, and this runs inside the MCP server, so a
+        // malformed call would take the EA's whole tool channel down.
+        let server = OmarMcpServer::new(McpLaunchContext {
+            serve: Some(crate::manager::ServeMcpContext {
+                // Unroutable: reaching the post at all would be the bug.
+                endpoint: "127.0.0.1:1".to_string(),
+                token: "t".to_string(),
+            }),
+            ..test_context()
+        });
+        for arguments in [json!("hello"), json!([1, 2]), json!(7), json!(true)] {
+            let result = server.call_tool(ToolCallRequest {
+                name: "omar_reply".to_string(),
+                arguments: arguments.clone(),
+            });
+            let rendered = serde_json::to_string(&result).unwrap();
+            assert!(
+                rendered.contains("expects an object of arguments"),
+                "{arguments} should be refused, got {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn operator_tools_are_refused_not_merely_unlisted() {
+        // Knowing the tool name must not be enough for a non-EA agent.
+        for context in [
+            test_context(),
+            McpLaunchContext {
+                topology: Some(crate::manager::TopologyMcpContext {
+                    team: "T".to_string(),
+                    agent: "a".to_string(),
+                    endpoint: "127.0.0.1:1".to_string(),
+                    token: "t".to_string(),
+                }),
+                ..test_context()
+            },
+        ] {
+            let server = OmarMcpServer::new(context);
+            for name in ["omar_reply", "omar_propose_design"] {
+                let result = server.call_tool(ToolCallRequest {
+                    name: name.to_string(),
+                    arguments: json!({"text": "hello", "program": "team T() {}", "summary": "s"}),
+                });
+                let rendered = serde_json::to_string(&result).unwrap();
+                assert!(
+                    rendered.contains("only available to the executive assistant")
+                        || rendered.contains("unavailable to topology agent"),
+                    "{name} should be refused, got {rendered}"
+                );
+            }
         }
     }
 

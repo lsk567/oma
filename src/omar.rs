@@ -2,6 +2,7 @@ mod app;
 mod backend_probe;
 mod computer;
 mod config;
+mod diagram;
 mod ea;
 mod event;
 mod manager;
@@ -13,6 +14,8 @@ mod paths;
 mod process;
 mod projects;
 mod scheduler;
+mod serve;
+mod stub_agent;
 mod tmux;
 mod topology;
 mod ui;
@@ -135,29 +138,10 @@ enum Commands {
         context_file: Option<String>,
     },
 
-    /// Construct an agent topology from compiled OMAR bytecode
-    Topology {
-        #[command(subcommand)]
-        action: TopologyAction,
-    },
-}
-
-#[derive(Subcommand)]
-enum TopologyAction {
-    /// Verify and apply an initial topology
-    Apply {
-        /// JSON bytecode produced by the Lean compiler
-        bytecode: PathBuf,
-
-        /// Verify and print operations without spawning agents
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Start a topology and run it to completion
+    /// Run an OMAR program to completion
     Run {
-        /// JSON bytecode produced by the Lean compiler
-        bytecode: PathBuf,
+        /// OMAR source program
+        program: PathBuf,
 
         /// External input in NAME=VALUE form; repeat for multiple inputs
         #[arg(long = "input", required = true)]
@@ -170,6 +154,41 @@ enum TopologyAction {
         /// Maximum time to wait for each prompt invocation
         #[arg(long, default_value_t = 300)]
         timeout_seconds: u64,
+
+        /// Expose the live topology diagram API while the run is active
+        #[arg(long)]
+        diagram_server: bool,
+
+        /// Address for the live topology diagram API. Requires
+        /// `--diagram-server`; setting it alone silently did nothing.
+        #[arg(long, default_value = "127.0.0.1:0", requires = "diagram_server")]
+        diagram_address: std::net::SocketAddr,
+    },
+
+    /// Answer topology invocations without a model (test backend `stub`)
+    #[command(hide = true)]
+    StubAgent {
+        /// MCP context written for this agent by the runtime
+        #[arg(long)]
+        context_file: PathBuf,
+    },
+
+    /// Accept OMAR programs over HTTP and supervise their runs
+    Serve {
+        /// Loopback address to bind the admission API
+        #[arg(long, default_value = "127.0.0.1:7340")]
+        address: std::net::SocketAddr,
+
+        /// Restart the executive assistant so it can reply and propose designs.
+        /// Its MCP context is fixed at launch, so an already running EA cannot
+        /// gain those tools without this. Discards its current session.
+        #[arg(long)]
+        restart_ea: bool,
+
+        /// Serve the API without starting an executive assistant. The agent
+        /// context is still written, so a test harness can stand in for one.
+        #[arg(long)]
+        no_ea: bool,
     },
 }
 
@@ -319,6 +338,7 @@ async fn async_main() -> Result<()> {
                     &manager::ManagerRuntimeOptions {
                         default_workdir: config.agent.default_workdir.clone(),
                         health_idle_warning: config.health.idle_warning,
+                        serve: None,
                     },
                 ),
                 Some(ManagerAction::Orchestrate) => manager::run_manager_orchestration(
@@ -331,6 +351,7 @@ async fn async_main() -> Result<()> {
                     &manager::ManagerRuntimeOptions {
                         default_workdir: config.agent.default_workdir.clone(),
                         health_idle_warning: config.health.idle_warning,
+                        serve: None,
                     },
                 ),
             }
@@ -369,34 +390,41 @@ async fn async_main() -> Result<()> {
             Some(path) => mcp::run_server_from_context_file(PathBuf::from(path)),
             None => mcp::run_server_with_default_context(),
         },
-        Some(Commands::Topology { action }) => match action {
-            TopologyAction::Apply { bytecode, dry_run } => {
-                let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
-                apply_topology(&bytecode, dry_run, &target, &config, &omar_dir)
-            }
-            TopologyAction::Run {
-                bytecode,
-                inputs,
-                replace,
-                timeout_seconds,
-            } => {
-                let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
-                let bytecode = topology::load_bytecode(&bytecode)?;
-                topology::run_topology(
-                    &bytecode,
-                    topology::TopologyRunConfig {
-                        ea_id: target.id,
-                        omar_dir: &omar_dir,
-                        base_prefix: &config.dashboard.session_prefix,
-                        default_workdir: &config.agent.default_workdir,
-                        health_idle_warning: config.health.idle_warning,
-                        inputs: &inputs,
-                        replace,
-                        timeout: Duration::from_secs(timeout_seconds),
-                    },
-                )
-            }
-        },
+        Some(Commands::Run {
+            program,
+            inputs,
+            replace,
+            timeout_seconds,
+            diagram_server,
+            diagram_address,
+        }) => {
+            let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
+            let bytecode = topology::load_program(&program)?;
+            topology::run_topology(
+                &bytecode,
+                topology::TopologyRunConfig {
+                    ea_id: target.id,
+                    omar_dir: &omar_dir,
+                    base_prefix: &config.dashboard.session_prefix,
+                    default_workdir: &config.agent.default_workdir,
+                    health_idle_warning: config.health.idle_warning,
+                    inputs: &inputs,
+                    replace,
+                    timeout: Duration::from_secs(timeout_seconds),
+                    diagram_address: diagram_server.then_some(diagram_address),
+                    diagram_ready: None,
+                },
+            )
+        }
+        Some(Commands::StubAgent { context_file }) => stub_agent::run(&context_file),
+        Some(Commands::Serve {
+            address,
+            restart_ea,
+            no_ea,
+        }) => {
+            let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
+            serve::run(address, &config, &omar_dir, target.id, restart_ea, !no_ea)
+        }
         None => {
             if cli.agent.is_some() {
                 let (target, created) =
@@ -416,6 +444,7 @@ async fn async_main() -> Result<()> {
                     &manager::ManagerRuntimeOptions {
                         default_workdir: config.agent.default_workdir.clone(),
                         health_idle_warning: config.health.idle_warning,
+                        serve: None,
                     },
                 )?;
                 match result {
@@ -437,42 +466,6 @@ async fn async_main() -> Result<()> {
             }
         }
     }
-}
-
-fn apply_topology(
-    bytecode_path: &std::path::Path,
-    dry_run: bool,
-    target: &ea::EaInfo,
-    config: &Config,
-    omar_dir: &std::path::Path,
-) -> Result<()> {
-    let bytecode = topology::load_bytecode(bytecode_path)?;
-    let state = if dry_run {
-        topology::execute(&bytecode, &mut topology::DryRunAgentRuntime::default())?
-    } else {
-        let client = TmuxClient::new(ea::ea_prefix(target.id, &config.dashboard.session_prefix));
-        let mut runtime =
-            topology::TmuxAgentRuntime::new(client, config.agent.default_workdir.clone());
-        topology::execute(&bytecode, &mut runtime)?
-    };
-
-    println!(
-        "Topology '{}': {} agents, {} ports, {} reactions; executed {} instructions",
-        state.team,
-        state.agents.len(),
-        state.ports.len(),
-        state.reactions.len(),
-        state.executed_instructions
-    );
-
-    if !dry_run {
-        let topology_dir = ea::ea_state_dir(target.id, omar_dir).join("topologies");
-        std::fs::create_dir_all(&topology_dir)?;
-        let state_path = topology_dir.join(format!("{}.json", state.team));
-        topology::write_json_atomic(&state_path, &state)?;
-        println!("Installed topology state: {}", state_path.display());
-    }
-    Ok(())
 }
 
 fn omar_dir() -> PathBuf {

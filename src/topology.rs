@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -14,6 +15,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::config;
+use crate::diagram::{DiagramServer, NoopTopologyObserver, TopologyObserver};
 use crate::manager::{self, McpLaunchContext, TopologyMcpContext};
 use crate::tmux::DeliveryOptions;
 use crate::tmux::TmuxClient;
@@ -106,54 +108,6 @@ pub struct VmState {
     pub ports: BTreeMap<String, PortState>,
     pub connections: Vec<ConnectionState>,
     pub reactions: BTreeMap<String, ReactionState>,
-    #[serde(skip)]
-    pub executed_instructions: usize,
-}
-
-pub trait AgentRuntime {
-    fn spawn_agent(&mut self, name: &str, backend: &str) -> Result<()>;
-}
-
-pub struct TmuxAgentRuntime {
-    client: TmuxClient,
-    workdir: String,
-}
-
-impl TmuxAgentRuntime {
-    pub fn new(client: TmuxClient, workdir: String) -> Self {
-        Self { client, workdir }
-    }
-}
-
-impl AgentRuntime for TmuxAgentRuntime {
-    fn spawn_agent(&mut self, name: &str, backend: &str) -> Result<()> {
-        let session_name = format!("{}{}", self.client.prefix(), name);
-        if self.client.has_session(&session_name)? {
-            bail!("agent '{name}' already exists");
-        }
-
-        let backend = canonical_backend(backend);
-        let command = config::resolve_backend(backend)
-            .map_err(anyhow::Error::msg)
-            .with_context(|| format!("unsupported backend '{backend}' for agent '{name}'"))?;
-        self.client
-            .new_session(&session_name, &command, Some(&self.workdir))?;
-        println!("Spawned topology agent: {name} ({backend})");
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-pub struct DryRunAgentRuntime {
-    pub spawns: Vec<(String, String)>,
-}
-
-impl AgentRuntime for DryRunAgentRuntime {
-    fn spawn_agent(&mut self, name: &str, backend: &str) -> Result<()> {
-        println!("Would spawn topology agent: {name} ({backend})");
-        self.spawns.push((name.to_string(), backend.to_string()));
-        Ok(())
-    }
 }
 
 pub fn load_bytecode(path: &std::path::Path) -> Result<Bytecode> {
@@ -163,22 +117,81 @@ pub fn load_bytecode(path: &std::path::Path) -> Result<Bytecode> {
         .with_context(|| format!("invalid bytecode JSON in {}", path.display()))
 }
 
-pub fn execute<R: AgentRuntime>(bytecode: &Bytecode, runtime: &mut R) -> Result<VmState> {
-    let mut state = verify(bytecode)?;
-    for instruction in &bytecode.instructions {
-        match instruction {
-            Instruction::SpawnAgent { name, backend } => {
-                runtime.spawn_agent(name, backend)?;
-            }
-            Instruction::BeginPlan { .. }
-            | Instruction::DefinePort { .. }
-            | Instruction::ConnectPorts { .. }
-            | Instruction::InstallReaction { .. }
-            | Instruction::CommitPlan => {}
-        }
-        state.executed_instructions += 1;
+/// Compile and load an OMAR source program.
+///
+/// Installed builds find `omarc` beside the `omar` executable or on `PATH`;
+/// development builds also recognize the compiler built under `lang/.lake`.
+pub fn load_program(path: &Path) -> Result<Bytecode> {
+    load_program_with_compiler(path, None)
+}
+
+fn load_program_with_compiler(path: &Path, compiler: Option<&Path>) -> Result<Bytecode> {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("omar") {
+        bail!(
+            "OMAR programs must use the .omar extension: {}",
+            path.display()
+        );
     }
-    Ok(state)
+
+    compile_source(path, compiler)
+}
+
+fn compile_source(source: &Path, compiler: Option<&Path>) -> Result<Bytecode> {
+    let output_file = crate::paths::create_private_temp_file("omar-compile", "json")
+        .context("failed to create temporary bytecode file")?;
+    let output_path = output_file.path();
+    let compiler = compiler
+        .map(Path::to_path_buf)
+        .unwrap_or_else(resolve_omarc);
+
+    let output = Command::new(&compiler)
+        .arg(source)
+        .arg(output_path)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to invoke OMAR compiler '{}'; install omarc beside omar, \
+                 add it to PATH, or set OMARC_BIN",
+                compiler.display()
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let details = if stderr.is_empty() { stdout } else { stderr };
+        if details.is_empty() {
+            bail!("omarc failed with status {}", output.status);
+        }
+        bail!("omarc failed: {details}");
+    }
+
+    load_bytecode(output_path)
+        .with_context(|| format!("omarc failed to compile {}", source.display()))
+}
+
+fn resolve_omarc() -> PathBuf {
+    if let Some(path) = std::env::var_os("OMARC_BIN") {
+        return PathBuf::from(path);
+    }
+
+    let executable_name = format!("omarc{}", std::env::consts::EXE_SUFFIX);
+    if let Ok(current_executable) = std::env::current_exe() {
+        if let Some(directory) = current_executable.parent() {
+            let sibling = directory.join(&executable_name);
+            if sibling.is_file() {
+                return sibling;
+            }
+        }
+    }
+
+    let development_compiler = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("lang/.lake/build/bin")
+        .join(&executable_name);
+    if development_compiler.is_file() {
+        return development_compiler;
+    }
+
+    PathBuf::from(executable_name)
 }
 
 pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
@@ -209,7 +222,6 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
         ports: BTreeMap::new(),
         connections: Vec::new(),
         reactions: BTreeMap::new(),
-        executed_instructions: 0,
     };
     let mut committed = false;
 
@@ -870,6 +882,10 @@ pub struct TopologyRunConfig<'a> {
     pub inputs: &'a [String],
     pub replace: bool,
     pub timeout: Duration,
+    pub diagram_address: Option<std::net::SocketAddr>,
+    /// Receives the bound diagram address once the server is up. `omar serve`
+    /// needs it while the run is still in flight; `omar run` prints it instead.
+    pub diagram_ready: Option<mpsc::Sender<std::net::SocketAddr>>,
 }
 
 pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Result<()> {
@@ -882,17 +898,56 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
     if obsolete_invocations.exists() {
         fs::remove_dir_all(&obsolete_invocations)?;
     }
-    let invocation_server = InvocationServer::start()?;
+    let diagram_server = config
+        .diagram_address
+        .map(|address| DiagramServer::start(&state, address))
+        .transpose()?;
+    if let Some(server) = &diagram_server {
+        println!("Diagram server: http://{}", server.address());
+        if let Some(sender) = &config.diagram_ready {
+            let _ = sender.send(server.address());
+        }
+    }
+    let diagram_publisher = diagram_server.as_ref().map(DiagramServer::publisher);
+    let noop_observer = NoopTopologyObserver;
+    let observer: &dyn TopologyObserver = diagram_publisher
+        .as_ref()
+        .map(|publisher| publisher as &dyn TopologyObserver)
+        .unwrap_or(&noop_observer);
+    observer.run_started();
+
+    // Setup can fail — a backend that never reaches its ready banner, a missing
+    // input — and those failures are just as much a failed run as one in the
+    // event loop. Report them on the stream too, or an observer sees it go
+    // quiet with no reason given.
     let client = TmuxClient::new(crate::ea::ea_prefix(config.ea_id, config.base_prefix));
-    spawn_topology_agents(&state, &client, &runtime_dir, &invocation_server, &config)?;
-    let inputs = parse_inputs(&state, config.inputs)?;
+    let prepared = (|| -> Result<(InvocationServer, BTreeMap<String, Value>)> {
+        let invocation_server = InvocationServer::start()?;
+        spawn_topology_agents(&state, &client, &runtime_dir, &invocation_server, &config)?;
+        let inputs = parse_inputs(&state, config.inputs)?;
+        Ok((invocation_server, inputs))
+    })();
+    let (invocation_server, inputs) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            observer.run_failed(&error.to_string());
+            return Err(error);
+        }
+    };
     let executor = TmuxReactionExecutor {
         client,
         team: state.team.clone(),
         registry: invocation_server.registry.clone(),
         timeout: config.timeout,
     };
-    let outputs = run_event_loop(&state, inputs, &executor)?;
+    let outputs = match run_event_loop_observed(&state, inputs, &executor, observer) {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            observer.run_failed(&error.to_string());
+            return Err(error);
+        }
+    };
+    observer.run_completed(&outputs);
     write_json_atomic(&runtime_dir.join("state.json"), &state)?;
     println!("Topology '{}' completed", state.team);
     for (port, value) in outputs {
@@ -935,6 +990,9 @@ fn spawn_topology_agents(
             default_workdir: config.default_workdir.to_string(),
             health_idle_warning: config.health_idle_warning,
             tmux_server: std::env::var("OMAR_TMUX_SERVER").ok(),
+            // Topology agents answer invocations; they do not chat with the
+            // operator, so they get no serve context.
+            serve: None,
             topology: Some(TopologyMcpContext {
                 team: state.team.clone(),
                 agent: name.clone(),
@@ -962,7 +1020,7 @@ fn spawn_topology_agents(
     Ok(())
 }
 
-fn parse_inputs(state: &VmState, raw_inputs: &[String]) -> Result<BTreeMap<String, Value>> {
+pub fn parse_inputs(state: &VmState, raw_inputs: &[String]) -> Result<BTreeMap<String, Value>> {
     let mut inputs = BTreeMap::new();
     for raw in raw_inputs {
         let (name, raw_value) = raw
@@ -1062,16 +1120,27 @@ fn enqueue_event(
     Ok(())
 }
 
+#[cfg(test)]
 fn run_event_loop<E: ReactionExecutor>(
     state: &VmState,
     inputs: BTreeMap<String, Value>,
     executor: &E,
+) -> Result<BTreeMap<String, Value>> {
+    run_event_loop_observed(state, inputs, executor, &NoopTopologyObserver)
+}
+
+fn run_event_loop_observed<E: ReactionExecutor>(
+    state: &VmState,
+    inputs: BTreeMap<String, Value>,
+    executor: &E,
+    observer: &dyn TopologyObserver,
 ) -> Result<BTreeMap<String, Value>> {
     let mut queue = BTreeMap::from([(Tag::START, inputs)]);
     let mut outputs = BTreeMap::new();
     let mut steps = 0usize;
 
     while let Some((tag, events)) = queue.pop_first() {
+        observer.tag_advanced(tag.timestamp, tag.microstep, &events);
         steps += 1;
         if steps > 1024 {
             bail!("topology exceeded 1024 logical tags");
@@ -1121,6 +1190,15 @@ fn run_event_loop<E: ReactionExecutor>(
                 .iter()
                 .map(|index| invocation_spec(state, enabled[*index], &events))
                 .collect::<Result<_>>()?;
+            for spec in &specs {
+                observer.reaction_started(
+                    tag.timestamp,
+                    tag.microstep,
+                    &spec.reaction_id,
+                    &spec.id,
+                );
+            }
+            let invocation_ids: Vec<_> = specs.iter().map(|spec| spec.id.clone()).collect();
             let results = thread::scope(|scope| {
                 let handles: Vec<_> = specs
                     .into_iter()
@@ -1135,7 +1213,16 @@ fn run_event_loop<E: ReactionExecutor>(
                     })
                     .collect::<Result<Vec<_>>>()
             })?;
-            for (index, writes) in layer.into_iter().zip(results) {
+            for ((index, invocation_id), writes) in
+                layer.into_iter().zip(invocation_ids).zip(results)
+            {
+                observer.reaction_completed(
+                    tag.timestamp,
+                    tag.microstep,
+                    enabled[index].0,
+                    &invocation_id,
+                    &writes,
+                );
                 completed.push((enabled[index].1.order, writes));
             }
         }
@@ -1334,6 +1421,7 @@ fn canonical_backend(backend: &str) -> &str {
         "opencode" => "opencode",
         "cursor" => "cursor",
         "agy" => "agy",
+        "stub" => "stub",
         _ => backend,
     }
 }
@@ -1362,23 +1450,49 @@ mod tests {
     }
 
     #[test]
-    fn executes_verified_initial_topology() {
-        let mut runtime = DryRunAgentRuntime::default();
-        let state = execute(&program(), &mut runtime).unwrap();
-        assert_eq!(runtime.spawns, vec![("worker".into(), "Codex".into())]);
-        assert_eq!(state.agents.len(), 1);
-        assert_eq!(state.ports.len(), 2);
-        assert_eq!(state.reactions.len(), 1);
-        assert_eq!(state.executed_instructions, program().instructions.len());
+    fn rejects_compiled_json_as_a_user_program() {
+        let directory = tempfile::tempdir().unwrap();
+        let bytecode_path = directory.path().join("workflow.json");
+        fs::write(&bytecode_path, serde_json::to_vec(&program()).unwrap()).unwrap();
+
+        let error = load_program_with_compiler(&bytecode_path, Some(Path::new("missing-omarc")))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("must use the .omar extension"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compiles_omar_source_before_loading_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("workflow.omar");
+        fs::write(&source_path, serde_json::to_vec(&program()).unwrap()).unwrap();
+        let compiler_path = directory.path().join("omarc");
+        fs::write(&compiler_path, "#!/bin/sh\ncp \"$1\" \"$2\"\n").unwrap();
+        let mut permissions = fs::metadata(&compiler_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&compiler_path, permissions).unwrap();
+
+        let loaded = load_program_with_compiler(&source_path, Some(&compiler_path)).unwrap();
+
+        assert_eq!(loaded.team, "Demo");
     }
 
     #[test]
-    fn verifies_before_spawning() {
+    fn verifies_initial_topology() {
+        let state = verify(&program()).unwrap();
+        assert_eq!(state.agents.len(), 1);
+        assert_eq!(state.ports.len(), 2);
+        assert_eq!(state.reactions.len(), 1);
+    }
+
+    #[test]
+    fn rejects_incomplete_topology() {
         let mut program = program();
         program.instructions.pop();
-        let mut runtime = DryRunAgentRuntime::default();
-        assert!(execute(&program, &mut runtime).is_err());
-        assert!(runtime.spawns.is_empty());
+        assert!(verify(&program).is_err());
     }
 
     #[test]
@@ -1488,7 +1602,6 @@ mod tests {
             ports: BTreeMap::new(),
             connections: Vec::new(),
             reactions: BTreeMap::new(),
-            executed_instructions: 0,
         };
         for (name, kind, ty) in [
             ("resume", PortKind::Input, "path"),
