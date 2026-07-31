@@ -31,6 +31,8 @@ pub const SERVE_PROTOCOL_VERSION: u32 = 1;
 /// compilation and process start-up.
 const DIAGRAM_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BODY_BYTES: usize = 512 * 1024;
+/// Messages a stalled chat subscriber may fall behind by before it is dropped.
+const CHAT_QUEUE: usize = 256;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunRecord {
@@ -113,7 +115,7 @@ struct ChatRequest {
 #[derive(Default)]
 struct Chat {
     messages: Vec<ChatMessage>,
-    subscribers: Vec<mpsc::Sender<ChatMessage>>,
+    subscribers: Vec<mpsc::SyncSender<ChatMessage>>,
     sequence: u64,
 }
 
@@ -148,7 +150,7 @@ impl Context_ {
         };
         chat.messages.push(message.clone());
         chat.subscribers
-            .retain(|subscriber| subscriber.send(message.clone()).is_ok());
+            .retain(|subscriber| subscriber.try_send(message.clone()).is_ok());
         message
     }
 }
@@ -189,7 +191,6 @@ impl Serve {
         );
         let listener = TcpListener::bind(address)
             .with_context(|| format!("failed to bind serve at {address}"))?;
-        listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
         let agent_token = Uuid::new_v4().to_string();
         let context = Arc::new(Context_ {
@@ -202,6 +203,9 @@ impl Serve {
             chat: Arc::new(Mutex::new(Chat::default())),
             agent_token: agent_token.clone(),
         });
+        // Blocking accept rather than a polling loop: `Drop` wakes it with a
+        // self-connection, so there is no need to spin, and no added latency on
+        // every connection from a poll interval.
         let running = Arc::new(AtomicBool::new(true));
         let thread_running = running.clone();
         let thread = thread::spawn(move || {
@@ -213,9 +217,7 @@ impl Serve {
                             let _ = handle_client(stream, context);
                         });
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(20));
-                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(_) => break,
                 }
             }
@@ -392,6 +394,7 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
     let path = parts.next().unwrap_or("").to_string();
 
     let mut content_length = 0usize;
+    let mut origin = None;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 || line == "\r\n" {
@@ -401,15 +404,21 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
         if let Some(value) = lower.strip_prefix("content-length:") {
             content_length = value.trim().parse().unwrap_or(0);
         }
+        // Loopback binding does not stop a page the operator visits from
+        // calling this, so only loopback origins are granted CORS.
+        if let Some(value) = lower.strip_prefix("origin:") {
+            origin = crate::diagram::allowed_origin(Some(value));
+        }
     }
+    let origin = origin.as_deref();
 
     if method == "OPTIONS" {
-        return write_json(&mut stream, 204, &Value::Null);
+        return write_json(&mut stream, 204, &Value::Null, origin);
     }
 
     // Streams for as long as the operator keeps Mission Control open.
     if method == "GET" && path == "/v1/chat/events" {
-        return stream_chat(stream, &context);
+        return stream_chat(stream, &context, origin);
     }
 
     let mut read_body = |length: usize| -> Result<Vec<u8>> {
@@ -458,7 +467,7 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
         }
         _ => (404, json!({"error": "not found"})),
     };
-    write_json(&mut stream, status, &body)
+    write_json(&mut stream, status, &body, origin)
 }
 
 /// Relay an operator message into the EA's tmux session.
@@ -567,11 +576,13 @@ fn compile_preview(context: &Arc<Context_>, program: &str) -> Result<VmState> {
     Ok(state)
 }
 
-fn stream_chat(mut stream: TcpStream, context: &Arc<Context_>) -> Result<()> {
-    stream.write_all(
-        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+fn stream_chat(mut stream: TcpStream, context: &Arc<Context_>, origin: Option<&str>) -> Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n{}Vary: Origin\r\n\r\n",
+        crate::diagram::cors_origin_header(origin)
     )?;
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = mpsc::sync_channel(CHAT_QUEUE);
     let backlog = {
         let mut chat = context.chat.lock().expect("serve chat poisoned");
         chat.subscribers.push(sender);
@@ -799,7 +810,12 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-fn write_json(stream: &mut TcpStream, status: u16, body: &Value) -> Result<()> {
+fn write_json(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &Value,
+    origin: Option<&str>,
+) -> Result<()> {
     let reason = match status {
         200 => "OK",
         201 => "Created",
@@ -820,8 +836,9 @@ fn write_json(stream: &mut TcpStream, status: u16, body: &Value) -> Result<()> {
     };
     write!(
         stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: content-type\r\nConnection: close\r\n\r\n",
-        payload.len()
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}Access-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: content-type\r\nVary: Origin\r\nConnection: close\r\n\r\n",
+        payload.len(),
+        crate::diagram::cors_origin_header(origin)
     )?;
     stream.write_all(&payload)?;
     stream.flush()?;

@@ -14,6 +14,9 @@ use crate::topology::{PortKind, VmState};
 
 pub const DIAGRAM_PROTOCOL_VERSION: u32 = 1;
 
+/// Events a slow subscriber may fall behind by before it is dropped.
+const SUBSCRIBER_QUEUE: usize = 256;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagramAgent {
     pub id: String,
@@ -198,15 +201,27 @@ impl TopologyObserver for NoopTopologyObserver {}
 #[derive(Clone)]
 pub struct DiagramPublisher {
     snapshot: Arc<RwLock<DiagramSnapshot>>,
-    subscribers: Arc<Mutex<Vec<mpsc::Sender<DiagramEvent>>>>,
+    subscribers: Arc<Mutex<Vec<mpsc::SyncSender<DiagramEvent>>>>,
     sequence: Arc<AtomicU64>,
 }
 
 impl DiagramPublisher {
     fn publish(&self, kind: &str, tag: Option<DiagramTag>, payload: Value) {
+        self.publish_with(kind, tag, payload, |_| {});
+    }
+
+    /// Apply a snapshot change and stamp it with the event's sequence under one
+    /// lock. Doing them separately lets `/v1/diagram` return updated state
+    /// carrying the previous sequence, which breaks the versioning contract
+    /// clients rely on to tell whether they are behind.
+    fn publish_with<F>(&self, kind: &str, tag: Option<DiagramTag>, payload: Value, mutate: F)
+    where
+        F: FnOnce(&mut DiagramSnapshot),
+    {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
         let team = {
             let mut snapshot = self.snapshot.write().expect("diagram snapshot poisoned");
+            mutate(&mut snapshot);
             snapshot.sequence = sequence;
             snapshot.team.clone()
         };
@@ -222,7 +237,9 @@ impl DiagramPublisher {
             .subscribers
             .lock()
             .expect("diagram subscribers poisoned");
-        subscribers.retain(|subscriber| subscriber.send(event.clone()).is_ok());
+        // `try_send` rather than `send`: a full queue means the subscriber has
+        // stopped reading, and blocking here would stall the run itself.
+        subscribers.retain(|subscriber| subscriber.try_send(event.clone()).is_ok());
     }
 
     fn set_status(&self, status: &str) {
@@ -244,17 +261,20 @@ impl TopologyObserver for DiagramPublisher {
             timestamp,
             microstep,
         };
-        {
-            let mut snapshot = self.snapshot.write().expect("diagram snapshot poisoned");
-            snapshot.current_tag = Some(tag);
-            for (name, value) in ports {
-                if let Some(port) = snapshot.ports.iter_mut().find(|port| port.name == *name) {
-                    port.value = Some(value.clone());
-                    port.last_tag = Some(tag);
+        self.publish_with(
+            "tag_advanced",
+            Some(tag),
+            json!({ "ports": ports }),
+            |snapshot| {
+                snapshot.current_tag = Some(tag);
+                for (name, value) in ports {
+                    if let Some(port) = snapshot.ports.iter_mut().find(|port| port.name == *name) {
+                        port.value = Some(value.clone());
+                        port.last_tag = Some(tag);
+                    }
                 }
-            }
-        }
-        self.publish("tag_advanced", Some(tag), json!({ "ports": ports }));
+            },
+        );
     }
 
     fn reaction_started(
@@ -268,21 +288,21 @@ impl TopologyObserver for DiagramPublisher {
             timestamp,
             microstep,
         };
-        if let Some(item) = self
-            .snapshot
-            .write()
-            .expect("diagram snapshot poisoned")
-            .reactions
-            .iter_mut()
-            .find(|item| item.name == reaction)
-        {
-            item.status = "running".to_string();
-            item.invocation_id = Some(invocation_id.to_string());
-        }
-        self.publish(
+        let apply = |snapshot: &mut DiagramSnapshot| {
+            if let Some(item) = snapshot
+                .reactions
+                .iter_mut()
+                .find(|item| item.name == reaction)
+            {
+                item.status = "running".to_string();
+                item.invocation_id = Some(invocation_id.to_string());
+            }
+        };
+        self.publish_with(
             "reaction_started",
             Some(tag),
             json!({ "reaction": reaction_id(reaction), "invocation_id": invocation_id }),
+            apply,
         );
     }
 
@@ -298,18 +318,17 @@ impl TopologyObserver for DiagramPublisher {
             timestamp,
             microstep,
         };
-        if let Some(item) = self
-            .snapshot
-            .write()
-            .expect("diagram snapshot poisoned")
-            .reactions
-            .iter_mut()
-            .find(|item| item.name == reaction)
-        {
-            item.status = "completed".to_string();
-            item.invocation_id = Some(invocation_id.to_string());
-        }
-        self.publish(
+        let apply = |snapshot: &mut DiagramSnapshot| {
+            if let Some(item) = snapshot
+                .reactions
+                .iter_mut()
+                .find(|item| item.name == reaction)
+            {
+                item.status = "completed".to_string();
+                item.invocation_id = Some(invocation_id.to_string());
+            }
+        };
+        self.publish_with(
             "reaction_completed",
             Some(tag),
             json!({
@@ -317,6 +336,7 @@ impl TopologyObserver for DiagramPublisher {
                 "invocation_id": invocation_id,
                 "writes": writes
             }),
+            apply,
         );
     }
 
@@ -346,7 +366,6 @@ impl DiagramServer {
         );
         let listener = TcpListener::bind(address)
             .with_context(|| format!("failed to bind diagram server at {address}"))?;
-        listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
         let snapshot = Arc::new(RwLock::new(DiagramSnapshot::from_vm_state(state)));
         let subscribers = Arc::new(Mutex::new(Vec::new()));
@@ -355,6 +374,9 @@ impl DiagramServer {
             subscribers: subscribers.clone(),
             sequence: Arc::new(AtomicU64::new(0)),
         };
+        // Blocking accept rather than a polling loop: `Drop` wakes it with a
+        // self-connection, so there is no need to spin, and no added latency on
+        // every connection from a poll interval.
         let running = Arc::new(AtomicBool::new(true));
         let thread_running = running.clone();
         let thread = thread::spawn(move || {
@@ -367,9 +389,9 @@ impl DiagramServer {
                             let _ = handle_client(stream, snapshot, subscribers);
                         });
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(20));
-                    }
+                    // A signal interrupting `accept` is not a reason to stop
+                    // serving.
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(_) => break,
                 }
             }
@@ -404,7 +426,7 @@ impl Drop for DiagramServer {
 fn handle_client(
     mut stream: TcpStream,
     snapshot: Arc<RwLock<DiagramSnapshot>>,
-    subscribers: Arc<Mutex<Vec<mpsc::Sender<DiagramEvent>>>>,
+    subscribers: Arc<Mutex<Vec<mpsc::SyncSender<DiagramEvent>>>>,
 ) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -413,31 +435,55 @@ fn handle_client(
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let path = parts.next().unwrap_or("");
-    while {
+    // The request's own origin decides what CORS we grant it.
+    let mut origin = None;
+    loop {
         let mut line = String::new();
-        reader.read_line(&mut line)? > 0 && line != "\r\n"
-    } {}
+        if reader.read_line(&mut line)? == 0 || line == "\r\n" {
+            break;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("origin:") {
+            origin = allowed_origin(Some(value));
+        }
+    }
+    let origin = origin.as_deref();
 
     if method == "OPTIONS" {
-        write_headers(&mut stream, "204 No Content", "text/plain", 0)?;
+        write_headers(&mut stream, "204 No Content", "text/plain", 0, origin)?;
         return Ok(());
     }
     match (method, path) {
         ("GET", "/health") => {
             let body = br#"{"status":"ok"}"#;
-            write_headers(&mut stream, "200 OK", "application/json", body.len())?;
+            write_headers(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                body.len(),
+                origin,
+            )?;
             stream.write_all(body)?;
         }
         ("GET", "/v1/diagram") => {
             let body = serde_json::to_vec(&*snapshot.read().expect("diagram snapshot poisoned"))?;
-            write_headers(&mut stream, "200 OK", "application/json", body.len())?;
+            write_headers(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                body.len(),
+                origin,
+            )?;
             stream.write_all(&body)?;
         }
         ("GET", "/v1/events") => {
-            stream.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n{}Vary: Origin\r\n\r\n",
+                cors_origin_header(origin)
             )?;
-            let (sender, receiver) = mpsc::channel();
+            // Bounded: a subscriber that stops reading is dropped rather than
+            // queueing events until it exhausts memory.
+            let (sender, receiver) = mpsc::sync_channel(SUBSCRIBER_QUEUE);
             subscribers
                 .lock()
                 .expect("diagram subscribers poisoned")
@@ -474,11 +520,39 @@ fn handle_client(
         }
         _ => {
             let body = br#"{"error":"not found"}"#;
-            write_headers(&mut stream, "404 Not Found", "application/json", body.len())?;
+            write_headers(
+                &mut stream,
+                "404 Not Found",
+                "application/json",
+                body.len(),
+                origin,
+            )?;
             stream.write_all(body)?;
         }
     }
     Ok(())
+}
+
+/// Origins allowed to read the diagram API from a browser.
+///
+/// `*` would let any page the user happens to visit read their local topology,
+/// which loopback binding does nothing to prevent. Mission Control is served
+/// from localhost, so echo only loopback origins back.
+pub(crate) fn allowed_origin(origin: Option<&str>) -> Option<String> {
+    let origin = origin?.trim();
+    let host = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))?;
+    let host = match host.strip_prefix('[') {
+        // Bracketed IPv6: the address itself contains colons.
+        Some(rest) => rest.split(']').next()?,
+        None => host.split(':').next()?,
+    };
+    if matches!(host, "localhost" | "127.0.0.1" | "::1") {
+        Some(origin.to_string())
+    } else {
+        None
+    }
 }
 
 fn write_headers(
@@ -486,12 +560,23 @@ fn write_headers(
     status: &str,
     content_type: &str,
     content_length: usize,
+    origin: Option<&str>,
 ) -> Result<()> {
     write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n"
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\n{}Access-Control-Allow-Methods: GET, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nVary: Origin\r\nConnection: close\r\n\r\n",
+        cors_origin_header(origin)
     )?;
     Ok(())
+}
+
+/// Emits nothing when the origin is not one we grant, so the browser applies
+/// its default same-origin rule rather than being handed a blanket allowance.
+pub(crate) fn cors_origin_header(origin: Option<&str>) -> String {
+    match origin {
+        Some(origin) => format!("Access-Control-Allow-Origin: {origin}\r\n"),
+        None => String::new(),
+    }
 }
 
 fn agent_id(name: &str) -> String {
@@ -580,6 +665,82 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("\"team\":\"Sample\""));
         assert!(get(server.address(), "/health").contains("\"status\":\"ok\""));
+    }
+
+    #[test]
+    fn events_stream_delivers_and_keeps_the_connection_open() {
+        let server = DiagramServer::start(
+            &sample_state(),
+            "127.0.0.1:0".parse().expect("valid address"),
+        )
+        .expect("server starts");
+        let publisher = server.publisher();
+
+        let mut stream = TcpStream::connect(server.address()).expect("connect");
+        write!(
+            stream,
+            "GET /v1/events HTTP/1.1\r\nHost: {}\r\n\r\n",
+            server.address()
+        )
+        .expect("request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
+
+        // Give the subscriber time to register before anything is published,
+        // since the stream carries no history.
+        thread::sleep(Duration::from_millis(150));
+        publisher.run_started();
+
+        let mut reader = BufReader::new(stream);
+        let mut seen = String::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !seen.contains("event: run_started") && std::time::Instant::now() < deadline {
+            let mut chunk = [0u8; 512];
+            match std::io::Read::read(&mut reader, &mut chunk) {
+                Ok(0) => break,
+                Ok(read) => seen.push_str(&String::from_utf8_lossy(&chunk[..read])),
+                Err(_) => break,
+            }
+        }
+        assert!(seen.contains("text/event-stream"), "{seen}");
+        assert!(seen.contains(": connected"), "{seen}");
+        assert!(seen.contains("event: run_started"), "{seen}");
+        assert!(seen.contains("\"protocol_version\":1"), "{seen}");
+    }
+
+    #[test]
+    fn cors_is_granted_to_loopback_origins_only() {
+        // Loopback binding does not stop a page the operator visits from
+        // reading this API, so a blanket `*` would leak their topology.
+        for origin in [
+            "http://localhost:3000",
+            "http://127.0.0.1:8080",
+            "https://[::1]",
+        ] {
+            assert_eq!(
+                allowed_origin(Some(origin)).as_deref(),
+                Some(origin),
+                "{origin} should be allowed"
+            );
+        }
+        for origin in [
+            "http://evil.example",
+            "https://localhost.attacker.com",
+            "null",
+        ] {
+            assert_eq!(
+                allowed_origin(Some(origin)),
+                None,
+                "{origin} must be refused"
+            );
+        }
+        assert_eq!(allowed_origin(None), None);
+        // A refused origin gets no header at all, so the browser falls back to
+        // its own same-origin rule.
+        assert_eq!(cors_origin_header(None), "");
+        assert!(cors_origin_header(Some("http://localhost:3000"))
+            .starts_with("Access-Control-Allow-Origin: http://localhost:3000"));
     }
 
     #[test]

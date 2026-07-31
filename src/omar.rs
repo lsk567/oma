@@ -159,8 +159,9 @@ enum Commands {
         #[arg(long)]
         diagram_server: bool,
 
-        /// Address for the live topology diagram API
-        #[arg(long, default_value = "127.0.0.1:0")]
+        /// Address for the live topology diagram API. Requires
+        /// `--diagram-server`; setting it alone silently did nothing.
+        #[arg(long, default_value = "127.0.0.1:0", requires = "diagram_server")]
         diagram_address: std::net::SocketAddr,
     },
 
