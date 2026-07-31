@@ -27,6 +27,8 @@ pub struct McpLaunchContext {
     pub tmux_server: Option<String>,
     #[serde(default)]
     pub topology: Option<TopologyMcpContext>,
+    #[serde(default)]
+    pub serve: Option<ServeMcpContext>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -37,10 +39,20 @@ pub struct TopologyMcpContext {
     pub token: String,
 }
 
+/// Lets the EA talk back to whoever is driving `omar serve` — replies and
+/// proposed programs. Present only when serve launched the manager session.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServeMcpContext {
+    pub endpoint: String,
+    pub token: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ManagerRuntimeOptions {
     pub default_workdir: String,
     pub health_idle_warning: i64,
+    /// Set by `omar serve` so the EA can reply and propose designs.
+    pub serve: Option<ServeMcpContext>,
 }
 
 // Embed prompt files at compile time so they work regardless of CWD.
@@ -1018,6 +1030,7 @@ pub fn ensure_manager_session(
             health_idle_warning: options.health_idle_warning,
             tmux_server: current_tmux_server(),
             topology: None,
+            serve: options.serve.clone(),
         },
     );
 
@@ -1312,6 +1325,7 @@ fn spawn_worker(
             health_idle_warning: 15,
             tmux_server: current_tmux_server(),
             topology: None,
+            serve: None,
         },
     );
 
@@ -1435,6 +1449,39 @@ mod tests {
     /// any path — the per-backend materializers return `None` silently on IO
     /// failure, which is part of what we're asserting on. Tests that also
     /// need the context files on disk must use a real `tempfile::tempdir()`.
+    #[test]
+    fn serve_context_survives_the_context_file_round_trip() {
+        // The EA's MCP sidecar is a separate process that reads this file back,
+        // so the serve endpoint and token have to serialise or the operator
+        // tools silently never work.
+        let omar_dir =
+            std::env::temp_dir().join(format!("omar-serve-ctx-{}", uuid::Uuid::new_v4()));
+        let context = McpLaunchContext {
+            serve: Some(ServeMcpContext {
+                endpoint: "127.0.0.1:7340".to_string(),
+                token: "secret-token".to_string(),
+            }),
+            ..test_mcp_context(&omar_dir)
+        };
+        let encoded = serde_json::to_string(&context).expect("context serialises");
+        let decoded: McpLaunchContext =
+            serde_json::from_str(&encoded).expect("context deserialises");
+        let serve = decoded.serve.expect("serve context survives");
+        assert_eq!(serve.endpoint, "127.0.0.1:7340");
+        assert_eq!(serve.token, "secret-token");
+
+        // Contexts written before this field existed still load.
+        let legacy = serde_json::to_value(&context)
+            .map(|mut value| {
+                value.as_object_mut().unwrap().remove("serve");
+                value
+            })
+            .expect("legacy context");
+        let decoded: McpLaunchContext =
+            serde_json::from_value(legacy).expect("legacy context deserialises");
+        assert!(decoded.serve.is_none());
+    }
+
     fn test_mcp_context(omar_dir: &Path) -> McpLaunchContext {
         McpLaunchContext {
             omar_dir: omar_dir.to_path_buf(),
@@ -1445,6 +1492,7 @@ mod tests {
             health_idle_warning: 15,
             tmux_server: None,
             topology: None,
+            serve: None,
         }
     }
 
@@ -1888,6 +1936,7 @@ mod tests {
                 health_idle_warning: 15,
                 tmux_server: None,
                 topology: None,
+                serve: None,
             },
         );
 

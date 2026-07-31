@@ -976,6 +976,9 @@ fn spawn_topology_agents(
             default_workdir: config.default_workdir.to_string(),
             health_idle_warning: config.health_idle_warning,
             tmux_server: std::env::var("OMAR_TMUX_SERVER").ok(),
+            // Topology agents answer invocations; they do not chat with the
+            // operator, so they get no serve context.
+            serve: None,
             topology: Some(TopologyMcpContext {
                 team: state.team.clone(),
                 agent: name.clone(),

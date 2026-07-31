@@ -58,3 +58,26 @@ Agent sessions are named `prefix + agent`, so concurrent runs of one team would
 collide. `serve` returns 409 while a team already has an active run.
 
 Loopback only: the surface executes arbitrary programs.
+
+### Talking to the executive assistant
+
+`serve` also relays a conversation between the operator and the EA:
+
+```
+POST /v1/chat          { text }        -> delivered into the EA's session
+GET  /v1/chat                          -> the conversation so far
+GET  /v1/chat/events                   -> SSE; replays history, then streams
+```
+
+The EA gets two MCP tools, and only the EA: `omar_reply` to talk back, and
+`omar_propose_design` to submit a program for approval. Both are gated on a
+serve context that is present only for an EA that `serve` launched. Workflow
+agents are restricted to `omar_set_port`/`omar_complete`, plain spawned agents
+see neither, and calls are refused, not merely unlisted.
+
+The EA proposes; it never executes. A proposal lands in the conversation and
+stops there — only the operator can admit a run, via `POST /v1/runs`.
+
+That context is baked in when the EA launches, so an already running EA cannot
+gain the tools. `serve` says so and continues; `--restart-ea` relaunches it
+(discarding its session).

@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::ea::EaId;
+use crate::tmux::{DeliveryOptions, TmuxClient};
 use crate::topology::{self, PortKind, TopologyRunConfig, VmState};
 
 pub const SERVE_PROTOCOL_VERSION: u32 = 1;
@@ -65,6 +66,50 @@ fn default_timeout_seconds() -> u64 {
 
 type Runs = Arc<Mutex<BTreeMap<String, RunRecord>>>;
 
+/// One entry in the operator/EA conversation. `design` is set only on
+/// proposals, and carries a program the operator has *not* yet approved.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatMessage {
+    pub sequence: u64,
+    pub role: String,
+    pub text: String,
+    pub design: Option<ProposedDesign>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposedDesign {
+    pub program: String,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentReply {
+    token: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentProposal {
+    token: String,
+    program: String,
+    summary: String,
+    #[serde(default)]
+    inputs: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatRequest {
+    text: String,
+}
+
+#[derive(Default)]
+struct Chat {
+    messages: Vec<ChatMessage>,
+    subscribers: Vec<mpsc::Sender<ChatMessage>>,
+    sequence: u64,
+}
+
 struct Context_ {
     omar_dir: PathBuf,
     ea_id: EaId,
@@ -72,10 +117,38 @@ struct Context_ {
     default_workdir: String,
     health_idle_warning: i64,
     runs: Runs,
+    chat: Arc<Mutex<Chat>>,
+    /// Authenticates the EA's MCP sidecar on the agent-only endpoints.
+    agent_token: String,
+}
+
+impl Context_ {
+    fn publish(&self, role: &str, text: String, design: Option<ProposedDesign>) -> ChatMessage {
+        let mut chat = self.chat.lock().expect("serve chat poisoned");
+        chat.sequence += 1;
+        let message = ChatMessage {
+            sequence: chat.sequence,
+            role: role.to_string(),
+            text,
+            design,
+        };
+        chat.messages.push(message.clone());
+        chat.subscribers
+            .retain(|subscriber| subscriber.send(message.clone()).is_ok());
+        message
+    }
+}
+
+pub enum AttachEa {
+    Attached(String),
+    /// Running, but launched without a serve context, so it has no way to reply
+    /// or propose designs.
+    AlreadyRunningWithoutServe(String),
 }
 
 pub struct Serve {
     address: SocketAddr,
+    agent_token: String,
     running: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -97,6 +170,7 @@ impl Serve {
             .with_context(|| format!("failed to bind serve at {address}"))?;
         listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
+        let agent_token = Uuid::new_v4().to_string();
         let context = Arc::new(Context_ {
             omar_dir: omar_dir.to_path_buf(),
             ea_id,
@@ -104,6 +178,8 @@ impl Serve {
             default_workdir: config.agent.default_workdir.clone(),
             health_idle_warning: config.health.idle_warning,
             runs: Runs::default(),
+            chat: Arc::new(Mutex::new(Chat::default())),
+            agent_token: agent_token.clone(),
         });
         let running = Arc::new(AtomicBool::new(true));
         let thread_running = running.clone();
@@ -125,6 +201,7 @@ impl Serve {
         });
         Ok(Self {
             address,
+            agent_token,
             running,
             thread: Some(thread),
         })
@@ -132,6 +209,55 @@ impl Serve {
 
     pub fn address(&self) -> SocketAddr {
         self.address
+    }
+
+    /// Launch the executive assistant with a serve context, so it can converse
+    /// with the operator and propose designs.
+    ///
+    /// The context is baked into the EA's MCP config at launch, so an already
+    /// running EA cannot gain these tools without being restarted. Restarting
+    /// discards its session, so that is opt-in and reported rather than silent.
+    pub fn attach_ea(
+        &self,
+        config: &Config,
+        omar_dir: &Path,
+        ea_id: EaId,
+        restart: bool,
+    ) -> Result<AttachEa> {
+        let name = crate::ea::load_registry(omar_dir)
+            .into_iter()
+            .find(|ea| ea.id == ea_id)
+            .map(|ea| ea.name)
+            .unwrap_or_else(|| format!("ea-{ea_id}"));
+        let client = TmuxClient::new(crate::ea::ea_prefix(
+            ea_id,
+            &config.dashboard.session_prefix,
+        ));
+        let existing = crate::ea::ea_manager_session(ea_id, &config.dashboard.session_prefix);
+        if client.has_session(&existing)? {
+            if !restart {
+                return Ok(AttachEa::AlreadyRunningWithoutServe(existing));
+            }
+            client.ensure_session_not_attached(&existing)?;
+            client.kill_session(&existing)?;
+        }
+        let (session, _) = crate::manager::ensure_manager_session(
+            &client,
+            &config.agent.default_command,
+            ea_id,
+            &name,
+            omar_dir,
+            &config.dashboard.session_prefix,
+            &crate::manager::ManagerRuntimeOptions {
+                default_workdir: config.agent.default_workdir.clone(),
+                health_idle_warning: config.health.idle_warning,
+                serve: Some(crate::manager::ServeMcpContext {
+                    endpoint: self.address.to_string(),
+                    token: self.agent_token.clone(),
+                }),
+            },
+        )?;
+        Ok(AttachEa::Attached(session))
     }
 
     /// Block until the accept loop stops, which for the CLI means forever.
@@ -153,9 +279,24 @@ impl Drop for Serve {
     }
 }
 
-pub fn run(address: SocketAddr, config: &Config, omar_dir: &Path, ea_id: EaId) -> Result<()> {
+pub fn run(
+    address: SocketAddr,
+    config: &Config,
+    omar_dir: &Path,
+    ea_id: EaId,
+    restart_ea: bool,
+) -> Result<()> {
     let server = Serve::start(address, config, omar_dir, ea_id)?;
     println!("OMAR serve: http://{}", server.address());
+    match server.attach_ea(config, omar_dir, ea_id, restart_ea) {
+        Ok(AttachEa::Attached(session)) => println!("Executive assistant: {session}"),
+        Ok(AttachEa::AlreadyRunningWithoutServe(session)) => eprintln!(
+            "Executive assistant '{session}' is already running and was launched without this \
+             server, so it cannot reply or propose designs. Restart it with \
+             `omar serve --restart-ea` to enable them."
+        ),
+        Err(error) => eprintln!("Executive assistant unavailable: {error:#}"),
+    }
     server.wait()
 }
 
@@ -185,6 +326,17 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
         return write_json(&mut stream, 204, &Value::Null);
     }
 
+    // Streams for as long as the operator keeps Mission Control open.
+    if method == "GET" && path == "/v1/chat/events" {
+        return stream_chat(stream, &context);
+    }
+
+    let mut read_body = |length: usize| -> Result<Vec<u8>> {
+        let mut raw = vec![0u8; length];
+        reader.read_exact(&mut raw)?;
+        Ok(raw)
+    };
+
     let (status, body) = match (method.as_str(), path.as_str()) {
         ("GET", "/health") => (
             200,
@@ -194,9 +346,21 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
             if content_length > MAX_BODY_BYTES {
                 (413, json!({"error": "program too large"}))
             } else {
-                let mut raw = vec![0u8; content_length];
-                reader.read_exact(&mut raw)?;
-                start_run(&context, &raw)
+                start_run(&context, &read_body(content_length)?)
+            }
+        }
+        ("GET", "/v1/chat") => {
+            let chat = context.chat.lock().expect("serve chat poisoned");
+            (200, json!({"messages": chat.messages}))
+        }
+        ("POST", "/v1/chat") => send_to_ea(&context, &read_body(content_length)?),
+        // EA-only, authenticated with the token handed to its MCP sidecar.
+        ("POST", "/v1/agent/reply") => agent_reply(&context, &read_body(content_length)?),
+        ("POST", "/v1/agent/proposals") => {
+            if content_length > MAX_BODY_BYTES {
+                (413, json!({"error": "program too large"}))
+            } else {
+                agent_proposal(&context, &read_body(content_length)?)
             }
         }
         ("GET", "/v1/runs") => {
@@ -214,6 +378,123 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
         _ => (404, json!({"error": "not found"})),
     };
     write_json(&mut stream, status, &body)
+}
+
+/// Relay an operator message into the EA's tmux session.
+fn send_to_ea(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
+    let request: ChatRequest = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(error) => return (400, json!({"error": format!("invalid request: {error}")})),
+    };
+    if request.text.trim().is_empty() {
+        return (400, json!({"error": "message is empty"}));
+    }
+    let message = context.publish("operator", request.text.clone(), None);
+    match deliver_to_ea(context, &request.text) {
+        Ok(()) => (202, json!(message)),
+        Err(error) => (502, json!({"error": format!("{error:#}")})),
+    }
+}
+
+fn deliver_to_ea(context: &Arc<Context_>, text: &str) -> Result<()> {
+    let client = TmuxClient::new(crate::ea::ea_prefix(context.ea_id, &context.session_prefix));
+    let session = crate::ea::ea_manager_session(context.ea_id, &context.session_prefix);
+    anyhow::ensure!(
+        client.has_session(&session)?,
+        "the executive assistant is not running; start it with `omar` first"
+    );
+    client.deliver_prompt(&session, text, &DeliveryOptions::default())?;
+    Ok(())
+}
+
+fn agent_reply(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
+    let reply: AgentReply = match serde_json::from_slice(body) {
+        Ok(reply) => reply,
+        Err(error) => return (400, json!({"error": format!("invalid request: {error}")})),
+    };
+    if reply.token != context.agent_token {
+        return (403, json!({"error": "forbidden"}));
+    }
+    context.publish("assistant", reply.text, None);
+    (202, json!({"status": "delivered"}))
+}
+
+/// A proposal is a program the operator has not approved. It is published to
+/// the conversation and nothing more — only the operator can start a run.
+fn agent_proposal(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
+    let proposal: AgentProposal = match serde_json::from_slice(body) {
+        Ok(proposal) => proposal,
+        Err(error) => return (400, json!({"error": format!("invalid request: {error}")})),
+    };
+    if proposal.token != context.agent_token {
+        return (403, json!({"error": "forbidden"}));
+    }
+    context.publish(
+        "assistant",
+        proposal.summary,
+        Some(ProposedDesign {
+            program: proposal.program,
+            inputs: proposal.inputs,
+        }),
+    );
+    (202, json!({"status": "proposed"}))
+}
+
+fn stream_chat(mut stream: TcpStream, context: &Arc<Context_>) -> Result<()> {
+    stream.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+    )?;
+    let (sender, receiver) = mpsc::channel();
+    let backlog = {
+        let mut chat = context.chat.lock().expect("serve chat poisoned");
+        chat.subscribers.push(sender);
+        chat.messages.clone()
+    };
+    // Replay so a reload does not lose the conversation.
+    stream.write_all(b": connected\n\n")?;
+    for message in backlog {
+        write_chat_event(&mut stream, &message)?;
+    }
+    stream.flush()?;
+    loop {
+        match receiver.recv_timeout(Duration::from_secs(15)) {
+            Ok(message) => {
+                if write_chat_event(&mut stream, &message)
+                    .and_then(|_| stream.flush().map_err(Into::into))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if stream
+                    .write_all(b": keepalive\n\n")
+                    .and_then(|_| stream.flush())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    Ok(())
+}
+
+fn write_chat_event(stream: &mut TcpStream, message: &ChatMessage) -> Result<()> {
+    let kind = if message.design.is_some() {
+        "design_proposed"
+    } else {
+        "message"
+    };
+    writeln!(
+        stream,
+        "id: {}\nevent: {}\ndata: {}\n",
+        message.sequence,
+        kind,
+        serde_json::to_string(message)?
+    )?;
+    Ok(())
 }
 
 fn start_run(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
@@ -395,11 +676,14 @@ fn write_json(stream: &mut TcpStream, status: u16, body: &Value) -> Result<()> {
     let reason = match status {
         200 => "OK",
         201 => "Created",
+        202 => "Accepted",
         204 => "No Content",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",
         413 => "Payload Too Large",
+        502 => "Bad Gateway",
         _ => "Internal Server Error",
     };
     let payload = if status == 204 {
@@ -584,6 +868,63 @@ mod tests {
         let response = request(server.address(), "OPTIONS", "/v1/runs", None);
         assert!(response.starts_with("HTTP/1.1 204 No Content"));
         assert!(response.contains("Access-Control-Allow-Headers: content-type"));
+    }
+
+    #[test]
+    fn agent_endpoints_reject_a_wrong_token() {
+        let server = test_server();
+        for path in ["/v1/agent/reply", "/v1/agent/proposals"] {
+            let response = request(
+                server.address(),
+                "POST",
+                path,
+                Some(
+                    r#"{"token":"not-the-token","text":"hi","program":"team T() {}","summary":"s"}"#,
+                ),
+            );
+            assert!(
+                response.starts_with("HTTP/1.1 403 Forbidden"),
+                "{path} accepted a bad token: {response}"
+            );
+        }
+        // Nothing reached the conversation.
+        assert!(request(server.address(), "GET", "/v1/chat", None).contains("\"messages\":[]"));
+    }
+
+    #[test]
+    fn a_proposal_reaches_the_conversation_without_running_anything() {
+        let server = test_server();
+        let body = json!({
+            "token": server.agent_token,
+            "program": "team ReviewFlow() {}",
+            "summary": "A review loop",
+            "inputs": {"request": "check the plan"},
+        })
+        .to_string();
+        let response = request(server.address(), "POST", "/v1/agent/proposals", Some(&body));
+        assert!(response.starts_with("HTTP/1.1 202 Accepted"), "{response}");
+
+        let chat = request(server.address(), "GET", "/v1/chat", None);
+        assert!(chat.contains("A review loop"));
+        assert!(chat.contains("team ReviewFlow() {}"));
+        assert!(chat.contains("\"role\":\"assistant\""));
+        // Proposing is not executing: the operator still has to admit the run.
+        assert!(request(server.address(), "GET", "/v1/runs", None).contains("\"runs\":[]"));
+    }
+
+    #[test]
+    fn chat_rejects_an_empty_message() {
+        let server = test_server();
+        let response = request(
+            server.address(),
+            "POST",
+            "/v1/chat",
+            Some(r#"{"text":"  "}"#),
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "{response}"
+        );
     }
 
     fn request(address: SocketAddr, method: &str, path: &str, body: Option<&str>) -> String {

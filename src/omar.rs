@@ -168,6 +168,12 @@ enum Commands {
         /// Loopback address to bind the admission API
         #[arg(long, default_value = "127.0.0.1:7340")]
         address: std::net::SocketAddr,
+
+        /// Restart the executive assistant so it can reply and propose designs.
+        /// Its MCP context is fixed at launch, so an already running EA cannot
+        /// gain those tools without this. Discards its current session.
+        #[arg(long)]
+        restart_ea: bool,
     },
 }
 
@@ -317,6 +323,7 @@ async fn async_main() -> Result<()> {
                     &manager::ManagerRuntimeOptions {
                         default_workdir: config.agent.default_workdir.clone(),
                         health_idle_warning: config.health.idle_warning,
+                        serve: None,
                     },
                 ),
                 Some(ManagerAction::Orchestrate) => manager::run_manager_orchestration(
@@ -329,6 +336,7 @@ async fn async_main() -> Result<()> {
                     &manager::ManagerRuntimeOptions {
                         default_workdir: config.agent.default_workdir.clone(),
                         health_idle_warning: config.health.idle_warning,
+                        serve: None,
                     },
                 ),
             }
@@ -393,9 +401,12 @@ async fn async_main() -> Result<()> {
                 },
             )
         }
-        Some(Commands::Serve { address }) => {
+        Some(Commands::Serve {
+            address,
+            restart_ea,
+        }) => {
             let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
-            serve::run(address, &config, &omar_dir, target.id)
+            serve::run(address, &config, &omar_dir, target.id, restart_ea)
         }
         None => {
             if cli.agent.is_some() {
@@ -416,6 +427,7 @@ async fn async_main() -> Result<()> {
                     &manager::ManagerRuntimeOptions {
                         default_workdir: config.agent.default_workdir.clone(),
                         health_idle_warning: config.health.idle_warning,
+                        serve: None,
                     },
                 )?;
                 match result {
