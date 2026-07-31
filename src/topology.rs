@@ -1421,6 +1421,7 @@ fn canonical_backend(backend: &str) -> &str {
         "opencode" => "opencode",
         "cursor" => "cursor",
         "agy" => "agy",
+        "stub" => "stub",
         _ => backend,
     }
 }

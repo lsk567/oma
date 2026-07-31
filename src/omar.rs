@@ -15,6 +15,7 @@ mod process;
 mod projects;
 mod scheduler;
 mod serve;
+mod stub_agent;
 mod tmux;
 mod topology;
 mod ui;
@@ -161,6 +162,14 @@ enum Commands {
         /// Address for the live topology diagram API
         #[arg(long, default_value = "127.0.0.1:0")]
         diagram_address: std::net::SocketAddr,
+    },
+
+    /// Answer topology invocations without a model (test backend `stub`)
+    #[command(hide = true)]
+    StubAgent {
+        /// MCP context written for this agent by the runtime
+        #[arg(long)]
+        context_file: PathBuf,
     },
 
     /// Accept OMAR programs over HTTP and supervise their runs
@@ -406,6 +415,7 @@ async fn async_main() -> Result<()> {
                 },
             )
         }
+        Some(Commands::StubAgent { context_file }) => stub_agent::run(&context_file),
         Some(Commands::Serve {
             address,
             restart_ea,

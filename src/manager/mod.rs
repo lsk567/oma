@@ -153,6 +153,7 @@ enum BackendKind {
     Codex,
     Cursor,
     Opencode,
+    Stub,
 }
 
 impl BackendKind {
@@ -163,6 +164,7 @@ impl BackendKind {
             BackendKind::Codex => "codex",
             BackendKind::Cursor => "cursor",
             BackendKind::Opencode => "opencode",
+            BackendKind::Stub => "stub",
         }
     }
 }
@@ -180,6 +182,8 @@ fn detect_backend_token(token: &str) -> Option<BackendKind> {
         "codex" => Some(BackendKind::Codex),
         "cursor" => Some(BackendKind::Cursor),
         "opencode" => Some(BackendKind::Opencode),
+        // Matched on the subcommand: the executable is `omar` itself.
+        "stub-agent" => Some(BackendKind::Stub),
         _ => None,
     }
 }
@@ -819,6 +823,21 @@ pub fn build_agent_command(
                 base_command,
                 rendered.display()
             )
+        }
+        Some(BackendKind::Stub) => {
+            // The stub reads the endpoint and token straight from the topology
+            // context, so it needs no MCP server of its own.
+            let exe = omar_server_exe()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "omar".to_string());
+            match materialize_mcp_context_file(mcp_context) {
+                Some(context_file) => format!(
+                    "{} stub-agent --context-file {}",
+                    shell_single_quote(&exe),
+                    shell_single_quote(&context_file.display().to_string())
+                ),
+                None => format!("{} stub-agent", shell_single_quote(&exe)),
+            }
         }
         Some(BackendKind::Opencode) => {
             // opencode has no `--system-prompt`; `--prompt` is treated as the

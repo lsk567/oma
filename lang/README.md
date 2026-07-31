@@ -82,6 +82,15 @@ That context is baked in when the EA launches, so an already running EA cannot
 gain the tools. `serve` says so and continues; `--restart-ea` relaunches it
 (discarding its session).
 
+The `stub` backend answers invocations without a model — it writes a
+type-correct value to each allowed effect and completes. A team declared with
+`Stub` agents runs the real compiler, VM, scheduler and invocation server, so a
+run can be exercised end to end in a test without spending model calls:
+
+```
+team StubFlow(writer : Stub, editor : Stub) { ... }
+```
+
 `--no-ea` serves the API without starting an assistant at all. The agent
 context is still written, so a test harness can stand in for one — which is how
 Mission Control's conformance suite drives the real daemon without a model.
