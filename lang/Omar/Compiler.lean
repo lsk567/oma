@@ -112,8 +112,8 @@ inductive Literal where
   | str : String -> Literal
   deriving Repr, BEq
 
-/-- A team as written. With a `main` block it is a template that `main`
-    instantiates; without one it is the program itself. -/
+/-- A team as written: a template, which `main` instantiates. A team is never
+    the program itself — that is what `main` is for. -/
 structure TeamDecl where
   name : String
   params : Array Param
@@ -508,7 +508,8 @@ private def elaborateInstance (teams : Array TeamDecl) (inst : Instance) :
         prompt := substitute bindings (qualifyPrompt inst.name decl.ports reaction.prompt) }
   pure (agents, ports, connections, reactions)
 
-private def elaborate (teams : Array TeamDecl) (main : Main) : Except String Program := do
+private def elaborate (programName : String) (teams : Array TeamDecl) (main : Main) :
+    Except String Program := do
   ensureUnique "instance" (main.instances.map (·.name))
   let instanceNames := main.instances.map (·.name)
   for connection in main.connections do
@@ -521,35 +522,28 @@ private def elaborate (teams : Array TeamDecl) (main : Main) : Except String Pro
       target := qualify connection.targetInstance connection.targetPort
       delay := connection.delay : Connection }
   pure {
-    -- The main block is the entry point, and unlike a team it has no name of
-    -- its own to take.
-    team := "main"
+    team := programName
     agents := parts.foldl (fun acc part => acc ++ part.1) #[]
     ports := parts.foldl (fun acc part => acc ++ part.2.1) #[]
     connections := parts.foldl (fun acc part => acc ++ part.2.2.1) #[] ++ wired
     reactions := parts.foldl (fun acc part => acc ++ part.2.2.2) #[]
   }
 
-def parse (tokens : List Token) : Except String Program := do
+/-- The program is named for its source file, the way a C binary is named for
+    its file rather than for `main`. Every program has a `main` block, so the
+    name can never come from a team. -/
+def parse (programName : String) (tokens : List Token) : Except String Program := do
   let (teams, tokens) ← parseTeams #[] tokens
   if teams.isEmpty then throw "program declares no team"
   ensureUnique "team" (teams.map (·.name))
-  match tokens with
-  | [] =>
-      -- No main block: the single team is the program, exactly as before.
-      let decl ← match teams.toList with
-        | [decl] => pure decl
-        | _ => throw "a program with several teams needs a main block to instantiate them"
-      if !decl.params.isEmpty then
-        throw s!"team '{decl.name}' has parameters, which only a main block can supply"
-      validate {
-        team := decl.name, agents := decl.agents, ports := decl.ports,
-        connections := decl.connections, reactions := decl.reactions
-      }
-  | _ =>
-      let (main, tokens) ← parseMain tokens
-      if !tokens.isEmpty then throw s!"unexpected tokens after main: {reprStr tokens.head?}"
-      validate (← elaborate teams main)
+  if tokens.isEmpty then
+    throw "program has no main block; a program runs instantiated teams, so \
+      every program needs 'main { … }'"
+  let (main, tokens) ← parseMain tokens
+  if !tokens.isEmpty then throw s!"unexpected tokens after main: {reprStr tokens.head?}"
+  if main.instances.isEmpty then
+    throw "main instantiates no team; a program with no instance has nothing to run"
+  validate (← elaborate programName teams main)
 
 private def jsonStringArray (values : Array String) : Json :=
   Json.arr (values.map toJson)
@@ -597,7 +591,7 @@ def compile (program : Program) : String :=
   "{\n  \"version\": 1,\n  \"team\": " ++ (toJson program.team).compress ++
     ",\n  \"instructions\": [\n    " ++ rendered ++ "\n  ]\n}\n"
 
-def compileSource (source : String) : Except String String := do
-  pure (compile (← parse (← lex source)))
+def compileSource (programName : String) (source : String) : Except String String := do
+  pure (compile (← parse programName (← lex source)))
 
 end Omar

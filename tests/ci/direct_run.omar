@@ -6,3 +6,7 @@ team DirectRun
 
     request -> result after 0
 }
+
+main {
+    run = DirectRun()
+}

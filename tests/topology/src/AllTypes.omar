@@ -41,3 +41,7 @@ team AllTypes[codec : Codex]
         All nine external inputs arrive at one tag, so set all nine outputs.
     "
 }
+
+main {
+    types = AllTypes()
+}

@@ -1774,9 +1774,9 @@ mod tests {
         serde_json::from_str(
             r#"{
               "version": 1,
-              "team": "main",
+              "team": "Ring",
               "instructions": [
-                {"op":"begin_plan","team":"main"},
+                {"op":"begin_plan","team":"Ring"},
                 {"op":"spawn_agent","name":"n1.agent","backend":"Codex"},
                 {"op":"spawn_agent","name":"n2.agent","backend":"Codex"},
                 {"op":"spawn_agent","name":"n3.agent","backend":"Codex"},

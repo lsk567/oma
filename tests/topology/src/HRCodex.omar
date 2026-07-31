@@ -48,3 +48,7 @@ team HR[manager   : Codex,
         Write true to hire and false otherwise.
     "
 }
+
+main {
+    hr = HR()
+}

@@ -23,10 +23,13 @@ Coverage:
 - `HR.omar`: the heterogeneous hiring example using Claude and Codex.
 - `HRCodex.omar`: the original hiring example using Codex for every role.
 
+Every program declares its teams and then instantiates them in a `main` block,
+so ports are named `instance.port` and each program takes its source file's
+name rather than a team's.
+
 To execute one scenario with live agents, use `omar run` with the `.omar`
 source, provide every declared input that no connection feeds, and use
-`--replace` when reusing agent names. Inputs of an instantiated team are named
-`instance.port`. OMAR invokes `omarc` internally. Live execution requires every backend
+`--replace` when reusing agent names. OMAR invokes `omarc` internally. Live execution requires every backend
 declared by that topology to be installed and authenticated.
 
 To compile and execute the complete corpus with representative inputs and local

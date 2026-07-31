@@ -222,3 +222,7 @@ team BusinessLoop[a_builder : Codex,
         copy it unchanged to `delivery`. Set exactly one effect.
     "
 }
+
+main {
+    biz = BusinessLoop()
+}

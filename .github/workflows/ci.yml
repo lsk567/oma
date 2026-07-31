@@ -129,9 +129,9 @@ jobs:
           OMARC_BIN: ${{ github.workspace }}/lang/.lake/build/bin/omarc
         run: |
           output=$(cargo run --quiet --bin omar -- run \
-            tests/ci/direct_run.omar --input request=hello --replace)
+            tests/ci/direct_run.omar --input run.request=hello --replace)
           echo "$output"
-          grep -Fq 'Output result = "hello"' <<<"$output"
+          grep -Fq 'Output run.result = "hello"' <<<"$output"
 
       - name: Check bytecode layout and Codex-only test agents
         run: |

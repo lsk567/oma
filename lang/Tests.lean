@@ -31,7 +31,7 @@ def topologyCases : Array TopologyCase := #[
     reactions := 4, instructions := 15 },
   { file := "HR.omar", team := "HR", agents := 3, ports := 6,
     reactions := 4, instructions := 15, codexOnly := false },
-  { file := "HRCodex.omar", team := "HR", agents := 3, ports := 6,
+  { file := "HRCodex.omar", team := "HRCodex", agents := 3, ports := 6,
     reactions := 4, instructions := 15 },
   { file := "OrTriggers.omar", team := "OrTriggers", agents := 3, ports := 5,
     reactions := 3, instructions := 13 },
@@ -40,8 +40,7 @@ def topologyCases : Array TopologyCase := #[
   { file := "Recurrence.omar", team := "Recurrence", agents := 1, ports := 3,
     reactions := 1, instructions := 7 },
   -- Three instances of one team, so every count is the team's times three.
-  -- A main block is the entry point and takes the name "main".
-  { file := "Ring.omar", team := "main", agents := 3, ports := 9,
+  { file := "Ring.omar", team := "Ring", agents := 3, ports := 9,
     connections := 3, reactions := 3, instructions := 20 },
   { file := "SameAgentSerial.omar", team := "SameAgentSerial", agents := 2, ports := 4,
     reactions := 3, instructions := 11 },
@@ -52,7 +51,8 @@ def topologyCases : Array TopologyCase := #[
 def testTopology (test : TopologyCase) : IO Unit := do
   let path := s!"../tests/topology/src/{test.file}"
   let source ← IO.FS.readFile path
-  let program ← match lex source >>= parse with
+  let programName := (System.FilePath.mk test.file).fileStem.getD "main"
+  let program ← match lex source >>= parse programName with
     | .ok program => pure program
     | .error message => throw (IO.userError s!"{test.file}: {message}")
   assertEqual s!"{test.file} team" program.team test.team
@@ -63,10 +63,10 @@ def testTopology (test : TopologyCase) : IO Unit := do
   if test.codexOnly then
     for agent in program.agents do
       assertEqual s!"{test.file} backend for {agent.name}" agent.backend "Codex"
-  let bytecode ← match compileSource source with
+  let bytecode ← match compileSource programName source with
     | .ok bytecode => pure bytecode
     | .error message => throw (IO.userError s!"{test.file}: {message}")
-  let secondCompile ← match compileSource source with
+  let secondCompile ← match compileSource programName source with
     | .ok bytecode => pure bytecode
     | .error message => throw (IO.userError s!"{test.file}: {message}")
   assertEqual s!"{test.file} deterministic bytecode" bytecode secondCompile
@@ -103,14 +103,15 @@ def testTopology (test : TopologyCase) : IO Unit := do
       (program.connections.map fun connection => s!"{connection.source}->{connection.target}")
       #["n1.out->n2.token", "n2.out->n3.token", "n3.out->n1.token"]
   if test.file == "SuperdenseTime.omar" then
+    -- Names are instance-qualified now that every program instantiates.
     assertEqual "fixed action delay"
-      (program.ports.any fun port => port.name == "fixed" && port.delay == some 2) true
+      (program.ports.any fun port => port.name == "time.fixed" && port.delay == some 2) true
     assertEqual "connected action delay"
-      (program.ports.any fun port => port.name == "connected" && port.delay == some 1) true
+      (program.ports.any fun port => port.name == "time.connected" && port.delay == some 1) true
     assertEqual "connection delay"
       (program.connections.any fun connection =>
-        connection.source == "immediate" &&
-        connection.target == "connected" &&
+        connection.source == "time.immediate" &&
+        connection.target == "time.connected" &&
         connection.delay == 3) true
   IO.println s!"{test.file} compiler test passed"
 
@@ -133,24 +134,29 @@ def rejectionCases : Array (String × String × String) := #[
     nodeTeam ++ " main { a = Node(1) a.out -> b.token }", "unknown instance 'b'"),
   ("duplicate instance",
     nodeTeam ++ " main { a = Node(1) a = Node(2) }", "duplicate instance 'a'"),
-  ("parameters without a main block",
-    nodeTeam, "only a main block can supply"),
-  ("several teams without a main block",
-    nodeTeam ++ " team Other { input a : int }", "needs a main block")
+  ("no main block at all",
+    nodeTeam, "no main block"),
+  ("a main block that instantiates nothing",
+    nodeTeam ++ " main { }", "instantiates no team")
 ]
 
 def testRejection (label : String) (source : String) (expected : String) : IO Unit :=
-  match lex source >>= parse with
+  match lex source >>= parse "check" with
   | .ok program =>
       throw (IO.userError s!"{label}: expected a rejection, compiled team '{program.team}'")
   | .error message =>
       if mentions message expected then IO.println s!"{label} rejected as expected"
       else throw (IO.userError s!"{label}: expected '{expected}', got '{message}'")
 
-/-- A team with neither parameters nor agents needs neither bracket pair. -/
+/-- A team with neither parameters nor agents needs neither bracket pair, and
+    the program is named for its file rather than for any team it declares. -/
 def testBareTeamHeader : IO Unit :=
-  match lex "team Bare { input a : int output b : int a -> b after 0 }" >>= parse with
-  | .ok program => assertEqual "bare team" program.team "Bare"
+  let source := "team Bare { input a : int output b : int a -> b after 0 }
+                 main { only = Bare() }"
+  match lex source >>= parse "Widget" with
+  | .ok program => do
+      assertEqual "program name" program.team "Widget"
+      assertEqual "instance-qualified port" (program.ports.any (·.name == "only.a")) true
   | .error message => throw (IO.userError s!"bare team header: {message}")
 
 def main : IO UInt32 := do

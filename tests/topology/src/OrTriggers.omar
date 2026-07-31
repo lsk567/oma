@@ -31,3 +31,7 @@ team OrTriggers[splitter : Codex,
         is rendered as <absent>. The later invocation becomes the final output.
     "
 }
+
+main {
+    triggers = OrTriggers()
+}

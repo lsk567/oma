@@ -31,3 +31,7 @@ team SuperdenseTime[producer : Codex,
         Copy $(connected) to `connected_result`.
     "
 }
+
+main {
+    time = SuperdenseTime()
+}

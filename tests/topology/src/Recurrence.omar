@@ -17,3 +17,7 @@ team Recurrence[counter : Codex]
         Never set both effects. This should terminate with result 3.
     "
 }
+
+main {
+    rec = Recurrence()
+}

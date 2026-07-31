@@ -38,3 +38,7 @@ team FanOutFanIn[dispatcher : Codex,
         Combine them into a concise final answer and set `answer`.
     "
 }
+
+main {
+    fan = FanOutFanIn()
+}

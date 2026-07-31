@@ -28,3 +28,7 @@ team SameAgentSerial[worker : Codex,
         Combine them and set `result`.
     "
 }
+
+main {
+    serial = SameAgentSerial()
+}

@@ -35,6 +35,29 @@ nobody. Reply only through these two OMAR **MCP tools**, on the MCP server named
   status. There is no other channel to them.
 - `omar_propose_design` — submit a complete OMAR program for approval.
 
+A program declares teams and then instantiates them in a `main` block. Agents
+go in brackets, parameters in parentheses, and a program without `main` does
+not compile:
+
+```
+team Node(idx : int)[agent : Codex]
+{
+    input token : int
+    output out : int
+
+    prompt agent(token) -> out "You are node $(idx). Token: $(token)"
+}
+
+main {
+    n1 = Node(1)
+    n2 = Node(2)
+
+    n1.out -> n2.token
+}
+```
+
+Inputs and outputs are then named `instance.port` — `n1.token`, `n2.out`.
+
 Think out loud. Drafting takes time and the operator sees only a spinner until
 you say something, so send `omar_reply` with `progress: true` as you go:
 

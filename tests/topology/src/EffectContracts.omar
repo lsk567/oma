@@ -31,3 +31,7 @@ team EffectContracts[decider : Codex]
         the constant effect contract.
     "
 }
+
+main {
+    contracts = EffectContracts()
+}
