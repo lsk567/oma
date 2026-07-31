@@ -14,6 +14,8 @@ mod paths;
 mod process;
 mod projects;
 mod scheduler;
+mod serve;
+mod stub_agent;
 mod tmux;
 mod topology;
 mod ui;
@@ -160,6 +162,32 @@ enum Commands {
         /// Address for the live topology diagram API
         #[arg(long, default_value = "127.0.0.1:0")]
         diagram_address: std::net::SocketAddr,
+    },
+
+    /// Answer topology invocations without a model (test backend `stub`)
+    #[command(hide = true)]
+    StubAgent {
+        /// MCP context written for this agent by the runtime
+        #[arg(long)]
+        context_file: PathBuf,
+    },
+
+    /// Accept OMAR programs over HTTP and supervise their runs
+    Serve {
+        /// Loopback address to bind the admission API
+        #[arg(long, default_value = "127.0.0.1:7340")]
+        address: std::net::SocketAddr,
+
+        /// Restart the executive assistant so it can reply and propose designs.
+        /// Its MCP context is fixed at launch, so an already running EA cannot
+        /// gain those tools without this. Discards its current session.
+        #[arg(long)]
+        restart_ea: bool,
+
+        /// Serve the API without starting an executive assistant. The agent
+        /// context is still written, so a test harness can stand in for one.
+        #[arg(long)]
+        no_ea: bool,
     },
 }
 
@@ -309,6 +337,7 @@ async fn async_main() -> Result<()> {
                     &manager::ManagerRuntimeOptions {
                         default_workdir: config.agent.default_workdir.clone(),
                         health_idle_warning: config.health.idle_warning,
+                        serve: None,
                     },
                 ),
                 Some(ManagerAction::Orchestrate) => manager::run_manager_orchestration(
@@ -321,6 +350,7 @@ async fn async_main() -> Result<()> {
                     &manager::ManagerRuntimeOptions {
                         default_workdir: config.agent.default_workdir.clone(),
                         health_idle_warning: config.health.idle_warning,
+                        serve: None,
                     },
                 ),
             }
@@ -381,8 +411,18 @@ async fn async_main() -> Result<()> {
                     replace,
                     timeout: Duration::from_secs(timeout_seconds),
                     diagram_address: diagram_server.then_some(diagram_address),
+                    diagram_ready: None,
                 },
             )
+        }
+        Some(Commands::StubAgent { context_file }) => stub_agent::run(&context_file),
+        Some(Commands::Serve {
+            address,
+            restart_ea,
+            no_ea,
+        }) => {
+            let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
+            serve::run(address, &config, &omar_dir, target.id, restart_ea, !no_ea)
         }
         None => {
             if cli.agent.is_some() {
@@ -403,6 +443,7 @@ async fn async_main() -> Result<()> {
                     &manager::ManagerRuntimeOptions {
                         default_workdir: config.agent.default_workdir.clone(),
                         health_idle_warning: config.health.idle_warning,
+                        serve: None,
                     },
                 )?;
                 match result {

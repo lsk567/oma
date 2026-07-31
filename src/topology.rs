@@ -883,6 +883,9 @@ pub struct TopologyRunConfig<'a> {
     pub replace: bool,
     pub timeout: Duration,
     pub diagram_address: Option<std::net::SocketAddr>,
+    /// Receives the bound diagram address once the server is up. `omar serve`
+    /// needs it while the run is still in flight; `omar run` prints it instead.
+    pub diagram_ready: Option<mpsc::Sender<std::net::SocketAddr>>,
 }
 
 pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Result<()> {
@@ -901,6 +904,9 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
         .transpose()?;
     if let Some(server) = &diagram_server {
         println!("Diagram server: http://{}", server.address());
+        if let Some(sender) = &config.diagram_ready {
+            let _ = sender.send(server.address());
+        }
     }
     let diagram_publisher = diagram_server.as_ref().map(DiagramServer::publisher);
     let noop_observer = NoopTopologyObserver;
@@ -910,10 +916,24 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
         .unwrap_or(&noop_observer);
     observer.run_started();
 
-    let invocation_server = InvocationServer::start()?;
+    // Setup can fail — a backend that never reaches its ready banner, a missing
+    // input — and those failures are just as much a failed run as one in the
+    // event loop. Report them on the stream too, or an observer sees it go
+    // quiet with no reason given.
     let client = TmuxClient::new(crate::ea::ea_prefix(config.ea_id, config.base_prefix));
-    spawn_topology_agents(&state, &client, &runtime_dir, &invocation_server, &config)?;
-    let inputs = parse_inputs(&state, config.inputs)?;
+    let prepared = (|| -> Result<(InvocationServer, BTreeMap<String, Value>)> {
+        let invocation_server = InvocationServer::start()?;
+        spawn_topology_agents(&state, &client, &runtime_dir, &invocation_server, &config)?;
+        let inputs = parse_inputs(&state, config.inputs)?;
+        Ok((invocation_server, inputs))
+    })();
+    let (invocation_server, inputs) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            observer.run_failed(&error.to_string());
+            return Err(error);
+        }
+    };
     let executor = TmuxReactionExecutor {
         client,
         team: state.team.clone(),
@@ -970,6 +990,9 @@ fn spawn_topology_agents(
             default_workdir: config.default_workdir.to_string(),
             health_idle_warning: config.health_idle_warning,
             tmux_server: std::env::var("OMAR_TMUX_SERVER").ok(),
+            // Topology agents answer invocations; they do not chat with the
+            // operator, so they get no serve context.
+            serve: None,
             topology: Some(TopologyMcpContext {
                 team: state.team.clone(),
                 agent: name.clone(),
@@ -997,7 +1020,7 @@ fn spawn_topology_agents(
     Ok(())
 }
 
-fn parse_inputs(state: &VmState, raw_inputs: &[String]) -> Result<BTreeMap<String, Value>> {
+pub fn parse_inputs(state: &VmState, raw_inputs: &[String]) -> Result<BTreeMap<String, Value>> {
     let mut inputs = BTreeMap::new();
     for raw in raw_inputs {
         let (name, raw_value) = raw
@@ -1398,6 +1421,7 @@ fn canonical_backend(backend: &str) -> &str {
         "opencode" => "opencode",
         "cursor" => "cursor",
         "agy" => "agy",
+        "stub" => "stub",
         _ => backend,
     }
 }
