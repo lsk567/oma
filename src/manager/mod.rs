@@ -334,7 +334,7 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn materialize_mcp_context_file(context: &McpLaunchContext) -> Option<PathBuf> {
+pub(crate) fn materialize_mcp_context_file(context: &McpLaunchContext) -> Option<PathBuf> {
     let dir = mcp_ea_dir(context)?;
     let path = match &context.topology {
         Some(topology) => dir.join(format!(

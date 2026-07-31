@@ -81,3 +81,7 @@ stops there — only the operator can admit a run, via `POST /v1/runs`.
 That context is baked in when the EA launches, so an already running EA cannot
 gain the tools. `serve` says so and continues; `--restart-ea` relaunches it
 (discarding its session).
+
+`--no-ea` serves the API without starting an assistant at all. The agent
+context is still written, so a test harness can stand in for one — which is how
+Mission Control's conformance suite drives the real daemon without a model.

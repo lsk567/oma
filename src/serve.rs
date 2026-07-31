@@ -233,6 +233,7 @@ impl Serve {
         omar_dir: &Path,
         ea_id: EaId,
         restart: bool,
+        launch: bool,
     ) -> Result<AttachEa> {
         let name = crate::ea::load_registry(omar_dir)
             .into_iter()
@@ -243,6 +244,27 @@ impl Serve {
             ea_id,
             &config.dashboard.session_prefix,
         ));
+        // Write the context even when not launching: it names this server, so a
+        // harness can act as the assistant without an agent process existing.
+        let context = crate::manager::McpLaunchContext {
+            omar_dir: omar_dir.to_path_buf(),
+            ea_id,
+            session_prefix: config.dashboard.session_prefix.clone(),
+            default_command: config.agent.default_command.clone(),
+            default_workdir: config.agent.default_workdir.clone(),
+            health_idle_warning: config.health.idle_warning,
+            tmux_server: None,
+            topology: None,
+            serve: Some(crate::manager::ServeMcpContext {
+                endpoint: self.address.to_string(),
+                token: self.agent_token.clone(),
+            }),
+        };
+        crate::manager::materialize_mcp_context_file(&context);
+        if !launch {
+            return Ok(AttachEa::Attached("(not launched)".to_string()));
+        }
+
         let existing = crate::ea::ea_manager_session(ea_id, &config.dashboard.session_prefix);
         if client.has_session(&existing)? {
             if !restart {
@@ -325,10 +347,11 @@ pub fn run(
     omar_dir: &Path,
     ea_id: EaId,
     restart_ea: bool,
+    launch_ea: bool,
 ) -> Result<()> {
     let server = Serve::start(address, config, omar_dir, ea_id)?;
     println!("OMAR serve: http://{}", server.address());
-    match server.attach_ea(config, omar_dir, ea_id, restart_ea) {
+    match server.attach_ea(config, omar_dir, ea_id, restart_ea, launch_ea) {
         Ok(AttachEa::Attached(session)) => println!("Executive assistant: {session}"),
         Ok(AttachEa::AlreadyRunningWithoutServe(session)) => eprintln!(
             "Executive assistant '{session}' is already running and was launched without this \

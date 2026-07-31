@@ -174,6 +174,11 @@ enum Commands {
         /// gain those tools without this. Discards its current session.
         #[arg(long)]
         restart_ea: bool,
+
+        /// Serve the API without starting an executive assistant. The agent
+        /// context is still written, so a test harness can stand in for one.
+        #[arg(long)]
+        no_ea: bool,
     },
 }
 
@@ -404,9 +409,10 @@ async fn async_main() -> Result<()> {
         Some(Commands::Serve {
             address,
             restart_ea,
+            no_ea,
         }) => {
             let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
-            serve::run(address, &config, &omar_dir, target.id, restart_ea)
+            serve::run(address, &config, &omar_dir, target.id, restart_ea, !no_ea)
         }
         None => {
             if cli.agent.is_some() {
