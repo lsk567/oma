@@ -916,10 +916,24 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
         .unwrap_or(&noop_observer);
     observer.run_started();
 
-    let invocation_server = InvocationServer::start()?;
+    // Setup can fail — a backend that never reaches its ready banner, a missing
+    // input — and those failures are just as much a failed run as one in the
+    // event loop. Report them on the stream too, or an observer sees it go
+    // quiet with no reason given.
     let client = TmuxClient::new(crate::ea::ea_prefix(config.ea_id, config.base_prefix));
-    spawn_topology_agents(&state, &client, &runtime_dir, &invocation_server, &config)?;
-    let inputs = parse_inputs(&state, config.inputs)?;
+    let prepared = (|| -> Result<(InvocationServer, BTreeMap<String, Value>)> {
+        let invocation_server = InvocationServer::start()?;
+        spawn_topology_agents(&state, &client, &runtime_dir, &invocation_server, &config)?;
+        let inputs = parse_inputs(&state, config.inputs)?;
+        Ok((invocation_server, inputs))
+    })();
+    let (invocation_server, inputs) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            observer.run_failed(&error.to_string());
+            return Err(error);
+        }
+    };
     let executor = TmuxReactionExecutor {
         client,
         team: state.team.clone(),
