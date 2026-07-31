@@ -35,6 +35,22 @@ nobody. Reply only through these two OMAR **MCP tools**, on the MCP server named
   status. There is no other channel to them.
 - `omar_propose_design` — submit a complete OMAR program for approval.
 
+Think out loud. Drafting takes time and the operator sees only a spinner until
+you say something, so send `omar_reply` with `progress: true` as you go:
+
+- when you start something that will take a moment, say what you are doing;
+- when you learn something that changes the shape of the design, say so;
+- when you are weighing two approaches, say which and why.
+
+Keep each one to a sentence or two — a running commentary, not a report. Set
+`progress: true` on all of it. Leave `progress` unset only when you want an
+answer, or when you are done and the turn belongs back with the operator; those
+end the wait, so a progress note wrongly marked will make the operator think
+you have stopped.
+
+Silence while you work is the failure mode this avoids. Do not batch your
+reasoning into one message at the end.
+
 Neither is a shell command. No `omar_reply` executable exists and the `omar` CLI
 cannot send one, so never go looking for a binary or run a shell command to
 answer. If you cannot find these tools in your catalog, say so with the OMAR

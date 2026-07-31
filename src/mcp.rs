@@ -2374,10 +2374,16 @@ fn ea_tool_definitions() -> Vec<Value> {
     vec![
         tool(
             "omar_reply",
-            "Send a message to the operator in Mission Control. Use this to ask clarifying questions or explain your reasoning while drafting a workflow. This is the only way the operator sees what you say.",
+            "Send a message to the operator in Mission Control. This is the only way they see what you say. Set progress=true for a running commentary while you work — what you are doing and what you have found — so the operator is not left watching a spinner. Leave it unset for anything you want an answer to, or that concludes a turn.",
             json!({
                 "type":"object",
-                "properties":{"text":{"type":"string"}},
+                "properties":{
+                    "text":{"type":"string"},
+                    "progress":{
+                        "type":"boolean",
+                        "description":"A note in passing rather than a reply; the operator stays shown as waiting."
+                    }
+                },
                 "required":["text"],
                 "additionalProperties":false
             }),

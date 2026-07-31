@@ -73,6 +73,8 @@ pub struct ChatMessage {
     pub sequence: u64,
     pub role: String,
     pub text: String,
+    /// Commentary while working, rather than something awaiting an answer.
+    pub progress: bool,
     pub design: Option<ProposedDesign>,
 }
 
@@ -90,6 +92,8 @@ pub struct ProposedDesign {
 struct AgentReply {
     token: String,
     text: String,
+    #[serde(default)]
+    progress: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,13 +130,20 @@ struct Context_ {
 }
 
 impl Context_ {
-    fn publish(&self, role: &str, text: String, design: Option<ProposedDesign>) -> ChatMessage {
+    fn publish(
+        &self,
+        role: &str,
+        text: String,
+        progress: bool,
+        design: Option<ProposedDesign>,
+    ) -> ChatMessage {
         let mut chat = self.chat.lock().expect("serve chat poisoned");
         chat.sequence += 1;
         let message = ChatMessage {
             sequence: chat.sequence,
             role: role.to_string(),
             text,
+            progress,
             design,
         };
         chat.messages.push(message.clone());
@@ -459,7 +470,7 @@ fn send_to_ea(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     if request.text.trim().is_empty() {
         return (400, json!({"error": "message is empty"}));
     }
-    let message = context.publish("operator", request.text.clone(), None);
+    let message = context.publish("operator", request.text.clone(), false, None);
     match deliver_to_ea(context, &request.text) {
         Ok(()) => (202, json!(message)),
         Err(error) => (502, json!({"error": format!("{error:#}")})),
@@ -511,7 +522,7 @@ fn agent_reply(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     if reply.token != context.agent_token {
         return (403, json!({"error": "forbidden"}));
     }
-    context.publish("assistant", reply.text, None);
+    context.publish("assistant", reply.text, reply.progress, None);
     (202, json!({"status": "delivered"}))
 }
 
@@ -535,6 +546,7 @@ fn agent_proposal(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     context.publish(
         "assistant",
         proposal.summary,
+        false,
         Some(ProposedDesign {
             program: proposal.program,
             inputs: proposal.inputs,
@@ -1088,6 +1100,35 @@ mod tests {
         .expect("write");
         assert!(server.verify_ea_context(&omar_dir, 0).is_ok());
         let _ = std::fs::remove_dir_all(&omar_dir);
+    }
+
+    #[test]
+    fn progress_replies_are_marked_so_the_wait_survives_them() {
+        // A running commentary must not read as "the assistant is done", or the
+        // operator is left thinking it stopped.
+        let server = test_server();
+        for (progress, expected) in [(true, "\"progress\":true"), (false, "\"progress\":false")] {
+            let body = json!({
+                "token": server.agent_token,
+                "text": "looking at the ports",
+                "progress": progress,
+            })
+            .to_string();
+            let response = request(server.address(), "POST", "/v1/agent/reply", Some(&body));
+            assert!(response.starts_with("HTTP/1.1 202 Accepted"), "{response}");
+            assert!(
+                request(server.address(), "GET", "/v1/chat", None).contains(expected),
+                "expected {expected}"
+            );
+        }
+
+        // Omitting it is the safe default: a plain reply ends the turn.
+        let body = json!({"token": server.agent_token, "text": "done"}).to_string();
+        let posted = request(server.address(), "POST", "/v1/agent/reply", Some(&body));
+        assert!(posted.starts_with("HTTP/1.1 202 Accepted"), "{posted}");
+        let chat = request(server.address(), "GET", "/v1/chat", None);
+        assert!(chat.contains("\"text\":\"done\""), "{chat}");
+        assert!(chat.contains("\"progress\":false"), "{chat}");
     }
 
     #[test]
