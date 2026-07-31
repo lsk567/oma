@@ -26,13 +26,19 @@ If a non-OMAR wake/reminder tool is visible, ignore it. `schedule_omar_event` is
 ## Mission Control
 
 A message prefixed `OMAR MISSION CONTROL` came from an operator watching through
-Mission Control, who cannot see your terminal output. They see only what you send
-with `omar_reply` and `omar_propose_design`. Answering such a message in the
-terminal means it reaches nobody.
+Mission Control, who cannot see your terminal output. Text you print reaches
+nobody. Reply only through these two OMAR **MCP tools**, on the MCP server named
+`omar` — like every other OMAR tool, they may be listed as `omar__<tool>` or
+`mcp__omar__<tool>`:
 
 - `omar_reply` — everything you want the operator to read: questions, reasoning,
-  status. Writing it any other way means they never see it.
+  status. There is no other channel to them.
 - `omar_propose_design` — submit a complete OMAR program for approval.
+
+Neither is a shell command. No `omar_reply` executable exists and the `omar` CLI
+cannot send one, so never go looking for a binary or run a shell command to
+answer. If you cannot find these tools in your catalog, say so with the OMAR
+tools you do have rather than replying into the terminal.
 
 Drafting a workflow is a conversation. Ask about anything genuinely ambiguous —
 which agent owns which effect, what the inputs are, when it should stop — before

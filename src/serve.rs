@@ -411,10 +411,15 @@ fn send_to_ea(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
 fn mission_control_envelope(text: &str) -> String {
     format!(
         "OMAR MISSION CONTROL\n\
-         The operator sent this from Mission Control and cannot see this terminal. \
-         They see only what you send with omar_reply, so answer with omar_reply — \
-         including questions. To offer a workflow, call omar_propose_design with a \
-         complete OMAR program; the operator approves and runs it, you do not.\n\n\
+         Answer by CALLING THE MCP TOOL `omar_reply` on the MCP server named \"omar\". \
+         Your backend may list it as `omar__omar_reply` or `mcp__omar__omar_reply`. \
+         It is an MCP tool call, NOT a shell command: there is no `omar_reply` \
+         executable, and the `omar` CLI cannot send it. Do not search your PATH for it.\n\
+         The operator is in Mission Control and cannot see this terminal, so text you \
+         print here reaches nobody. Every question, status update, and answer must go \
+         through `omar_reply`.\n\
+         To offer a workflow, call the MCP tool `omar_propose_design` with a complete \
+         OMAR program. The operator approves and runs it; you do not.\n\n\
          {text}"
     )
 }
@@ -979,6 +984,11 @@ mod tests {
         assert!(envelope.contains("omar_reply"));
         assert!(envelope.contains("omar_propose_design"));
         assert!(envelope.ends_with("review the release plan"));
+        // A bare tool name reads as a shell command: codex went looking for an
+        // `omar_reply` binary on PATH and then answered into its own pane.
+        assert!(envelope.contains("MCP TOOL"));
+        assert!(envelope.contains("mcp__omar__omar_reply"));
+        assert!(envelope.contains("NOT a shell command"));
     }
 
     #[test]
