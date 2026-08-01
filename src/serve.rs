@@ -463,11 +463,14 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
             .trim_start_matches(TERMINAL_PREFIX)
             .trim_end_matches(TERMINAL_SUFFIX)
             .to_string();
-        let prefix = crate::ea::ea_prefix(context.ea_id, &context.session_prefix);
+        let session = format!(
+            "{}{}",
+            crate::ea::ea_prefix(context.ea_id, &context.session_prefix),
+            crate::tmux::flatten_agent_name(&agent)
+        );
         return attach_terminal(
             stream,
-            &prefix,
-            &agent,
+            &session,
             websocket_key.as_deref(),
             origin_header.as_deref(),
         );
@@ -479,7 +482,6 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
         let session = crate::ea::ea_manager_session(context.ea_id, &context.session_prefix);
         return attach_terminal(
             stream,
-            "",
             &session,
             websocket_key.as_deref(),
             origin_header.as_deref(),
@@ -554,8 +556,7 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
 /// it is the detach.
 fn attach_terminal(
     mut stream: TcpStream,
-    prefix: &str,
-    agent: &str,
+    session: &str,
     websocket_key: Option<&str>,
     origin: Option<&str>,
 ) -> Result<()> {
@@ -577,7 +578,7 @@ fn attach_terminal(
         );
     };
 
-    let attachment = match crate::terminal::Attachment::open(prefix, agent) {
+    let attachment = match crate::terminal::Attachment::open_session(session) {
         Ok(attachment) => attachment,
         // The socket has not been upgraded yet, so this can still be an
         // ordinary HTTP error the client can read.
