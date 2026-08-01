@@ -144,7 +144,6 @@ impl Attachment {
     pub fn open(prefix: &str, agent: &str) -> Result<Self> {
         let session = format!("{prefix}{}", flatten_agent_name(agent));
         let size = window_size(&session)?;
-        enable_mouse(&session);
 
         let pty = native_pty_system()
             .openpty(PtySize {
@@ -175,6 +174,10 @@ impl Attachment {
         // The slave is held open by the child; keeping our copy would stop the
         // reader ever seeing EOF once the child exits.
         drop(pty.slave);
+        // Only now that a viewer really is attached: everything above can fail,
+        // and a session left with mouse tracking on by an attempt that never
+        // arrived is a change nobody asked for.
+        enable_mouse(&session);
 
         let mut reader = pty
             .master
@@ -422,6 +425,38 @@ mod tests {
             (before.cols, before.rows),
             "the viewer left the agent at its own shape"
         );
+    }
+
+    #[test]
+    fn a_failed_attach_leaves_the_session_as_it_found_it() {
+        // Mouse tracking is turned on for the viewer's benefit. An attempt that
+        // never attaches has no viewer, so it has no business changing anything.
+        if !tmux_available() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let session = "omar-terminal-failed-attach";
+        let _ = tmux_command()
+            .args(["kill-session", "-t", &exact_session(session)])
+            .output();
+        let _guard = SessionGuard(session.to_string());
+        tmux_command()
+            .args(["new-session", "-d", "-s", session, "sh"])
+            .output()
+            .expect("tmux runs");
+        tmux_command()
+            .args(["set-option", "-t", &exact_target(session), "mouse", "off"])
+            .output()
+            .expect("tmux runs");
+
+        // A name that does not resolve: the attach fails before any viewer.
+        assert!(Attachment::open("", "omar-terminal-does-not-exist").is_err());
+
+        let mouse = tmux_command()
+            .args(["show-options", "-t", &exact_target(session), "-v", "mouse"])
+            .output()
+            .expect("tmux answers");
+        assert_eq!(String::from_utf8_lossy(&mouse.stdout).trim(), "off");
     }
 
     #[test]
