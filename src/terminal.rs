@@ -12,7 +12,7 @@ use std::thread;
 use anyhow::{bail, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
 
-use crate::tmux::{flatten_agent_name, tmux_command};
+use crate::tmux::tmux_command;
 
 /// A window smaller than this is not worth attaching to, and a size that large
 /// is a tmux answer we did not understand.
@@ -136,9 +136,13 @@ pub struct Attachment {
 }
 
 impl Attachment {
-    /// Attach to `agent`'s session through `prefix`.
-    pub fn open(prefix: &str, agent: &str) -> Result<Self> {
-        let session = format!("{prefix}{}", flatten_agent_name(agent));
+    /// Attach to a session by its exact name.
+    ///
+    /// A session, not a prefix and an agent: the assistant's is
+    /// `<base>ea-<id>` and is built from no agent name at all, so the caller
+    /// names the one it means rather than passing an empty prefix to say so.
+    pub fn open_session(session: &str) -> Result<Self> {
+        let session = session.to_string();
         let size = window_size(&session)?;
 
         let pty = native_pty_system()
@@ -290,7 +294,7 @@ mod tests {
         assert_eq!((before.cols, before.rows), (173, 47));
 
         {
-            let mut attachment = Attachment::open("", session).expect("attach");
+            let mut attachment = Attachment::open_session(session).expect("attach");
             assert_eq!(
                 attachment.size, before,
                 "the viewer adopts the agent's size"

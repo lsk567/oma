@@ -463,10 +463,26 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
             .trim_start_matches(TERMINAL_PREFIX)
             .trim_end_matches(TERMINAL_SUFFIX)
             .to_string();
+        let session = format!(
+            "{}{}",
+            crate::ea::ea_prefix(context.ea_id, &context.session_prefix),
+            crate::tmux::flatten_agent_name(&agent)
+        );
         return attach_terminal(
             stream,
-            &context,
-            &agent,
+            &session,
+            websocket_key.as_deref(),
+            origin_header.as_deref(),
+        );
+    }
+    // The assistant is not one of the agents: its session is named
+    // `<base>ea-<id>` rather than `<base><id>-<name>`, so no agent name
+    // reaches it and it needs a route of its own.
+    if method == "GET" && path == "/v1/agent/terminal" {
+        let session = crate::ea::ea_manager_session(context.ea_id, &context.session_prefix);
+        return attach_terminal(
+            stream,
+            &session,
             websocket_key.as_deref(),
             origin_header.as_deref(),
         );
@@ -540,8 +556,7 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
 /// it is the detach.
 fn attach_terminal(
     mut stream: TcpStream,
-    context: &Arc<Context_>,
-    agent: &str,
+    session: &str,
     websocket_key: Option<&str>,
     origin: Option<&str>,
 ) -> Result<()> {
@@ -563,8 +578,7 @@ fn attach_terminal(
         );
     };
 
-    let prefix = crate::ea::ea_prefix(context.ea_id, &context.session_prefix);
-    let attachment = match crate::terminal::Attachment::open(&prefix, agent) {
+    let attachment = match crate::terminal::Attachment::open_session(session) {
         Ok(attachment) => attachment,
         // The socket has not been upgraded yet, so this can still be an
         // ordinary HTTP error the client can read.
@@ -1631,6 +1645,55 @@ mod tests {
         let mut response = Vec::new();
         let _ = std::io::Read::read_to_end(&mut stream, &mut response);
         String::from_utf8_lossy(&response).into_owned()
+    }
+
+    #[test]
+    fn the_assistant_has_a_terminal_of_its_own() {
+        // Its session is `<base>ea-<id>`, not `<base><id>-<name>`, so no agent
+        // name can reach it however the route is spelled.
+        if crate::tmux::tmux_command().arg("-V").output().is_err() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let prefix = Config::default().dashboard.session_prefix;
+        let session = crate::ea::ea_manager_session(0, &prefix);
+        let agent_shaped = format!("{}ea-0", crate::ea::ea_prefix(0, &prefix));
+        assert_ne!(
+            session, agent_shaped,
+            "if these matched, the agent route would already reach it"
+        );
+
+        let tmux = |args: &[&str]| {
+            let _ = crate::tmux::tmux_command().args(args).output();
+        };
+        tmux(&["kill-session", "-t", &format!("={session}")]);
+        tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            &session,
+            "-x",
+            "90",
+            "-y",
+            "26",
+            "sh",
+        ]);
+
+        let server = test_server();
+        let url = format!("ws://{}/v1/agent/terminal", server.address());
+        let (mut socket, _) = tungstenite::connect(&url).expect("assistant terminal connects");
+        let size: Value = serde_json::from_str(
+            &socket
+                .read()
+                .expect("size frame")
+                .into_text()
+                .expect("text"),
+        )
+        .expect("json");
+
+        tmux(&["kill-session", "-t", &format!("={session}")]);
+        assert_eq!(size["cols"], json!(90));
+        assert_eq!(size["rows"], json!(26));
     }
 
     #[test]
