@@ -170,6 +170,12 @@ impl Attachment {
         command.args(["attach-session", "-t", exact_session(&session).as_str()]);
         // A nested tmux would refuse to attach.
         command.env_remove("TMUX");
+        // tmux refuses to attach without a terminal it recognises, and the
+        // daemon inherits whatever started it — nothing at all under launchd,
+        // systemd or CI, where the attach exits at once and the viewer shows an
+        // agent that never draws. The far end is xterm.js, so this is not a
+        // guess about the environment: it is what the viewer actually is.
+        command.env("TERM", "xterm-256color");
 
         let child = pty
             .slave
@@ -300,6 +306,45 @@ mod tests {
             .is_ok_and(|output| output.status.success())
     }
 
+    /// Waits for tmux to apply a size change, up to a generous deadline.
+    ///
+    /// A fixed sleep is a guess at how long that takes, and the guess that held
+    /// on a quiet machine was short on a loaded CI runner. Returns whatever the
+    /// size is when the deadline passes, so the caller's assertion is what
+    /// reports the failure.
+    fn settles(session: &str, want: impl Fn(&WindowSize) -> bool) -> WindowSize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let size = window_size(session).expect("size");
+            if want(&size) || std::time::Instant::now() >= deadline {
+                return size;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Clients tmux believes are attached, for assertions that need one.
+    ///
+    /// A resize only reaches the session through an attached client, so "the
+    /// window did not change" and "nothing ever attached" look identical from
+    /// the size alone. This tells them apart in the failure message.
+    fn clients(session: &str) -> String {
+        match tmux_command()
+            .args(["list-clients", "-t", &exact_target(session)])
+            .output()
+        {
+            Ok(output) => {
+                let listed = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if listed.is_empty() {
+                    format!("none ({})", String::from_utf8_lossy(&output.stderr).trim())
+                } else {
+                    listed
+                }
+            }
+            Err(error) => format!("list-clients failed: {error}"),
+        }
+    }
+
     /// Kills only its own session, so it cannot disturb the operator's server.
     struct SessionGuard(String);
 
@@ -372,9 +417,8 @@ mod tests {
 
         // Dropping detaches. The status line is why this is not simply `rows`:
         // a client exactly as tall as the window costs the agent a row.
-        std::thread::sleep(std::time::Duration::from_millis(400));
         assert_eq!(
-            window_size(session).expect("size after"),
+            settles(session, |size| *size == before),
             before,
             "detaching must leave the window as it was"
         );
@@ -413,17 +457,41 @@ mod tests {
         assert_eq!((before.cols, before.rows), (200, 50));
 
         {
-            let mut attachment = Attachment::open("", session).expect("attach");
+            let mut attachment = Attachment::open_session(session).expect("attach");
+            // `open_session` returns as soon as tmux is spawned, and a tmux that
+            // cannot attach exits instead — which looks exactly like a session
+            // that ignored the resize. Wait for the client to exist first, so a
+            // failure here says which of the two happened.
+            let attached = {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    let listed = clients(session);
+                    if !listed.starts_with("none") || std::time::Instant::now() >= deadline {
+                        break listed;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            };
+            assert!(
+                !attached.starts_with("none"),
+                "no client attached: {attached}"
+            );
+
             attachment.resize(96, 30).expect("resize");
             // tmux follows the client, so the agent is now drawing at the
             // viewer's shape.
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            let during = window_size(session).expect("size during");
-            assert_eq!(during.cols, 96, "the session did not follow the viewer");
+            let during = settles(session, |size| size.cols == 96);
+            assert_eq!(
+                during.cols,
+                96,
+                "the session did not follow the viewer (clients: {})",
+                clients(session)
+            );
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let after = window_size(session).expect("size after");
+        let after = settles(session, |size| {
+            (size.cols, size.rows) == (before.cols, before.rows)
+        });
         assert_eq!(
             (after.cols, after.rows),
             (before.cols, before.rows),
@@ -454,7 +522,7 @@ mod tests {
             .expect("tmux runs");
 
         // A name that does not resolve: the attach fails before any viewer.
-        assert!(Attachment::open("", "omar-terminal-does-not-exist").is_err());
+        assert!(Attachment::open_session("omar-terminal-does-not-exist").is_err());
 
         let mouse = tmux_command()
             .args(["show-options", "-t", &exact_target(session), "-v", "mouse"])
@@ -495,7 +563,7 @@ mod tests {
             .output()
             .expect("tmux runs");
 
-        let attachment = Attachment::open("", session).expect("attach");
+        let attachment = Attachment::open_session(session).expect("attach");
 
         let reported = tmux_command()
             .args(["show-options", "-t", &exact_target(session), "-v", "mouse"])
@@ -545,7 +613,7 @@ mod tests {
             "a session that does not exist resolved to '{neighbour}'"
         );
         assert!(
-            Attachment::open("", gone).is_err(),
+            Attachment::open_session(gone).is_err(),
             "attached to the wrong session"
         );
     }

@@ -1,0 +1,336 @@
+// Large runtime stress test. Self-contained: no repo, no filesystem, no network.
+//
+// 18 agents across all four backends, wired as a cycle rather than a DAG:
+//
+//   Coordinator --> 8 Explorers --> 4 Aggregators --> Synthesizer
+//                                                        |
+//                                                        v
+//   Reporter <-- Coordinator <-- 3 Adversaries <---------+
+//                    |
+//                    +--> back to the 8 Explorers for another round
+//
+// What it exercises: 8-way fan-out, staged partial fan-in (2->1, then 4->1),
+// a 3-way tag barrier, one agent carrying two prompts with memory between
+// them, alternative effects that decide loop-vs-finish, and a bounded cycle.
+// Every prompt is word-capped so the topology, not the token count, is the load.
+
+team Coordinator[agent : Claude]
+{
+    input  topic      : string
+    input  max_rounds : int
+
+    input  red   : string  // the three adversary reports, closing the cycle
+    input  blue  : string
+    input  black : string
+
+    output spec   : string // coordinator -> all 8 explorers
+    output report : string // coordinator -> reporter, once converged
+
+    // ---- seed round 1 --------------------------------------------------------
+    prompt agent(topic, max_rounds) -> spec
+    "
+        You are the Coordinator of an 18-agent test run. Topic: $(topic).
+        The run lasts at most $(max_rounds) rounds. Remember that cap.
+
+        Set `spec` to a brief for eight parallel explorers containing:
+          - the line `TOPIC: $(topic)`
+          - the line `ROUND: 1 of $(max_rounds)`
+          - two sentences framing the problem
+          - eight numbered angles, one per explorer, each one sentence
+          - the line `SETTLED SO FAR: none`
+        Under 250 words. Do not solve the problem yourself.
+    "
+
+    // ---- merge the adversaries, then loop or finish ---------------------------
+    prompt agent(red, blue, black) -> (spec | report)
+    "
+        The three adversaries have reported on this round's synthesis.
+
+        Feasibility: $(red)
+        Coherence:   $(blue)
+        Risk:        $(black)
+
+        You wrote the previous brief, so you know the topic, the round number and
+        the cap. Merge these verdicts into your running list of settled points.
+
+        Set exactly one effect.
+
+        Set `spec` for another round if at least one adversary raised something
+        unsettled AND the round number is still below the cap. It repeats the
+        `TOPIC:` line, gives `ROUND: <n> of <cap>` incremented, restates
+        `SETTLED SO FAR:` in full so the explorers do not redo it, and gives eight
+        numbered angles aimed at what is still open. Under 300 words.
+
+        Otherwise set `report`, because the run has converged or hit the cap: the
+        topic, a one-paragraph conclusion, the settled points, the open questions,
+        and the number of rounds that ran. Under 400 words.
+    "
+}
+
+// ---- eight explorers, two on each backend -----------------------------------
+
+team ExplorerC(idx : int, lens : string)[agent : Claude]
+{
+    input  spec  : string
+    output note  : string
+
+    prompt agent(spec) -> note
+    "
+        $(spec)
+
+        You are Explorer $(idx). Work angle $(idx) only, through the lens of
+        $(lens). Ignore anything the brief lists as settled. Set `note` to a
+        section titled `Explorer $(idx) - $(lens)` with at most four bullets, each
+        a concrete claim rather than a topic heading. Under 150 words.
+    "
+}
+
+team ExplorerX(idx : int, lens : string)[agent : Codex]
+{
+    input  spec  : string
+    output note  : string
+
+    prompt agent(spec) -> note
+    "
+        $(spec)
+
+        You are Explorer $(idx). Work angle $(idx) only, through the lens of
+        $(lens). Ignore anything the brief lists as settled. Set `note` to a
+        section titled `Explorer $(idx) - $(lens)` with at most four bullets, each
+        a concrete claim rather than a topic heading. Under 150 words.
+    "
+}
+
+team ExplorerU(idx : int, lens : string)[agent : Cursor]
+{
+    input  spec  : string
+    output note  : string
+
+    prompt agent(spec) -> note
+    "
+        $(spec)
+
+        You are Explorer $(idx). Work angle $(idx) only, through the lens of
+        $(lens). Ignore anything the brief lists as settled. Set `note` to a
+        section titled `Explorer $(idx) - $(lens)` with at most four bullets, each
+        a concrete claim rather than a topic heading. Under 150 words.
+    "
+}
+
+team ExplorerO(idx : int, lens : string)[agent : OpenCode]
+{
+    input  spec  : string
+    output note  : string
+
+    prompt agent(spec) -> note
+    "
+        $(spec)
+
+        You are Explorer $(idx). Work angle $(idx) only, through the lens of
+        $(lens). Ignore anything the brief lists as settled. Set `note` to a
+        section titled `Explorer $(idx) - $(lens)` with at most four bullets, each
+        a concrete claim rather than a topic heading. Under 150 words.
+    "
+}
+
+// ---- four aggregators, each a 2-input barrier -------------------------------
+
+team AggregatorA(band : string)[agent : Claude]
+{
+    input  n1     : string
+    input  n2     : string
+    output digest : string
+
+    prompt agent(n1, n2) -> digest
+    "
+        You are the $(band) aggregator. Two explorers reported:
+
+        A) $(n1)
+        B) $(n2)
+
+        Merge them into one section titled `$(band)`. Drop duplicates, keep every
+        distinct claim, and mark any place where the two disagree with the word
+        CONFLICT. Under 150 words. Do not add claims of your own.
+    "
+}
+
+team AggregatorB(band : string)[agent : Codex]
+{
+    input  n1     : string
+    input  n2     : string
+    output digest : string
+
+    prompt agent(n1, n2) -> digest
+    "
+        You are the $(band) aggregator. Two explorers reported:
+
+        A) $(n1)
+        B) $(n2)
+
+        Merge them into one section titled `$(band)`. Drop duplicates, keep every
+        distinct claim, and mark any place where the two disagree with the word
+        CONFLICT. Under 150 words. Do not add claims of your own.
+    "
+}
+
+// ---- the 4-input barrier ----------------------------------------------------
+
+team Synthesizer[agent : Claude]
+{
+    input  d1        : string
+    input  d2        : string
+    input  d3        : string
+    input  d4        : string
+    output synthesis : string
+
+    prompt agent(d1, d2, d3, d4) -> synthesis
+    "
+        Four aggregators reported at the same tag. Merge all four into one
+        coherent position.
+
+        1) $(d1)
+        2) $(d2)
+        3) $(d3)
+        4) $(d4)
+
+        Set `synthesis` to: a one-paragraph position, then the supporting points
+        grouped by theme, then a list headed `UNRESOLVED:` naming every CONFLICT
+        you could not settle. Under 300 words.
+    "
+}
+
+// ---- three adversaries, three backends, three lenses ------------------------
+
+team AdversaryX[agent : Codex]
+{
+    input  synthesis : string
+    output finding   : string
+
+    prompt agent(synthesis) -> finding
+    "
+        $(synthesis)
+
+        Attack this synthesis on FEASIBILITY only: what it assumes is available,
+        what it would cost, what it cannot actually be built out of. Set `finding`
+        to a numbered list, each entry one sentence naming the problem plus one
+        sentence on what breaks. If nothing survives your scrutiny, set `finding`
+        to exactly `NONE`. Under 150 words.
+    "
+}
+
+team AdversaryY[agent : Cursor]
+{
+    input  synthesis : string
+    output finding   : string
+
+    prompt agent(synthesis) -> finding
+    "
+        $(synthesis)
+
+        Attack this synthesis on COHERENCE only: internal contradictions, claims
+        that do not follow, vagueness standing in for a decision, and anything in
+        UNRESOLVED that was quietly dropped. Set `finding` to a numbered list, each
+        entry one sentence naming the problem plus one sentence on what breaks. If
+        you find nothing, set `finding` to exactly `NONE`. Under 150 words.
+    "
+}
+
+team AdversaryZ[agent : OpenCode]
+{
+    input  synthesis : string
+    output finding   : string
+
+    prompt agent(synthesis) -> finding
+    "
+        $(synthesis)
+
+        Attack this synthesis on RISK only: how it fails under load, under abuse,
+        or when an assumption turns out false, and what it would take to notice.
+        Set `finding` to a numbered list, each entry one sentence naming the risk
+        plus one sentence on the failure it produces. If you find nothing, set
+        `finding` to exactly `NONE`. Under 150 words.
+    "
+}
+
+// ---- terminal sink ----------------------------------------------------------
+
+team Reporter[agent : Cursor]
+{
+    input  report  : string
+    output summary : string
+
+    prompt agent(report) -> summary
+    "
+        $(report)
+
+        Rewrite this for someone who watched the run but read none of it: what the
+        question was, what the run concluded, what is still open, and how many
+        rounds it took. Plain prose, under 200 words. Add nothing that is not in
+        the report above.
+    "
+}
+
+main MegaTest {
+    coord = Coordinator()
+
+    e1 = ExplorerC(1, "first principles")
+    e2 = ExplorerC(2, "prior art")
+    e3 = ExplorerX(3, "mechanism and cost")
+    e4 = ExplorerX(4, "failure modes")
+    e5 = ExplorerU(5, "the user's day")
+    e6 = ExplorerU(6, "adoption and incentives")
+    e7 = ExplorerO(7, "measurement")
+    e8 = ExplorerO(8, "second-order effects")
+
+    g1 = AggregatorA("Foundations")
+    g2 = AggregatorB("Mechanics")
+    g3 = AggregatorA("People")
+    g4 = AggregatorB("Evidence")
+
+    syn = Synthesizer()
+
+    ax = AdversaryX()
+    ay = AdversaryY()
+    az = AdversaryZ()
+
+    rep = Reporter()
+
+    // fan out: one brief, eight explorers, four backends
+    coord.spec -> e1.spec
+    coord.spec -> e2.spec
+    coord.spec -> e3.spec
+    coord.spec -> e4.spec
+    coord.spec -> e5.spec
+    coord.spec -> e6.spec
+    coord.spec -> e7.spec
+    coord.spec -> e8.spec
+
+    // first fan-in stage: eight notes, four 2-input barriers
+    e1.note -> g1.n1
+    e2.note -> g1.n2
+    e3.note -> g2.n1
+    e4.note -> g2.n2
+    e5.note -> g3.n1
+    e6.note -> g3.n2
+    e7.note -> g4.n1
+    e8.note -> g4.n2
+
+    // second fan-in stage: four digests, one 4-input barrier
+    g1.digest -> syn.d1
+    g2.digest -> syn.d2
+    g3.digest -> syn.d3
+    g4.digest -> syn.d4
+
+    // fan out again into three adversaries on three backends
+    syn.synthesis -> ax.synthesis
+    syn.synthesis -> ay.synthesis
+    syn.synthesis -> az.synthesis
+
+    // 3-way barrier closes the cycle back at the coordinator
+    ax.finding -> coord.red
+    ay.finding -> coord.blue
+    az.finding -> coord.black
+
+    // and out
+    coord.report -> rep.report
+}
