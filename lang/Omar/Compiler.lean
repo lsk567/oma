@@ -61,7 +61,7 @@ private partial def lexChars : List Char -> Except String (List Token)
         match value.toNat? with
         | some value => do pure (Token.nat value :: (← lexChars tail))
         | none => throw s!"invalid natural number '{value}'"
-      else if "(),:{}?|=<>".contains c then
+      else if "(),:{}?|=<>[].".contains c then
         do pure (Token.sym c.toString :: (← lexChars rest))
       else
         throw s!"unexpected character '{c}'"
@@ -99,6 +99,57 @@ structure Reaction where
   prompt : String
   deriving Repr
 
+/-- A compile-time team parameter, supplied by the instantiation in `main`. -/
+structure Param where
+  name : String
+  type : String
+  deriving Repr
+
+/-- An argument to a team instantiation. Only the literal forms the lexer
+    produces; parameters are constants, so there is nothing to evaluate. -/
+inductive Literal where
+  | int : Nat -> Literal
+  | str : String -> Literal
+  deriving Repr, BEq
+
+/-- A team as written: a template, which `main` instantiates. A team is never
+    the program itself — that is what `main` is for. -/
+structure TeamDecl where
+  name : String
+  params : Array Param
+  agents : Array Agent
+  ports : Array Port
+  connections : Array Connection
+  reactions : Array Reaction
+  deriving Repr
+
+structure Instance where
+  name : String
+  team : String
+  args : Array Literal
+  deriving Repr
+
+/-- `a.out -> b.in after 1`. Ends are qualified by instance, so unlike a
+    team-local connection this one names four things rather than two. -/
+structure InstanceConnection where
+  sourceInstance : String
+  sourcePort : String
+  targetInstance : String
+  targetPort : String
+  delay : Nat
+  deriving Repr
+
+structure Main where
+  /-- `main Name { … }` names the program. Without one it takes its source
+      file's name, which a program submitted over the wire does not have. -/
+  name : Option String
+  instances : Array Instance
+  connections : Array InstanceConnection
+  deriving Repr
+
+/-- The elaborated program: one flat namespace, which is what the VM runs.
+    Instances are gone by this point, having been expanded into qualified
+    agents, ports and reactions. -/
 structure Program where
   team : String
   agents : Array Agent
@@ -147,7 +198,7 @@ private partial def parseType : Parser String
 
 private partial def parseAgents (tokens : List Token) : Except String (Array Agent × List Token) := do
   match tokens with
-  | Token.sym ")" :: _ => pure (#[], tokens)
+  | Token.sym "]" :: _ => pure (#[], tokens)
   | _ =>
       let (name, tokens) ← word tokens
       let (_, tokens) ← expectSym ":" tokens
@@ -158,6 +209,20 @@ private partial def parseAgents (tokens : List Token) : Except String (Array Age
           let (agents, tail) ← parseAgents rest
           pure (#[agent] ++ agents, tail)
       | _ => pure (#[agent], tokens)
+
+private partial def parseParams (tokens : List Token) : Except String (Array Param × List Token) := do
+  match tokens with
+  | Token.sym ")" :: _ => pure (#[], tokens)
+  | _ =>
+      let (name, tokens) ← word tokens
+      let (_, tokens) ← expectSym ":" tokens
+      let (type, tokens) ← parseType tokens
+      let param := { name, type : Param }
+      match tokens with
+      | Token.sym "," :: rest =>
+          let (params, tail) ← parseParams rest
+          pure (#[param] ++ params, tail)
+      | _ => pure (#[param], tokens)
 
 private def kindName : PortKind -> String
   | .input => "input"
@@ -255,6 +320,85 @@ private partial def parseDeclarations
   | token :: _ => throw s!"unexpected token in team body: {reprStr token}"
   | [] => throw "unterminated team body"
 
+private def parseTeam : Parser TeamDecl := fun tokens => do
+  let (_, tokens) ← expectWord "team" tokens
+  let (name, tokens) ← word tokens
+  -- Both lists are optional: a team with neither parameters nor agents is
+  -- just `team Name { ... }`.
+  let (params, tokens) ← match tokens with
+    | Token.sym "(" :: rest => do
+        let (params, rest) ← parseParams rest
+        let (_, rest) ← expectSym ")" rest
+        pure (params, rest)
+    | _ => pure (#[], tokens)
+  let (agents, tokens) ← match tokens with
+    | Token.sym "[" :: rest => do
+        let (agents, rest) ← parseAgents rest
+        let (_, rest) ← expectSym "]" rest
+        pure (agents, rest)
+    | _ => pure (#[], tokens)
+  let (_, tokens) ← expectSym "{" tokens
+  let (ports, connections, reactions, tokens) ← parseDeclarations 0 #[] #[] #[] tokens
+  pure ({ name, params, agents, ports, connections, reactions }, tokens)
+
+private def literal : Parser Literal
+  | Token.nat value :: rest => pure (Literal.int value, rest)
+  | Token.text value :: rest => pure (Literal.str value, rest)
+  | tokens => throw s!"expected an int or string argument, found {reprStr tokens.head?}"
+
+private partial def parseArgs (acc : Array Literal) : Parser (Array Literal)
+  | Token.sym ")" :: rest => pure (acc, rest)
+  | tokens => do
+      let (value, tokens) ← literal tokens
+      match tokens with
+      | Token.sym "," :: rest => parseArgs (acc.push value) rest
+      | Token.sym ")" :: rest => pure (acc.push value, rest)
+      | _ => throw "expected ',' or ')' in team arguments"
+
+private partial def parseMainBody
+    (instances : Array Instance)
+    (connections : Array InstanceConnection) :
+    List Token -> Except String (Array Instance × Array InstanceConnection × List Token)
+  | Token.sym "}" :: rest => pure (instances, connections, rest)
+  | Token.word name :: Token.sym "=" :: rest => do
+      let (team, rest) ← word rest
+      let (_, rest) ← expectSym "(" rest
+      let (args, rest) ← parseArgs #[] rest
+      parseMainBody (instances.push { name, team, args }) connections rest
+  | Token.word sourceInstance :: Token.sym "." :: rest => do
+      let (sourcePort, rest) ← word rest
+      let (_, rest) ← expectSym "->" rest
+      let (targetInstance, rest) ← word rest
+      let (_, rest) ← expectSym "." rest
+      let (targetPort, rest) ← word rest
+      -- `after` is optional here. A connection with no delay still lands on
+      -- the next microstep, so a feedback loop through instances progresses.
+      let (delay, rest) ← match rest with
+        | Token.word "after" :: tail => natural tail
+        | _ => pure (0, rest)
+      let connection :=
+        { sourceInstance, sourcePort, targetInstance, targetPort, delay : InstanceConnection }
+      parseMainBody instances (connections.push connection) rest
+  | token :: _ => throw s!"unexpected token in main: {reprStr token}"
+  | [] => throw "unterminated main block"
+
+private def parseMain : Parser Main := fun tokens => do
+  let (_, tokens) ← expectWord "main" tokens
+  let (name, tokens) := match tokens with
+    | Token.word name :: rest => (some name, rest)
+    | _ => (none, tokens)
+  let (_, tokens) ← expectSym "{" tokens
+  let (instances, connections, tokens) ← parseMainBody #[] #[] tokens
+  pure ({ name, instances, connections }, tokens)
+
+private partial def parseTeams (acc : Array TeamDecl) :
+    List Token -> Except String (Array TeamDecl × List Token)
+  | [] => pure (acc, [])
+  | tokens@(Token.word "main" :: _) => pure (acc, tokens)
+  | tokens => do
+      let (decl, tokens) ← parseTeam tokens
+      parseTeams (acc.push decl) tokens
+
 private def containsName (names : Array String) (name : String) : Bool :=
   names.any (· == name)
 
@@ -292,22 +436,121 @@ private def validate (program : Program) : Except String Program := do
     let target ← match program.ports.find? (·.name == connection.target) with
       | some port => pure port
       | none => throw s!"connection names unknown target port '{connection.target}'"
-    if target.kind == .input then
-      throw s!"connection cannot target input port '{connection.target}'"
     if source.type != target.type then
       throw s!"connection type mismatch from '{connection.source}' to '{connection.target}'"
   pure program
 
-def parse (tokens : List Token) : Except String Program := do
-  let (_, tokens) ← expectWord "team" tokens
-  let (team, tokens) ← word tokens
-  let (_, tokens) ← expectSym "(" tokens
-  let (agents, tokens) ← parseAgents tokens
-  let (_, tokens) ← expectSym ")" tokens
-  let (_, tokens) ← expectSym "{" tokens
-  let (ports, connections, reactions, tokens) ← parseDeclarations 0 #[] #[] #[] tokens
-  if !tokens.isEmpty then throw s!"unexpected tokens after team: {reprStr tokens.head?}"
-  validate { team, agents, ports, connections, reactions }
+private def literalText : Literal -> String
+  | .int value => toString value
+  | .str value => value
+
+private def literalType : Literal -> String
+  | .int _ => "int"
+  | .str _ => "string"
+
+/-- `instance.member`. The VM has one flat namespace, so instantiating a team
+    is a renaming: everything it declares gains its instance's prefix. -/
+private def qualify (instance_ : String) (name : String) : String := s!"{instance_}.{name}"
+
+/-- Parameters are compile-time constants, so they are substituted into the
+    prompt here. The runtime resolves `$(…)` against trigger values and has no
+    idea a parameter existed. -/
+private def substitute (bindings : Array (String × String)) (text : String) : String :=
+  bindings.foldl (fun acc binding => acc.replace s!"$({binding.1})" binding.2) text
+
+/-- The runtime matches contract names against the effects a reaction writes,
+    and those are qualified, so the contract has to be too. Only declared port
+    names are rewritten; `( | ) , ? =` and constants are left alone. -/
+private def qualifyContract (inst : String) (ports : Array Port) (contract : String) : String :=
+  let portNames := ports.map (·.name)
+  String.intercalate " " ((contract.splitOn " ").map fun piece =>
+    if portNames.any (· == piece) then qualify inst piece else piece)
+
+/-- Likewise for `$(port)` in a prompt: the runtime looks the name up among the
+    trigger values, which are qualified.
+
+    Only the plain spelling is rewritten. `$( port )` and `$(port /* note */)`
+    are accepted by the runtime but not matched here, so inside a team that
+    `main` instantiates, write `$(port)`. -/
+private def qualifyPrompt (inst : String) (ports : Array Port) (text : String) : String :=
+  ports.foldl
+    (fun acc port => acc.replace s!"$({port.name})" s!"$({qualify inst port.name})")
+    text
+
+private def bindArguments (decl : TeamDecl) (inst : Instance) :
+    Except String (Array (String × String)) := do
+  if decl.params.size != inst.args.size then
+    throw s!"team '{decl.name}' takes {decl.params.size} argument(s), \
+      but '{inst.name}' supplies {inst.args.size}"
+  (decl.params.zip inst.args).foldlM
+    (fun acc (param, arg) => do
+      if param.type != literalType arg then
+        throw s!"'{inst.name}' passes {literalType arg} to parameter \
+          '{param.name}' of type {param.type}"
+      pure (acc.push (param.name, literalText arg)))
+    (#[] : Array (String × String))
+
+private def elaborateInstance (teams : Array TeamDecl) (inst : Instance) :
+    Except String (Array Agent × Array Port × Array Connection × Array Reaction) := do
+  let decl ← match teams.find? (·.name == inst.team) with
+    | some decl => pure decl
+    | none => throw s!"instance '{inst.name}' names unknown team '{inst.team}'"
+  let bindings ← bindArguments decl inst
+  let agents := decl.agents.map fun agent =>
+    { agent with name := qualify inst.name agent.name }
+  let ports := decl.ports.map fun port =>
+    { port with name := qualify inst.name port.name }
+  let connections := decl.connections.map fun connection =>
+    { connection with
+        source := qualify inst.name connection.source
+        target := qualify inst.name connection.target }
+  let reactions := decl.reactions.map fun reaction =>
+    { reaction with
+        id := qualify inst.name reaction.id
+        agent := qualify inst.name reaction.agent
+        triggers := reaction.triggers.map (qualify inst.name)
+        effects := reaction.effects.map (qualify inst.name)
+        contract := qualifyContract inst.name decl.ports reaction.contract
+        prompt := substitute bindings (qualifyPrompt inst.name decl.ports reaction.prompt) }
+  pure (agents, ports, connections, reactions)
+
+private def elaborate (programName : String) (teams : Array TeamDecl) (main : Main) :
+    Except String Program := do
+  ensureUnique "instance" (main.instances.map (·.name))
+  let instanceNames := main.instances.map (·.name)
+  for connection in main.connections do
+    for side in #[connection.sourceInstance, connection.targetInstance] do
+      if !containsName instanceNames side then
+        throw s!"main connection names unknown instance '{side}'"
+  let parts ← main.instances.mapM (elaborateInstance teams)
+  let wired := main.connections.map fun connection =>
+    { source := qualify connection.sourceInstance connection.sourcePort
+      target := qualify connection.targetInstance connection.targetPort
+      delay := connection.delay : Connection }
+  pure {
+    team := programName
+    agents := parts.foldl (fun acc part => acc ++ part.1) #[]
+    ports := parts.foldl (fun acc part => acc ++ part.2.1) #[]
+    connections := parts.foldl (fun acc part => acc ++ part.2.2.1) #[] ++ wired
+    reactions := parts.foldl (fun acc part => acc ++ part.2.2.2) #[]
+  }
+
+/-- `programName` is the fallback when `main` is not named: the source file,
+    the way a C binary is named for its file rather than for `main`. A program
+    that arrives over the wire has no file, which is why `main` can name
+    itself. -/
+def parse (programName : String) (tokens : List Token) : Except String Program := do
+  let (teams, tokens) ← parseTeams #[] tokens
+  if teams.isEmpty then throw "program declares no team"
+  ensureUnique "team" (teams.map (·.name))
+  if tokens.isEmpty then
+    throw "program has no main block; a program runs instantiated teams, so \
+      every program needs 'main { … }'"
+  let (main, tokens) ← parseMain tokens
+  if !tokens.isEmpty then throw s!"unexpected tokens after main: {reprStr tokens.head?}"
+  if main.instances.isEmpty then
+    throw "main instantiates no team; a program with no instance has nothing to run"
+  validate (← elaborate (main.name.getD programName) teams main)
 
 private def jsonStringArray (values : Array String) : Json :=
   Json.arr (values.map toJson)
@@ -355,7 +598,7 @@ def compile (program : Program) : String :=
   "{\n  \"version\": 1,\n  \"team\": " ++ (toJson program.team).compress ++
     ",\n  \"instructions\": [\n    " ++ rendered ++ "\n  ]\n}\n"
 
-def compileSource (source : String) : Except String String := do
-  pure (compile (← parse (← lex source)))
+def compileSource (programName : String) (source : String) : Except String String := do
+  pure (compile (← parse programName (← lex source)))
 
 end Omar

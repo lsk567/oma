@@ -9,7 +9,10 @@ def main (args : List String) : IO UInt32 := do
   | [input, output] =>
       try
         let source ← IO.FS.readFile input
-        match compileSource source with
+        -- The program takes its source file's name, the way a C binary takes
+        -- its file's name rather than `main`'s.
+        let programName := (System.FilePath.mk input).fileStem.getD "main"
+        match compileSource programName source with
         | .ok bytecode =>
             IO.FS.writeFile output bytecode
             IO.println s!"compiled {input} -> {output}"

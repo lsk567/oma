@@ -1310,7 +1310,7 @@ fn send_to_manager(client: &TmuxClient, session: &str, message: &str) -> Result<
 }
 
 fn send_to_agent(client: &TmuxClient, agent: &str, message: &str) -> Result<()> {
-    let session_name = format!("{}{}", client.prefix(), agent);
+    let session_name = client.session_for(agent);
 
     if !client.has_session(&session_name)? {
         println!("Agent '{}' not found.", agent);
@@ -1330,7 +1330,7 @@ fn spawn_worker(
     omar_dir: &Path,
     base_prefix: &str,
 ) -> Result<()> {
-    let session_name = format!("{}{}", client.prefix(), agent.name);
+    let session_name = client.session_for(&agent.name);
 
     if client.has_session(&session_name)? {
         println!("  {} - already exists, skipping", agent.name);

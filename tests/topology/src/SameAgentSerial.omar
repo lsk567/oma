@@ -1,8 +1,8 @@
 // OMAR topology integration source.
 // Exercises same-agent serialization even when reactions write disjoint ports,
 // followed by fan-in where both actions arrive at the same tag.
-team SameAgentSerial(worker : Codex,
-                     collector : Codex)
+team SameAgentSerial[worker : Codex,
+                     collector : Codex]
 {
     input request : string
     output result : string
@@ -27,4 +27,8 @@ team SameAgentSerial(worker : Codex,
         right=$(right)
         Combine them and set `result`.
     "
+}
+
+main {
+    serial = SameAgentSerial()
 }

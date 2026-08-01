@@ -15,15 +15,21 @@ Coverage:
 - `EffectContracts.omar`: alternatives, optional groups, signals, constants.
 - `OrderedWrites.omar`: shared-effect ordering, optional writes, last writer wins.
 - `Recurrence.omar`: self-triggered action flow across logical microsteps.
+- `Ring.omar`: team parameters, and a `main` block instantiating one team three
+  times and wiring the instances into a feedback ring.
 - `SameAgentSerial.omar`: same-agent serialization and same-tag fan-in.
 - `SuperdenseTime.omar`: `(timestamp, microstep)` tags, fixed action delay,
   additive connection delay, and chronological delivery.
 - `HR.omar`: the heterogeneous hiring example using Claude and Codex.
 - `HRCodex.omar`: the original hiring example using Codex for every role.
 
+Every program declares its teams and then instantiates them in a `main` block,
+so ports are named `instance.port` and each program takes its source file's
+name rather than a team's.
+
 To execute one scenario with live agents, use `omar run` with the `.omar`
-source, provide every declared input, and use `--replace` when reusing agent
-names. OMAR invokes `omarc` internally. Live execution requires every backend
+source, provide every declared input that no connection feeds, and use
+`--replace` when reusing agent names. OMAR invokes `omarc` internally. Live execution requires every backend
 declared by that topology to be installed and authenticated.
 
 To compile and execute the complete corpus with representative inputs and local
