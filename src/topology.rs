@@ -241,10 +241,11 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                 // Agents live in tmux sessions, and qualification is flattened
                 // to get there, so two names that differ only by a '.' would
                 // land in one session and answer each other's invocations.
+                let flattened = flatten_agent_name(name);
                 if let Some(clash) = state
                     .agents
                     .keys()
-                    .find(|existing| flatten_agent_name(existing) == flatten_agent_name(name))
+                    .find(|existing| flatten_agent_name(existing) == flattened)
                 {
                     bail!("agents '{clash}' and '{name}' need the same tmux session");
                 }
@@ -1053,15 +1054,16 @@ pub fn parse_inputs(state: &VmState, raw_inputs: &[String]) -> Result<BTreeMap<S
         validate_value(&port.ty, &value)?;
         inputs.insert(name.to_string(), value);
     }
+    // An input fed by a connection gets its value from inside the topology, so
+    // the operator has nothing to supply. Supplying one anyway is still
+    // allowed: that is how a feedback loop is seeded.
+    let connected: BTreeSet<&String> = state
+        .connections
+        .iter()
+        .map(|connection| &connection.target)
+        .collect();
     for (name, port) in &state.ports {
-        // An input fed by a connection gets its value from inside the topology,
-        // so the operator has nothing to supply. Supplying one anyway is still
-        // allowed: that is how a feedback loop is seeded.
-        let connected = state
-            .connections
-            .iter()
-            .any(|connection| connection.target == *name);
-        if port.kind == PortKind::Input && !connected && !inputs.contains_key(name) {
+        if port.kind == PortKind::Input && !connected.contains(name) && !inputs.contains_key(name) {
             bail!("missing input '{name}'");
         }
     }

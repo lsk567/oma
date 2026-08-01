@@ -511,6 +511,11 @@ private def elaborateInstance (teams : Array TeamDecl) (inst : Instance) :
         triggers := reaction.triggers.map (qualify inst.name)
         effects := reaction.effects.map (qualify inst.name)
         contract := qualifyContract inst.name decl.ports reaction.contract
+        -- Qualify first, substitute second, so an argument is data rather than
+        -- code: a string like "$(token)" passed to a parameter lands in the
+        -- prompt verbatim instead of being rewritten into a reference to the
+        -- instance's port. It renders `<absent>`, which is the honest answer —
+        -- the caller did not name a port, the team did.
         prompt := substitute bindings (qualifyPrompt inst.name decl.ports reaction.prompt) }
   pure (agents, ports, connections, reactions)
 
