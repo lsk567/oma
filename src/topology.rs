@@ -34,9 +34,16 @@ pub enum Instruction {
     BeginPlan {
         team: String,
     },
+    /// A team instantiated by `main`. The container a diagram draws.
+    DeclareInstance {
+        name: String,
+        team: String,
+    },
     SpawnAgent {
         name: String,
         backend: String,
+        #[serde(default)]
+        instance: String,
     },
     DefinePort {
         name: String,
@@ -45,6 +52,8 @@ pub enum Instruction {
         ty: String,
         #[serde(default)]
         delay: Option<u64>,
+        #[serde(default)]
+        instance: String,
     },
     ConnectPorts {
         source: String,
@@ -58,6 +67,8 @@ pub enum Instruction {
         effects: Vec<String>,
         contract: String,
         prompt: String,
+        #[serde(default)]
+        instance: String,
     },
     CommitPlan,
 }
@@ -73,6 +84,16 @@ pub enum PortKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentState {
     pub backend: String,
+    /// Which instance declared it. Empty only for bytecode that predates
+    /// instances being carried through.
+    #[serde(default)]
+    pub instance: String,
+}
+
+/// A team instantiated by `main`, and the team it came from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstanceState {
+    pub team: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +103,8 @@ pub struct PortState {
     pub ty: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delay: Option<u64>,
+    #[serde(default)]
+    pub instance: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +118,8 @@ pub struct ConnectionState {
 pub struct ReactionState {
     pub order: usize,
     pub agent: String,
+    #[serde(default)]
+    pub instance: String,
     pub triggers: Vec<String>,
     pub effects: Vec<String>,
     pub contract: String,
@@ -105,6 +130,8 @@ pub struct ReactionState {
 pub struct VmState {
     pub version: u32,
     pub team: String,
+    #[serde(default)]
+    pub instances: BTreeMap<String, InstanceState>,
     pub agents: BTreeMap<String, AgentState>,
     pub ports: BTreeMap<String, PortState>,
     pub connections: Vec<ConnectionState>,
@@ -219,6 +246,7 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
     let mut state = VmState {
         version: bytecode.version,
         team: bytecode.team.clone(),
+        instances: BTreeMap::new(),
         agents: BTreeMap::new(),
         ports: BTreeMap::new(),
         connections: Vec::new(),
@@ -233,7 +261,25 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
         match instruction {
             Instruction::BeginPlan { .. } if index == 0 => {}
             Instruction::BeginPlan { .. } => bail!("duplicate begin_plan at instruction {index}"),
-            Instruction::SpawnAgent { name, backend } => {
+            Instruction::DeclareInstance { name, team } => {
+                require_identifier("instance", name)?;
+                if team.trim().is_empty() {
+                    bail!("instance '{name}' names no team");
+                }
+                if state
+                    .instances
+                    .insert(name.clone(), InstanceState { team: team.clone() })
+                    .is_some()
+                {
+                    bail!("duplicate instance '{name}'");
+                }
+            }
+            Instruction::SpawnAgent {
+                name,
+                backend,
+                instance,
+            } => {
+                check_instance(&state, "agent", name, instance)?;
                 require_identifier("agent", name)?;
                 if backend.trim().is_empty() {
                     bail!("agent '{name}' has an empty backend");
@@ -254,6 +300,7 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                         name.clone(),
                         AgentState {
                             backend: backend.clone(),
+                            instance: instance.clone(),
                         },
                     )
                     .is_some()
@@ -266,8 +313,10 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                 kind,
                 ty,
                 delay,
+                instance,
             } => {
                 require_identifier("port", name)?;
+                check_instance(&state, "port", name, instance)?;
                 if ty.trim().is_empty() {
                     bail!("port '{name}' has an empty type");
                 }
@@ -282,6 +331,7 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                             kind: *kind,
                             ty: ty.clone(),
                             delay: *delay,
+                            instance: instance.clone(),
                         },
                     )
                     .is_some()
@@ -327,8 +377,10 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                 effects,
                 contract,
                 prompt,
+                instance,
             } => {
                 let order = state.reactions.len();
+                check_instance(&state, "reaction", id, instance)?;
                 if !state.agents.contains_key(agent) {
                     bail!("reaction '{id}' references unknown agent '{agent}'");
                 }
@@ -354,6 +406,7 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                         id.clone(),
                         ReactionState {
                             order,
+                            instance: instance.clone(),
                             agent: agent.clone(),
                             triggers: triggers.clone(),
                             effects: effects.clone(),
@@ -1429,6 +1482,17 @@ fn valid_qualified_name(value: &str) -> bool {
     !value.is_empty() && value.split('.').all(valid_identifier)
 }
 
+/// Members name the instance that declared them.
+///
+/// Empty is allowed so bytecode written before instances were carried through
+/// still loads; naming one that was never declared is a real inconsistency.
+fn check_instance(state: &VmState, kind: &str, name: &str, instance: &str) -> Result<()> {
+    if !instance.is_empty() && !state.instances.contains_key(instance) {
+        bail!("{kind} '{name}' names undeclared instance '{instance}'");
+    }
+    Ok(())
+}
+
 fn require_identifier(kind: &str, value: &str) -> Result<()> {
     if valid_qualified_name(value) {
         Ok(())
@@ -1602,23 +1666,27 @@ mod tests {
         let mut state = VmState {
             version: 1,
             team: "HR".into(),
+            instances: BTreeMap::new(),
             agents: BTreeMap::from([
                 (
                     "manager".into(),
                     AgentState {
                         backend: "claude".into(),
+                        instance: String::new(),
                     },
                 ),
                 (
                     "reviewer1".into(),
                     AgentState {
                         backend: "codex".into(),
+                        instance: String::new(),
                     },
                 ),
                 (
                     "reviewer2".into(),
                     AgentState {
                         backend: "opencode".into(),
+                        instance: String::new(),
                     },
                 ),
             ]),
@@ -1640,6 +1708,7 @@ mod tests {
                     kind,
                     ty: ty.into(),
                     delay: None,
+                    instance: String::new(),
                 },
             );
         }
@@ -1681,6 +1750,7 @@ mod tests {
                 id.into(),
                 ReactionState {
                     order,
+                    instance: String::new(),
                     agent: agent.into(),
                     triggers: triggers.into_iter().map(str::to_string).collect(),
                     effects: effects.into_iter().map(str::to_string).collect(),
@@ -1856,6 +1926,7 @@ mod tests {
             Instruction::SpawnAgent {
                 name: "n1_agent".to_string(),
                 backend: "Codex".to_string(),
+                instance: String::new(),
             },
         );
 

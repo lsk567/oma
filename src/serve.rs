@@ -35,6 +35,11 @@ const TERMINAL_PREFIX: &str = "/v1/agents/";
 const TERMINAL_SUFFIX: &str = "/terminal";
 /// How long the relay waits on each side before checking the other.
 const TERMINAL_POLL: Duration = Duration::from_millis(25);
+/// A selection names diagram components, and a diagram the operator can click
+/// through is far smaller than this. The cap is here because the names are
+/// echoed into the EA's pane, not because a real selection approaches it.
+const MAX_SELECTION: usize = 64;
+const MAX_SELECTION_NAME: usize = 128;
 /// Messages a stalled chat subscriber may fall behind by before it is dropped.
 const CHAT_QUEUE: usize = 256;
 
@@ -82,6 +87,10 @@ pub struct ChatMessage {
     /// Commentary while working, rather than something awaiting an answer.
     pub progress: bool,
     pub design: Option<ProposedDesign>,
+    /// Diagram components the operator had selected when they sent this.
+    /// "this one" is unresolvable in text; a selection says which.
+    #[serde(default)]
+    pub selection: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +123,8 @@ struct AgentProposal {
 #[derive(Debug, Deserialize)]
 struct ChatRequest {
     text: String,
+    #[serde(default)]
+    selection: Vec<String>,
 }
 
 #[derive(Default)]
@@ -133,6 +144,10 @@ struct Context_ {
     chat: Arc<Mutex<Chat>>,
     /// Authenticates the EA's MCP sidecar on the agent-only endpoints.
     agent_token: String,
+    /// The command the assistant runs, and where to reach this server when it
+    /// is relaunched on a different backend.
+    command: Arc<Mutex<String>>,
+    address: SocketAddr,
 }
 
 impl Context_ {
@@ -143,6 +158,17 @@ impl Context_ {
         progress: bool,
         design: Option<ProposedDesign>,
     ) -> ChatMessage {
+        self.publish_with_selection(role, text, progress, design, Vec::new())
+    }
+
+    fn publish_with_selection(
+        &self,
+        role: &str,
+        text: String,
+        progress: bool,
+        design: Option<ProposedDesign>,
+        selection: Vec<String>,
+    ) -> ChatMessage {
         let mut chat = self.chat.lock().expect("serve chat poisoned");
         chat.sequence += 1;
         let message = ChatMessage {
@@ -151,6 +177,7 @@ impl Context_ {
             text,
             progress,
             design,
+            selection,
         };
         chat.messages.push(message.clone());
         chat.subscribers
@@ -206,6 +233,8 @@ impl Serve {
             runs: Runs::default(),
             chat: Arc::new(Mutex::new(Chat::default())),
             agent_token: agent_token.clone(),
+            command: Arc::new(Mutex::new(config.agent.default_command.clone())),
+            address,
         });
         // Blocking accept rather than a polling loop: `Drop` wakes it with a
         // self-connection, so there is no need to spin, and no added latency on
@@ -475,6 +504,8 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
             (200, json!({"messages": chat.messages}))
         }
         ("POST", "/v1/chat") => send_to_ea(&context, &read_body(content_length)?),
+        ("GET", "/v1/agent") => (200, describe_agent(&context)),
+        ("POST", "/v1/agent/backend") => switch_backend(&context, &read_body(content_length)?),
         // EA-only, authenticated with the token handed to its MCP sidecar.
         ("POST", "/v1/agent/reply") => agent_reply(&context, &read_body(content_length)?),
         ("POST", "/v1/agent/proposals") => {
@@ -607,6 +638,85 @@ fn relay_terminal(stream: TcpStream, mut attachment: crate::terminal::Attachment
     Ok(())
 }
 
+/// What the assistant is running on, and what else it could run on.
+fn describe_agent(context: &Arc<Context_>) -> Value {
+    let command = context
+        .command
+        .lock()
+        .expect("serve command poisoned")
+        .clone();
+    json!({
+        "backend": crate::config::backend_of_command(&command),
+        "available": crate::config::ASSISTANT_BACKENDS,
+    })
+}
+
+/// Relaunch the assistant on a different backend.
+///
+/// A backend is chosen when the process starts, so changing it means a new
+/// process: the assistant's current session does not survive. That is the
+/// operator's call to make, which is why this is an explicit request rather
+/// than something inferred.
+fn switch_backend(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
+    #[derive(Deserialize)]
+    struct Request {
+        backend: String,
+    }
+    let request: Request = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(error) => return (400, json!({"error": format!("invalid request: {error}")})),
+    };
+    let command = match crate::config::resolve_backend(&request.backend) {
+        Ok(command) => command,
+        Err(reason) => return (400, json!({"error": reason})),
+    };
+    if !crate::config::ASSISTANT_BACKENDS.contains(&request.backend.as_str()) {
+        return (
+            400,
+            json!({"error": format!("'{}' is not an assistant backend", request.backend)}),
+        );
+    }
+
+    match relaunch_ea(context, &command) {
+        Ok(session) => {
+            *context.command.lock().expect("serve command poisoned") = command;
+            (200, json!({"backend": request.backend, "session": session}))
+        }
+        Err(error) => (502, json!({"error": format!("{error:#}")})),
+    }
+}
+
+fn relaunch_ea(context: &Arc<Context_>, command: &str) -> Result<String> {
+    let client = TmuxClient::new(crate::ea::ea_prefix(context.ea_id, &context.session_prefix));
+    let existing = crate::ea::ea_manager_session(context.ea_id, &context.session_prefix);
+    if client.has_session(&existing)? {
+        client.kill_session(&existing)?;
+    }
+    let name = crate::ea::load_registry(&context.omar_dir)
+        .into_iter()
+        .find(|ea| ea.id == context.ea_id)
+        .map(|ea| ea.name)
+        .unwrap_or_else(|| format!("ea-{}", context.ea_id));
+    let (session, _) = crate::manager::ensure_manager_session(
+        &client,
+        command,
+        context.ea_id,
+        &name,
+        &context.omar_dir,
+        &context.session_prefix,
+        &crate::manager::ManagerRuntimeOptions {
+            default_workdir: context.default_workdir.clone(),
+            health_idle_warning: context.health_idle_warning,
+            // Without this the new process has no way to answer the operator.
+            serve: Some(crate::manager::ServeMcpContext {
+                endpoint: context.address.to_string(),
+                token: context.agent_token.clone(),
+            }),
+        },
+    )?;
+    Ok(session)
+}
+
 fn send_to_ea(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     let request: ChatRequest = match serde_json::from_slice(body) {
         Ok(request) => request,
@@ -615,8 +725,32 @@ fn send_to_ea(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     if request.text.trim().is_empty() {
         return (400, json!({"error": "message is empty"}));
     }
-    let message = context.publish("operator", request.text.clone(), false, None);
-    match deliver_to_ea(context, &request.text) {
+    // The selection is echoed into the EA's pane, so it is untrusted input of
+    // unbounded size unless bounded here.
+    if request.selection.len() > MAX_SELECTION {
+        return (
+            400,
+            json!({"error": format!("selection names more than {MAX_SELECTION} components")}),
+        );
+    }
+    if let Some(name) = request
+        .selection
+        .iter()
+        .find(|name| name.is_empty() || name.len() > MAX_SELECTION_NAME)
+    {
+        return (
+            400,
+            json!({"error": format!("selected component name is empty or too long: '{name}'")}),
+        );
+    }
+    let message = context.publish_with_selection(
+        "operator",
+        request.text.clone(),
+        false,
+        None,
+        request.selection.clone(),
+    );
+    match deliver_to_ea(context, &request.text, &request.selection) {
         Ok(()) => (202, json!(message)),
         Err(error) => (502, json!({"error": format!("{error:#}")})),
     }
@@ -628,7 +762,18 @@ fn send_to_ea(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
 /// message is indistinguishable from any other, and the EA answers in the
 /// terminal where nobody is looking. Topology agents get an `OMAR INVOCATION`
 /// envelope for the same reason.
-fn mission_control_envelope(text: &str) -> String {
+fn mission_control_envelope(text: &str, selection: &[String]) -> String {
+    // Named on their own line so the EA can tell the operator's words from the
+    // components they had highlighted while writing them.
+    let selected = if selection.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "The operator has selected these components in the diagram: {}. \
+             When they say \"this\" or \"these\", that is what they mean.\n\n",
+            selection.join(", ")
+        )
+    };
     format!(
         "OMAR MISSION CONTROL\n\
          Answer by CALLING THE MCP TOOL `omar_reply` on the MCP server named \"omar\". \
@@ -640,11 +785,11 @@ fn mission_control_envelope(text: &str) -> String {
          through `omar_reply`.\n\
          To offer a workflow, call the MCP tool `omar_propose_design` with a complete \
          OMAR program. The operator approves and runs it; you do not.\n\n\
-         {text}"
+         {selected}{text}"
     )
 }
 
-fn deliver_to_ea(context: &Arc<Context_>, text: &str) -> Result<()> {
+fn deliver_to_ea(context: &Arc<Context_>, text: &str, selection: &[String]) -> Result<()> {
     let client = TmuxClient::new(crate::ea::ea_prefix(context.ea_id, &context.session_prefix));
     let session = crate::ea::ea_manager_session(context.ea_id, &context.session_prefix);
     anyhow::ensure!(
@@ -653,7 +798,7 @@ fn deliver_to_ea(context: &Arc<Context_>, text: &str) -> Result<()> {
     );
     client.deliver_prompt(
         &session,
-        &mission_control_envelope(text),
+        &mission_control_envelope(text, selection),
         &DeliveryOptions::default(),
     )?;
     Ok(())
@@ -990,10 +1135,12 @@ mod tests {
         VmState {
             version: 1,
             team: "Sample".to_string(),
+            instances: BTreeMap::new(),
             agents: BTreeMap::from([(
                 "worker".to_string(),
                 AgentState {
                     backend: "codex".to_string(),
+                    instance: String::new(),
                 },
             )]),
             ports: BTreeMap::from([
@@ -1003,6 +1150,7 @@ mod tests {
                         kind: PortKind::Input,
                         ty: "string".to_string(),
                         delay: None,
+                        instance: String::new(),
                     },
                 ),
                 (
@@ -1011,6 +1159,7 @@ mod tests {
                         kind: PortKind::Input,
                         ty: "path".to_string(),
                         delay: None,
+                        instance: String::new(),
                     },
                 ),
                 (
@@ -1019,6 +1168,7 @@ mod tests {
                         kind: PortKind::Output,
                         ty: "string".to_string(),
                         delay: None,
+                        instance: String::new(),
                     },
                 ),
             ]),
@@ -1206,9 +1356,57 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_endpoint_names_the_backend_and_the_alternatives() {
+        let server = test_server();
+
+        let response = request(server.address(), "GET", "/v1/agent", None);
+
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        // Whatever this machine defaults to, the choices are the ones an
+        // operator can actually pick.
+        assert!(response.contains("\"available\""), "{response}");
+        for backend in crate::config::ASSISTANT_BACKENDS {
+            assert!(
+                response.contains(backend),
+                "{backend} missing from {response}"
+            );
+        }
+        // The stub answers invocations without a model; there is nobody to talk
+        // to, so it is not on offer.
+        assert!(!response.contains("\"stub\""), "{response}");
+    }
+
+    #[test]
+    fn an_unknown_backend_is_refused_before_anything_is_killed() {
+        // Switching restarts the assistant, so a bad name must be caught while
+        // the running one is still untouched.
+        let server = test_server();
+
+        let refused = request(
+            server.address(),
+            "POST",
+            "/v1/agent/backend",
+            Some(&json!({"backend": "notabackend"}).to_string()),
+        );
+
+        assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
+        assert!(refused.contains("Unknown backend"), "{refused}");
+
+        // The stub compiles as a backend but is not one an operator talks to.
+        let stub = request(
+            server.address(),
+            "POST",
+            "/v1/agent/backend",
+            Some(&json!({"backend": "stub"}).to_string()),
+        );
+        assert!(stub.starts_with("HTTP/1.1 400"), "{stub}");
+        assert!(stub.contains("not an assistant backend"), "{stub}");
+    }
+
+    #[test]
     fn operator_messages_are_labelled_with_how_to_answer() {
         // Without this the EA answers in its pane, where nobody is looking.
-        let envelope = mission_control_envelope("review the release plan");
+        let envelope = mission_control_envelope("review the release plan", &[]);
         assert!(envelope.starts_with("OMAR MISSION CONTROL"));
         assert!(envelope.contains("omar_reply"));
         assert!(envelope.contains("omar_propose_design"));
@@ -1218,6 +1416,48 @@ mod tests {
         assert!(envelope.contains("MCP TOOL"));
         assert!(envelope.contains("mcp__omar__omar_reply"));
         assert!(envelope.contains("NOT a shell command"));
+    }
+
+    #[test]
+    fn a_selection_tells_the_ea_what_this_refers_to() {
+        // The operator writes "make this one retry" with two nodes highlighted.
+        // Without the selection the EA cannot resolve "this one" at all.
+        let envelope = mission_control_envelope(
+            "give this one a retry",
+            &["n1.agent".to_string(), "n1.out".to_string()],
+        );
+
+        assert!(envelope.contains("n1.agent, n1.out"), "{envelope}");
+        // The operator's words stay last, so the pane ends with what they said.
+        assert!(envelope.ends_with("give this one a retry"), "{envelope}");
+        let selected = envelope.find("n1.agent").expect("selection is present");
+        let message = envelope
+            .find("give this one a retry")
+            .expect("message is present");
+        assert!(selected < message, "the selection introduces the message");
+    }
+
+    #[test]
+    fn an_empty_selection_adds_nothing_to_the_envelope() {
+        // Most messages have no selection; they should read exactly as before.
+        assert_eq!(
+            mission_control_envelope("plain question", &[]),
+            mission_control_envelope("plain question", &[]),
+        );
+        assert!(!mission_control_envelope("plain question", &[]).contains("selected"));
+    }
+
+    #[test]
+    fn an_oversized_selection_is_refused() {
+        // It is echoed into the EA's pane, so it is bounded input.
+        let server = test_server();
+        let selection: Vec<String> = (0..MAX_SELECTION + 1).map(|i| format!("p{i}")).collect();
+        let body = json!({"text": "hi", "selection": selection}).to_string();
+
+        let response = request(server.address(), "POST", "/v1/chat", Some(&body));
+
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        assert!(response.contains("more than"), "{response}");
     }
 
     #[test]

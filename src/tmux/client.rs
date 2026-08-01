@@ -100,6 +100,15 @@ fn tail_pane_lines(output: String, lines: i32) -> String {
     capped
 }
 
+/// The size an agent's pane is created at.
+///
+/// A detached session with no size given is 80x24, and the backends are TUIs
+/// that render into whatever they are handed — so without this every agent
+/// works in a pane narrower than its own output. Nothing resizes it afterwards
+/// because nothing attaches, so it has to be right at creation.
+const AGENT_COLUMNS: &str = "200";
+const AGENT_ROWS: &str = "50";
+
 #[derive(Debug, Clone)]
 pub struct TmuxClient {
     prefix: String,
@@ -668,7 +677,16 @@ impl TmuxClient {
 
     /// Create a new detached session
     pub fn new_session(&self, name: &str, command: &str, workdir: Option<&str>) -> Result<()> {
-        let mut args = vec!["new-session", "-d", "-s", name];
+        let mut args = vec![
+            "new-session",
+            "-d",
+            "-s",
+            name,
+            "-x",
+            AGENT_COLUMNS,
+            "-y",
+            AGENT_ROWS,
+        ];
 
         if let Some(dir) = workdir {
             args.extend(["-c", dir]);
@@ -778,6 +796,41 @@ impl TmuxClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_pane_is_created_wider_than_the_tmux_default() {
+        // A detached session with no size is 80x24. The backends are TUIs, so
+        // that is the width they would draw into, and the terminal viewer
+        // adopts the agent's size rather than imposing one — it reported
+        // 80x24 because that is what the agent really had.
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+        let session = "omar-test-pane-size";
+        let _ = tmux_command()
+            .args(["kill-session", "-t", session])
+            .output();
+        let _guard = SessionGuard(session.to_string());
+
+        TmuxClient::new("")
+            .new_session(session, "exec sh", None)
+            .expect("session");
+
+        let reported = tmux_command()
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                session,
+                "#{window_width}x#{window_height}",
+            ])
+            .output()
+            .expect("tmux answers");
+        let size = String::from_utf8_lossy(&reported.stdout).trim().to_string();
+        assert_ne!(size, "80x24", "the agent got tmux's default pane");
+        assert_eq!(size, format!("{AGENT_COLUMNS}x{AGENT_ROWS}"));
+    }
 
     #[test]
     fn a_qualified_agent_name_survives_the_round_trip_to_tmux() {
