@@ -488,6 +488,26 @@ impl TmuxClient {
     /// 6. Verify with `wait_for_change` that Enter caused an observable
     ///    transition. If not, clear the input and retry.
     pub fn deliver_prompt(&self, session: &str, text: &str, opts: &DeliveryOptions) -> Result<()> {
+        self.deliver_prompt_until(session, text, opts, &|| false)
+    }
+
+    /// The same, for a caller that can tell whether the prompt was acted on.
+    ///
+    /// Step 6 assumes the agent does nothing until Enter, which is true of a
+    /// TUI backend but not of one that reads its pane a line at a time: that
+    /// one answers while the paste is still arriving, so its output lands
+    /// *before* the pre-Enter snapshot and Enter changes nothing. The pane
+    /// alone cannot tell "the prompt never arrived" from "the prompt arrived
+    /// and was already handled", and the two need opposite responses — retry,
+    /// or stop. `answered` is the caller's own evidence, which is why it is
+    /// the one signal here that does not come from the terminal.
+    pub fn deliver_prompt_until(
+        &self,
+        session: &str,
+        text: &str,
+        opts: &DeliveryOptions,
+        answered: &dyn Fn() -> bool,
+    ) -> Result<()> {
         // Per-delivery UUID so a stale sentinel from a previous delivery
         // cannot false-positive the end-sentinel poll on retry.
         let delivery_id = uuid::Uuid::new_v4().simple().to_string();
@@ -497,6 +517,12 @@ impl TmuxClient {
         let wrapped = format!("{}\n{}\n{}", start_sentinel, text, end_sentinel);
 
         for attempt in 1..=opts.max_retries {
+            // Re-delivering something the agent already answered is not a
+            // harmless retry: the second copy is a second invocation the
+            // runtime has to reject.
+            if answered() {
+                return Ok(());
+            }
             // Clear any leftover input from a prior attempt. No-op on the
             // first attempt against a fresh widget.
             let _ = self.send_keys(session, "C-u");
@@ -560,6 +586,7 @@ impl TmuxClient {
                 &content_before,
                 opts.verify_timeout,
                 opts.poll_interval,
+                answered,
             ) {
                 return Ok(());
             }
@@ -622,9 +649,16 @@ impl TmuxClient {
         content_before: &str,
         timeout: Duration,
         poll_interval: Duration,
+        answered: &dyn Fn() -> bool,
     ) -> bool {
         let start = Instant::now();
         while start.elapsed() < timeout {
+            // An agent that acted on the paste before the submit drew its
+            // output before `content_before` was taken, so there is no change
+            // left for Enter to cause. It answered: the prompt arrived.
+            if answered() {
+                return true;
+            }
             if let Ok(current) = self.get_pane_activity(session) {
                 if current > activity_before {
                     return true;
@@ -1833,6 +1867,87 @@ mod tests {
         assert_eq!(
             begins_id, ends_id,
             "start and end sentinel UUIDs must match"
+        );
+    }
+
+    /// An agent that answers during the paste still counts as delivered.
+    ///
+    /// A line-oriented agent acts on the prompt before Enter, so its output is
+    /// already in the pre-Enter snapshot and Enter changes nothing. Judging by
+    /// the pane alone, that is indistinguishable from a prompt that never
+    /// arrived — and the retry it provoked re-delivered an invocation the agent
+    /// had already answered, which the runtime then rejected, failing a run
+    /// whose work was done.
+    #[test]
+    fn an_answered_prompt_is_delivered_even_if_the_pane_does_not_change() {
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+
+        let session = "omar-test-answered-delivery";
+        let _ = tmux_command()
+            .args(["kill-session", "-t", session])
+            .output();
+        let _guard = SessionGuard(session.to_string());
+
+        // `cat` into nothing: it swallows the paste and prints nothing back, so
+        // pressing Enter leaves the pane exactly as it was. A shell would echo
+        // a fresh prompt and hide the very case under test.
+        let ok = tmux_command()
+            .args(["new-session", "-d", "-s", session, "cat > /dev/null"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("Skipping test: failed to create tmux session");
+            return;
+        }
+
+        let client = TmuxClient::new("omar-test-");
+        let opts = DeliveryOptions {
+            startup_timeout: Duration::from_secs(3),
+            stable_quiet: Duration::from_millis(200),
+            verify_timeout: Duration::from_millis(600),
+            max_retries: 3,
+            poll_interval: Duration::from_millis(50),
+            retry_delay: Duration::from_millis(50),
+            require_initial_change: false,
+        };
+
+        // Nothing to go on but the pane: the delivery cannot be confirmed, and
+        // every attempt pastes the prompt again.
+        let blind = client.deliver_prompt_until(session, "OMAR ANSWERED PROBE", &opts, &|| false);
+        assert!(blind.is_err(), "a pane that never changes cannot confirm");
+        let pasted = client
+            .capture_pane_plain(session, 400)
+            .unwrap_or_default()
+            .matches("OMAR ANSWERED PROBE")
+            .count();
+        assert!(
+            pasted > 1,
+            "expected the blind delivery to retry, saw {pasted} paste(s)"
+        );
+
+        // Told the agent answered, the same delivery succeeds without a second
+        // copy — which is the part that matters, since re-delivering is what
+        // the runtime rejects.
+        let _ = tmux_command()
+            .args(["kill-session", "-t", session])
+            .output();
+        let _ = tmux_command()
+            .args(["new-session", "-d", "-s", session, "cat > /dev/null"])
+            .status();
+        let answered = client.deliver_prompt_until(session, "OMAR ANSWERED PROBE", &opts, &|| true);
+        assert!(answered.is_ok(), "an answered prompt was delivered");
+        let pasted = client
+            .capture_pane_plain(session, 400)
+            .unwrap_or_default()
+            .matches("OMAR ANSWERED PROBE")
+            .count();
+        assert!(
+            pasted <= 1,
+            "an answered prompt must not be delivered twice, saw {pasted}"
         );
     }
 
