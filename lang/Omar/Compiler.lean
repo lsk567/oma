@@ -71,6 +71,9 @@ def lex (source : String) : Except String (List Token) := lexChars source.toList
 structure Agent where
   name : String
   backend : String
+  /-- The instance it belongs to. Every program instantiates, so this is never
+      empty by the time elaboration is done. -/
+  instance_ : String := ""
   deriving Repr
 
 inductive PortKind where
@@ -82,6 +85,7 @@ structure Port where
   kind : PortKind
   type : String
   delay : Option Nat := none
+  instance_ : String := ""
   deriving Repr
 
 structure Connection where
@@ -97,6 +101,7 @@ structure Reaction where
   effects : Array String
   contract : String
   prompt : String
+  instance_ : String := ""
   deriving Repr
 
 /-- A compile-time team parameter, supplied by the instantiation in `main`. -/
@@ -147,11 +152,20 @@ structure Main where
   connections : Array InstanceConnection
   deriving Repr
 
-/-- The elaborated program: one flat namespace, which is what the VM runs.
-    Instances are gone by this point, having been expanded into qualified
-    agents, ports and reactions. -/
+/-- What `main` instantiated: the container the diagram draws, and the team it
+    came from. -/
+structure InstanceDecl where
+  name : String
+  team : String
+  deriving Repr
+
+/-- The elaborated program. Names are flattened into one namespace because that
+    is what the VM runs, but which instance each name came from is kept: it is
+    structure, and rediscovering it by splitting on '.' downstream would be
+    guessing at a convention rather than reading a fact. -/
 structure Program where
   team : String
+  instances : Array InstanceDecl
   agents : Array Agent
   ports : Array Port
   connections : Array Connection
@@ -497,9 +511,9 @@ private def elaborateInstance (teams : Array TeamDecl) (inst : Instance) :
     | none => throw s!"instance '{inst.name}' names unknown team '{inst.team}'"
   let bindings ← bindArguments decl inst
   let agents := decl.agents.map fun agent =>
-    { agent with name := qualify inst.name agent.name }
+    { agent with name := qualify inst.name agent.name, instance_ := inst.name }
   let ports := decl.ports.map fun port =>
-    { port with name := qualify inst.name port.name }
+    { port with name := qualify inst.name port.name, instance_ := inst.name }
   let connections := decl.connections.map fun connection =>
     { connection with
         source := qualify inst.name connection.source
@@ -510,6 +524,7 @@ private def elaborateInstance (teams : Array TeamDecl) (inst : Instance) :
         agent := qualify inst.name reaction.agent
         triggers := reaction.triggers.map (qualify inst.name)
         effects := reaction.effects.map (qualify inst.name)
+        instance_ := inst.name
         contract := qualifyContract inst.name decl.ports reaction.contract
         prompt := substitute bindings (qualifyPrompt inst.name decl.ports reaction.prompt) }
   pure (agents, ports, connections, reactions)
@@ -529,6 +544,7 @@ private def elaborate (programName : String) (teams : Array TeamDecl) (main : Ma
       delay := connection.delay : Connection }
   pure {
     team := programName
+    instances := main.instances.map fun inst => { name := inst.name, team := inst.team }
     agents := parts.foldl (fun acc part => acc ++ part.1) #[]
     ports := parts.foldl (fun acc part => acc ++ part.2.1) #[]
     connections := parts.foldl (fun acc part => acc ++ part.2.2.1) #[] ++ wired
@@ -563,13 +579,20 @@ private def instruction (op : String) (fields : List (String × Json) := []) : S
 
 def compile (program : Program) : String :=
   let begin := instruction "begin_plan" [("team", toJson program.team)]
+  let instances := program.instances.map fun inst =>
+    instruction "declare_instance" [
+      ("name", toJson inst.name),
+      ("team", toJson inst.team)
+    ]
   let agents := program.agents.map fun agent =>
     instruction "spawn_agent" [
+      ("instance", toJson agent.instance_),
       ("name", toJson agent.name),
       ("backend", toJson agent.backend)
     ]
   let ports := program.ports.map fun port =>
     let fields := [
+      ("instance", toJson port.instance_),
       ("kind", toJson (kindName port.kind)),
       ("name", toJson port.name),
       ("type", toJson port.type)
@@ -585,6 +608,7 @@ def compile (program : Program) : String :=
     ]
   let reactions := program.reactions.map fun reaction =>
     instruction "install_reaction" [
+      ("instance", toJson reaction.instance_),
       ("id", toJson reaction.id),
       ("agent", toJson reaction.agent),
       ("triggers", jsonStringArray reaction.triggers),
@@ -593,7 +617,8 @@ def compile (program : Program) : String :=
       ("prompt", toJson reaction.prompt)
     ]
   let commit := instruction "commit_plan"
-  let instructions := #[begin] ++ agents ++ ports ++ connections ++ reactions ++ #[commit]
+  let instructions :=
+    #[begin] ++ instances ++ agents ++ ports ++ connections ++ reactions ++ #[commit]
   let rendered := String.intercalate ",\n    " instructions.toList
   "{\n  \"version\": 1,\n  \"team\": " ++ (toJson program.team).compress ++
     ",\n  \"instructions\": [\n    " ++ rendered ++ "\n  ]\n}\n"

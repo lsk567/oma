@@ -141,10 +141,12 @@ jobs:
           import os
 
           field_rank = {
-              "op": 0, "kind": 1, "name": 2, "type": 3, "delay": 4, "backend": 5
+              "op": 0, "instance": 1, "kind": 2, "name": 3, "type": 4,
+              "delay": 5, "backend": 6, "team": 7
           }
           reaction_order = [
-              "op", "id", "agent", "triggers", "effects", "contract", "prompt"
+              "op", "instance", "id", "agent", "triggers", "effects",
+              "contract", "prompt"
           ]
           connection_order = ["op", "source", "target", "delay"]
           bytecodes = glob.glob("/tmp/omar-topology-suite/*.json")
@@ -159,9 +161,15 @@ jobs:
                   assert ranked == sorted(ranked), (path, keys)
                   if instruction["op"] == "define_port":
                       assert keys in (
-                          ["op", "kind", "name", "type"],
-                          ["op", "kind", "name", "type", "delay"],
+                          ["op", "instance", "kind", "name", "type"],
+                          ["op", "instance", "kind", "name", "type", "delay"],
                       ), (path, keys)
+                  if instruction["op"] == "declare_instance":
+                      assert keys == ["op", "name", "team"], (path, keys)
+                  # Every member names the container it belongs to, so a client
+                  # never has to infer the grouping from a dotted name.
+                  if instruction["op"] in ("spawn_agent", "define_port", "install_reaction"):
+                      assert instruction["instance"], (path, instruction)
                   if instruction["op"] == "connect_ports":
                       assert keys == connection_order, (path, keys)
                   if instruction["op"] == "install_reaction":

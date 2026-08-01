@@ -22,6 +22,21 @@ pub struct DiagramAgent {
     pub id: String,
     pub name: String,
     pub backend: String,
+    /// The container it is drawn inside.
+    pub instance: String,
+}
+
+/// A team `main` instantiated: one container in the drawing.
+///
+/// Names are flattened by the time the VM sees them, so without this a client
+/// would have to rediscover the grouping by splitting on '.' — guessing at a
+/// convention instead of reading what the program said.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagramInstance {
+    pub id: String,
+    pub name: String,
+    /// The team it was instantiated from.
+    pub team: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +49,7 @@ pub struct DiagramPort {
     pub delay: Option<u64>,
     pub value: Option<Value>,
     pub last_tag: Option<DiagramTag>,
+    pub instance: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +63,7 @@ pub struct DiagramReaction {
     pub contract: String,
     pub status: String,
     pub invocation_id: Option<String>,
+    pub instance: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +88,9 @@ pub struct DiagramSnapshot {
     pub sequence: u64,
     pub status: String,
     pub current_tag: Option<DiagramTag>,
+    /// The containers to draw. Empty for a program compiled before instances
+    /// were carried through, which is how a client tells the difference.
+    pub instances: Vec<DiagramInstance>,
     pub agents: Vec<DiagramAgent>,
     pub ports: Vec<DiagramPort>,
     pub reactions: Vec<DiagramReaction>,
@@ -79,6 +99,15 @@ pub struct DiagramSnapshot {
 
 impl DiagramSnapshot {
     pub fn from_vm_state(state: &VmState) -> Self {
+        let instances = state
+            .instances
+            .iter()
+            .map(|(name, instance)| DiagramInstance {
+                id: instance_id(name),
+                name: name.clone(),
+                team: instance.team.clone(),
+            })
+            .collect();
         let agents = state
             .agents
             .iter()
@@ -86,6 +115,7 @@ impl DiagramSnapshot {
                 id: agent_id(name),
                 name: name.clone(),
                 backend: agent.backend.clone(),
+                instance: agent.instance.clone(),
             })
             .collect();
         let ports = state
@@ -99,6 +129,7 @@ impl DiagramSnapshot {
                 delay: port.delay,
                 value: None,
                 last_tag: None,
+                instance: port.instance.clone(),
             })
             .collect();
         let reactions = state
@@ -114,6 +145,7 @@ impl DiagramSnapshot {
                 contract: reaction.contract.clone(),
                 status: "idle".to_string(),
                 invocation_id: None,
+                instance: reaction.instance.clone(),
             })
             .collect();
         let mut edges = Vec::new();
@@ -152,6 +184,7 @@ impl DiagramSnapshot {
             sequence: 0,
             status: "ready".to_string(),
             current_tag: None,
+            instances,
             agents,
             ports,
             reactions,
@@ -578,6 +611,10 @@ fn agent_id(name: &str) -> String {
     format!("agent::{name}")
 }
 
+fn instance_id(name: &str) -> String {
+    format!("instance::{name}")
+}
+
 fn port_id(name: &str) -> String {
     format!("port::{name}")
 }
@@ -589,16 +626,18 @@ fn reaction_id(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::topology::{AgentState, ConnectionState, PortState, ReactionState};
+    use crate::topology::{AgentState, ConnectionState, InstanceState, PortState, ReactionState};
 
     fn sample_state() -> VmState {
         VmState {
             version: 1,
             team: "Sample".to_string(),
+            instances: BTreeMap::new(),
             agents: BTreeMap::from([(
                 "worker".to_string(),
                 AgentState {
                     backend: "codex".to_string(),
+                    instance: String::new(),
                 },
             )]),
             ports: BTreeMap::from([
@@ -608,6 +647,7 @@ mod tests {
                         kind: PortKind::Input,
                         ty: "string".to_string(),
                         delay: None,
+                        instance: String::new(),
                     },
                 ),
                 (
@@ -616,6 +656,7 @@ mod tests {
                         kind: PortKind::Output,
                         ty: "string".to_string(),
                         delay: None,
+                        instance: String::new(),
                     },
                 ),
             ]),
@@ -629,6 +670,7 @@ mod tests {
                 ReactionState {
                     order: 0,
                     agent: "worker".to_string(),
+                    instance: String::new(),
                     triggers: vec!["request".to_string()],
                     effects: vec!["answer".to_string()],
                     contract: "answer".to_string(),
@@ -636,6 +678,112 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    /// Two instances of two teams, as `main { writer = Drafter() … }` gives.
+    fn two_instance_state() -> VmState {
+        let member = |instance: &str, kind, ty: &str| PortState {
+            kind,
+            ty: ty.to_string(),
+            delay: None,
+            instance: instance.to_string(),
+        };
+        VmState {
+            version: 1,
+            team: "SimpleBrief".to_string(),
+            instances: BTreeMap::from([
+                (
+                    "writer".to_string(),
+                    InstanceState {
+                        team: "Drafter".to_string(),
+                    },
+                ),
+                (
+                    "reviewer".to_string(),
+                    InstanceState {
+                        team: "Reviewer".to_string(),
+                    },
+                ),
+            ]),
+            agents: BTreeMap::from([(
+                "writer.agent".to_string(),
+                AgentState {
+                    backend: "codex".to_string(),
+                    instance: "writer".to_string(),
+                },
+            )]),
+            ports: BTreeMap::from([
+                (
+                    "writer.topic".to_string(),
+                    member("writer", PortKind::Input, "string"),
+                ),
+                (
+                    "writer.draft".to_string(),
+                    member("writer", PortKind::Output, "string"),
+                ),
+                (
+                    "reviewer.draft".to_string(),
+                    member("reviewer", PortKind::Input, "string"),
+                ),
+            ]),
+            connections: Vec::new(),
+            reactions: BTreeMap::from([(
+                "writer.reaction.0".to_string(),
+                ReactionState {
+                    order: 0,
+                    instance: "writer".to_string(),
+                    agent: "writer.agent".to_string(),
+                    triggers: vec!["writer.topic".to_string()],
+                    effects: vec!["writer.draft".to_string()],
+                    contract: "writer.draft".to_string(),
+                    prompt: "Draft".to_string(),
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn a_snapshot_names_the_containers_rather_than_implying_them() {
+        // A client should not have to rediscover the grouping by splitting
+        // names on '.'. That is a convention it does not own, and it would
+        // break the moment a name legitimately contained a dot.
+        let snapshot = DiagramSnapshot::from_vm_state(&two_instance_state());
+
+        let containers: Vec<_> = snapshot
+            .instances
+            .iter()
+            .map(|instance| {
+                (
+                    instance.id.as_str(),
+                    instance.name.as_str(),
+                    instance.team.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            containers,
+            [
+                ("instance::reviewer", "reviewer", "Reviewer"),
+                ("instance::writer", "writer", "Drafter"),
+            ]
+        );
+
+        // And every node says which container it is drawn in.
+        for port in &snapshot.ports {
+            assert!(!port.instance.is_empty(), "{} has no container", port.id);
+        }
+        assert_eq!(
+            snapshot
+                .ports
+                .iter()
+                .filter(|port| port.instance == "writer")
+                .count(),
+            2
+        );
+        assert_eq!(snapshot.reactions[0].instance, "writer");
+        assert_eq!(snapshot.agents[0].instance, "writer");
+        // The program is still named, so the drawing has an outer title.
+        assert_eq!(snapshot.team, "SimpleBrief");
     }
 
     #[test]

@@ -22,30 +22,30 @@ structure TopologyCase where
 
 def topologyCases : Array TopologyCase := #[
   { file := "AllTypes.omar", team := "AllTypes", agents := 1, ports := 18,
-    reactions := 1, instructions := 22 },
+    reactions := 1, instructions := 23 },
   { file := "BusinessLoop.omar", team := "BusinessLoop", agents := 8,
-    ports := 20, reactions := 11, instructions := 41 },
+    ports := 20, reactions := 11, instructions := 42 },
   { file := "EffectContracts.omar", team := "EffectContracts", agents := 1, ports := 6,
-    reactions := 3, instructions := 12 },
-  { file := "FanOutFanIn.omar", team := "FanOutFanIn", agents := 4, ports := 5,
-    reactions := 4, instructions := 15 },
-  { file := "HR.omar", team := "HR", agents := 3, ports := 6,
-    reactions := 4, instructions := 15, codexOnly := false },
-  { file := "HRCodex.omar", team := "HRCodex", agents := 3, ports := 6,
-    reactions := 4, instructions := 15 },
-  { file := "OrTriggers.omar", team := "OrTriggers", agents := 3, ports := 5,
     reactions := 3, instructions := 13 },
+  { file := "FanOutFanIn.omar", team := "FanOutFanIn", agents := 4, ports := 5,
+    reactions := 4, instructions := 16 },
+  { file := "HR.omar", team := "HR", agents := 3, ports := 6,
+    reactions := 4, instructions := 16, codexOnly := false },
+  { file := "HRCodex.omar", team := "HRCodex", agents := 3, ports := 6,
+    reactions := 4, instructions := 16 },
+  { file := "OrTriggers.omar", team := "OrTriggers", agents := 3, ports := 5,
+    reactions := 3, instructions := 14 },
   { file := "OrderedWrites.omar", team := "OrderedWrites", agents := 4, ports := 3,
-    reactions := 4, instructions := 13 },
+    reactions := 4, instructions := 14 },
   { file := "Recurrence.omar", team := "Recurrence", agents := 1, ports := 3,
-    reactions := 1, instructions := 7 },
+    reactions := 1, instructions := 8 },
   -- Three instances of one team, so every count is the team's times three.
   { file := "Ring.omar", team := "Ring", agents := 3, ports := 9,
-    connections := 3, reactions := 3, instructions := 20 },
+    connections := 3, reactions := 3, instructions := 23 },
   { file := "SameAgentSerial.omar", team := "SameAgentSerial", agents := 2, ports := 4,
-    reactions := 3, instructions := 11 },
+    reactions := 3, instructions := 12 },
   { file := "SuperdenseTime.omar", team := "SuperdenseTime", agents := 3, ports := 6,
-    connections := 1, reactions := 3, instructions := 15 }
+    connections := 1, reactions := 3, instructions := 16 }
 ]
 
 def testTopology (test : TopologyCase) : IO Unit := do
@@ -79,6 +79,16 @@ def testTopology (test : TopologyCase) : IO Unit := do
     assertEqual "option type" (program.ports.any (·.type == "option<string>")) true
     assertEqual "nested type" (program.ports.any (·.type == "list<option<int>>")) true
   if test.file == "Ring.omar" then
+    -- Instances are structure, not a naming convention: the bytecode says which
+    -- container each name belongs to rather than leaving it to be guessed from
+    -- the dot.
+    assertEqual "one instance per instantiation" program.instances.size 3
+    assertEqual "instances name their team"
+      (program.instances.all (·.team == "Node")) true
+    assertEqual "every port belongs to an instance"
+      (program.ports.all (fun port => port.instance_ != "")) true
+    assertEqual "members are grouped by instance"
+      (program.ports.filter (·.instance_ == "n2") |>.size) 3
     -- Instantiation is a renaming: nothing the team declared keeps its bare
     -- name, and each instance's agent is its own.
     assertEqual "instance-qualified agents"
