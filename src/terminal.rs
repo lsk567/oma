@@ -300,6 +300,23 @@ mod tests {
             .is_ok_and(|output| output.status.success())
     }
 
+    /// Waits for tmux to apply a size change, up to a generous deadline.
+    ///
+    /// A fixed sleep is a guess at how long that takes, and the guess that held
+    /// on a quiet machine was short on a loaded CI runner. Returns whatever the
+    /// size is when the deadline passes, so the caller's assertion is what
+    /// reports the failure.
+    fn settles(session: &str, want: impl Fn(&WindowSize) -> bool) -> WindowSize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let size = window_size(session).expect("size");
+            if want(&size) || std::time::Instant::now() >= deadline {
+                return size;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
     /// Kills only its own session, so it cannot disturb the operator's server.
     struct SessionGuard(String);
 
@@ -372,9 +389,8 @@ mod tests {
 
         // Dropping detaches. The status line is why this is not simply `rows`:
         // a client exactly as tall as the window costs the agent a row.
-        std::thread::sleep(std::time::Duration::from_millis(400));
         assert_eq!(
-            window_size(session).expect("size after"),
+            settles(session, |size| *size == before),
             before,
             "detaching must leave the window as it was"
         );
@@ -417,13 +433,13 @@ mod tests {
             attachment.resize(96, 30).expect("resize");
             // tmux follows the client, so the agent is now drawing at the
             // viewer's shape.
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            let during = window_size(session).expect("size during");
+            let during = settles(session, |size| size.cols == 96);
             assert_eq!(during.cols, 96, "the session did not follow the viewer");
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let after = window_size(session).expect("size after");
+        let after = settles(session, |size| {
+            (size.cols, size.rows) == (before.cols, before.rows)
+        });
         assert_eq!(
             (after.cols, after.rows),
             (before.cols, before.rows),
