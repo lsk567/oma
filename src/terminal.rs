@@ -317,6 +317,28 @@ mod tests {
         }
     }
 
+    /// Clients tmux believes are attached, for assertions that need one.
+    ///
+    /// A resize only reaches the session through an attached client, so "the
+    /// window did not change" and "nothing ever attached" look identical from
+    /// the size alone. This tells them apart in the failure message.
+    fn clients(session: &str) -> String {
+        match tmux_command()
+            .args(["list-clients", "-t", &exact_target(session)])
+            .output()
+        {
+            Ok(output) => {
+                let listed = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if listed.is_empty() {
+                    format!("none ({})", String::from_utf8_lossy(&output.stderr).trim())
+                } else {
+                    listed
+                }
+            }
+            Err(error) => format!("list-clients failed: {error}"),
+        }
+    }
+
     /// Kills only its own session, so it cannot disturb the operator's server.
     struct SessionGuard(String);
 
@@ -434,7 +456,12 @@ mod tests {
             // tmux follows the client, so the agent is now drawing at the
             // viewer's shape.
             let during = settles(session, |size| size.cols == 96);
-            assert_eq!(during.cols, 96, "the session did not follow the viewer");
+            assert_eq!(
+                during.cols,
+                96,
+                "the session did not follow the viewer (clients: {})",
+                clients(session)
+            );
         }
 
         let after = settles(session, |size| {
