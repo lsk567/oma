@@ -912,10 +912,12 @@ mod tests {
         VmState {
             version: 1,
             team: "Sample".to_string(),
+            instances: BTreeMap::new(),
             agents: BTreeMap::from([(
                 "worker".to_string(),
                 AgentState {
                     backend: "codex".to_string(),
+                    instance: String::new(),
                 },
             )]),
             ports: BTreeMap::from([
@@ -925,6 +927,7 @@ mod tests {
                         kind: PortKind::Input,
                         ty: "string".to_string(),
                         delay: None,
+                        instance: String::new(),
                     },
                 ),
                 (
@@ -933,6 +936,7 @@ mod tests {
                         kind: PortKind::Input,
                         ty: "path".to_string(),
                         delay: None,
+                        instance: String::new(),
                     },
                 ),
                 (
@@ -941,6 +945,7 @@ mod tests {
                         kind: PortKind::Output,
                         ty: "string".to_string(),
                         delay: None,
+                        instance: String::new(),
                     },
                 ),
             ]),
