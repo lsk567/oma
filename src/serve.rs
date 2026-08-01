@@ -604,6 +604,13 @@ fn attach_terminal(
     relay_terminal(stream, attachment)
 }
 
+/// What the viewer can fit, in characters.
+#[derive(Deserialize)]
+struct Resize {
+    cols: u16,
+    rows: u16,
+}
+
 /// Pump bytes between the socket and the pseudo-terminal until either ends.
 fn relay_terminal(stream: TcpStream, mut attachment: crate::terminal::Attachment) -> Result<()> {
     use tungstenite::{Message, WebSocket};
@@ -625,7 +632,19 @@ fn relay_terminal(stream: TcpStream, mut attachment: crate::terminal::Attachment
         // Keystrokes travelling to the agent.
         match socket.read() {
             Ok(Message::Binary(bytes)) => attachment.write(&bytes)?,
-            Ok(Message::Text(text)) => attachment.write(text.as_bytes())?,
+            // Text is the control channel: the viewer says what shape it is and
+            // the session reflows to match, the way a terminal does when its
+            // window changes. Keystrokes are binary.
+            Ok(Message::Text(text)) => match serde_json::from_str::<Resize>(&text) {
+                Ok(resize) => {
+                    attachment.resize(resize.cols, resize.rows)?;
+                    let size = attachment.size;
+                    let _ = socket.send(Message::Text(
+                        json!({"cols": size.cols, "rows": size.rows}).to_string(),
+                    ));
+                }
+                Err(_) => attachment.write(text.as_bytes())?,
+            },
             Ok(Message::Close(_)) => break,
             Ok(_) => {}
             Err(tungstenite::Error::Io(error))

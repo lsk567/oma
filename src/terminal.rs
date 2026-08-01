@@ -130,8 +130,12 @@ fn parse_window_size(reported: &str) -> Result<WindowSize> {
 /// closing the viewer means. The agent's own session is untouched.
 pub struct Attachment {
     child: Box<dyn Child + Send + Sync>,
+    master: Box<dyn portable_pty::MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     output: mpsc::Receiver<Vec<u8>>,
+    /// What the session was before this viewer attached, so it can be put back.
+    original: WindowSize,
+    session: String,
     pub size: WindowSize,
 }
 
@@ -207,8 +211,11 @@ impl Attachment {
 
         Ok(Self {
             child,
+            master: pty.master,
             writer,
             output,
+            original: size,
+            session: session.clone(),
             size,
         })
     }
@@ -216,6 +223,32 @@ impl Attachment {
     /// Bytes the agent has drawn since the last call, if any.
     pub fn read(&self, timeout: std::time::Duration) -> Option<Vec<u8>> {
         self.output.recv_timeout(timeout).ok()
+    }
+
+    /// Reflow the session to the viewer's shape.
+    ///
+    /// This is what a terminal does when its window changes, and it is why the
+    /// viewer never has to scale: the agent redraws at the size being watched.
+    /// `Drop` puts the session back, so a narrow viewer does not leave the
+    /// agent narrow after it has gone.
+    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        if !(MIN_DIMENSION..=MAX_DIMENSION).contains(&cols)
+            || !(MIN_DIMENSION..=MAX_DIMENSION).contains(&rows)
+        {
+            bail!("implausible viewer size {cols}x{rows}");
+        }
+        self.master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+        self.size = WindowSize {
+            cols,
+            rows: rows.saturating_sub(self.original.status_lines),
+            status_lines: self.original.status_lines,
+        };
+        Ok(())
     }
 
     /// Send keystrokes to the agent.
@@ -232,6 +265,26 @@ impl Drop for Attachment {
         // agent carries on exactly as it was.
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // tmux leaves the window at whatever the last client made it, so a
+        // viewer that reflowed it has to put it back — otherwise looking at an
+        // agent through a narrow panel would leave it narrow for good.
+        let target = exact_target(&self.session);
+        let _ = tmux_command()
+            .args([
+                "resize-window",
+                "-t",
+                &target,
+                "-x",
+                &self.original.cols.to_string(),
+                "-y",
+                &self.original.rows.to_string(),
+            ])
+            .output();
+        // `resize-window` pins the window to a manual size; unset it so a human
+        // attaching later resizes it as they always did.
+        let _ = tmux_command()
+            .args(["set-option", "-t", &target, "-u", "window-size"])
+            .output();
     }
 }
 
@@ -324,6 +377,57 @@ mod tests {
             window_size(session).expect("size after"),
             before,
             "detaching must leave the window as it was"
+        );
+    }
+
+    #[test]
+    fn a_viewer_reflows_the_session_and_puts_it_back() {
+        // The viewer resizes the session to its own shape rather than scaling a
+        // picture of it — that is what makes the text crisp at any panel size.
+        // Leaving the agent at the viewer's shape afterwards is the cost that
+        // has to be paid back on detach.
+        if !tmux_available() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let session = "omar-terminal-reflow-probe";
+        let _ = tmux_command()
+            .args(["kill-session", "-t", &exact_session(session)])
+            .output();
+        let _guard = SessionGuard(session.to_string());
+        tmux_command()
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                session,
+                "-x",
+                "200",
+                "-y",
+                "50",
+                "sh",
+            ])
+            .output()
+            .expect("tmux runs");
+        let before = window_size(session).expect("size before");
+        assert_eq!((before.cols, before.rows), (200, 50));
+
+        {
+            let mut attachment = Attachment::open("", session).expect("attach");
+            attachment.resize(96, 30).expect("resize");
+            // tmux follows the client, so the agent is now drawing at the
+            // viewer's shape.
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let during = window_size(session).expect("size during");
+            assert_eq!(during.cols, 96, "the session did not follow the viewer");
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let after = window_size(session).expect("size after");
+        assert_eq!(
+            (after.cols, after.rows),
+            (before.cols, before.rows),
+            "the viewer left the agent at its own shape"
         );
     }
 
