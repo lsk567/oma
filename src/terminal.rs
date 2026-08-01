@@ -66,6 +66,18 @@ pub fn window_size(session: &str) -> Result<WindowSize> {
     parse_window_size(String::from_utf8_lossy(&output.stdout).trim())
 }
 
+/// Let the viewer scroll the pane.
+///
+/// A tmux client only forwards wheel events when the session asks for mouse
+/// tracking, and an agent session is created without it — so a viewer had no
+/// way to scroll back through what the agent had already drawn. Best effort:
+/// failing to set it costs scrolling, not the attachment.
+fn enable_mouse(session: &str) {
+    let _ = tmux_command()
+        .args(["set-option", "-t", session, "mouse", "on"])
+        .output();
+}
+
 fn parse_window_size(reported: &str) -> Result<WindowSize> {
     let mut fields = reported.split('x');
     let (Some(cols), Some(rows), Some(status), None) =
@@ -109,6 +121,7 @@ impl Attachment {
     pub fn open(prefix: &str, agent: &str) -> Result<Self> {
         let session = format!("{prefix}{}", flatten_agent_name(agent));
         let size = window_size(&session)?;
+        enable_mouse(&session);
 
         let pty = native_pty_system()
             .openpty(PtySize {
@@ -286,6 +299,48 @@ mod tests {
             before,
             "detaching must leave the window as it was"
         );
+    }
+
+    #[test]
+    fn attaching_lets_the_viewer_scroll() {
+        // Without mouse tracking a tmux client never sees a wheel event, so the
+        // viewer cannot scroll back through what the agent already drew.
+        if !tmux_available() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let session = "omar-terminal-mouse-probe";
+        let _ = tmux_command()
+            .args(["kill-session", "-t", session])
+            .output();
+        let _guard = SessionGuard(session.to_string());
+        tmux_command()
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                session,
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "sh",
+            ])
+            .output()
+            .expect("tmux runs");
+        tmux_command()
+            .args(["set-option", "-t", session, "mouse", "off"])
+            .output()
+            .expect("tmux runs");
+
+        let attachment = Attachment::open("", session).expect("attach");
+
+        let reported = tmux_command()
+            .args(["show-options", "-t", session, "-v", "mouse"])
+            .output()
+            .expect("tmux answers");
+        drop(attachment);
+        assert_eq!(String::from_utf8_lossy(&reported.stdout).trim(), "on");
     }
 
     #[test]
