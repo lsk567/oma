@@ -12,12 +12,31 @@ use std::thread;
 use anyhow::{bail, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
 
-use crate::tmux::{flatten_agent_name, tmux_command};
+use crate::tmux::tmux_command;
 
 /// A window smaller than this is not worth attaching to, and a size that large
 /// is a tmux answer we did not understand.
 const MIN_DIMENSION: u16 = 2;
 const MAX_DIMENSION: u16 = 1000;
+
+/// A session target that matches this session and nothing else.
+///
+/// tmux resolves `-t name` by prefix when nothing matches it exactly, so with
+/// sessions like `…-w` and `…-w2` a lookup for one that has since gone lands
+/// silently on its neighbour — reading the wrong agent's size, or turning the
+/// wrong agent's mouse on.
+fn exact_session(session: &str) -> String {
+    format!("={session}")
+}
+
+/// The same, for the commands that want a target inside the session.
+///
+/// `display-message`, `set-option` and `show-options` reject a bare `=name`
+/// ("no such session"); the trailing colon is what makes it the session's
+/// current window rather than a window called `=name`.
+fn exact_target(session: &str) -> String {
+    format!("={session}:")
+}
 
 /// The size tmux is currently drawing a session at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +71,7 @@ pub fn window_size(session: &str) -> Result<WindowSize> {
             "display-message",
             "-p",
             "-t",
-            session,
+            &exact_target(session),
             "#{window_width}x#{window_height}x#{status}",
         ])
         .output()
@@ -64,6 +83,18 @@ pub fn window_size(session: &str) -> Result<WindowSize> {
         );
     }
     parse_window_size(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+/// Let the viewer scroll the pane.
+///
+/// A tmux client only forwards wheel events when the session asks for mouse
+/// tracking, and an agent session is created without it — so a viewer had no
+/// way to scroll back through what the agent had already drawn. Best effort:
+/// failing to set it costs scrolling, not the attachment.
+fn enable_mouse(session: &str) {
+    let _ = tmux_command()
+        .args(["set-option", "-t", &exact_target(session), "mouse", "on"])
+        .output();
 }
 
 fn parse_window_size(reported: &str) -> Result<WindowSize> {
@@ -99,15 +130,23 @@ fn parse_window_size(reported: &str) -> Result<WindowSize> {
 /// closing the viewer means. The agent's own session is untouched.
 pub struct Attachment {
     child: Box<dyn Child + Send + Sync>,
+    master: Box<dyn portable_pty::MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     output: mpsc::Receiver<Vec<u8>>,
+    /// What the session was before this viewer attached, so it can be put back.
+    original: WindowSize,
+    session: String,
     pub size: WindowSize,
 }
 
 impl Attachment {
-    /// Attach to `agent`'s session through `prefix`.
-    pub fn open(prefix: &str, agent: &str) -> Result<Self> {
-        let session = format!("{prefix}{}", flatten_agent_name(agent));
+    /// Attach to a session by its exact name.
+    ///
+    /// A session, not a prefix and an agent: the assistant's is
+    /// `<base>ea-<id>` and is built from no agent name at all, so the caller
+    /// names the one it means rather than passing an empty prefix to say so.
+    pub fn open_session(session: &str) -> Result<Self> {
+        let session = session.to_string();
         let size = window_size(&session)?;
 
         let pty = native_pty_system()
@@ -128,7 +167,7 @@ impl Attachment {
                 command.args(["-L", &server]);
             }
         }
-        command.args(["attach-session", "-t", &format!("={session}")]);
+        command.args(["attach-session", "-t", exact_session(&session).as_str()]);
         // A nested tmux would refuse to attach.
         command.env_remove("TMUX");
 
@@ -139,6 +178,10 @@ impl Attachment {
         // The slave is held open by the child; keeping our copy would stop the
         // reader ever seeing EOF once the child exits.
         drop(pty.slave);
+        // Only now that a viewer really is attached: everything above can fail,
+        // and a session left with mouse tracking on by an attempt that never
+        // arrived is a change nobody asked for.
+        enable_mouse(&session);
 
         let mut reader = pty
             .master
@@ -168,8 +211,11 @@ impl Attachment {
 
         Ok(Self {
             child,
+            master: pty.master,
             writer,
             output,
+            original: size,
+            session: session.clone(),
             size,
         })
     }
@@ -177,6 +223,32 @@ impl Attachment {
     /// Bytes the agent has drawn since the last call, if any.
     pub fn read(&self, timeout: std::time::Duration) -> Option<Vec<u8>> {
         self.output.recv_timeout(timeout).ok()
+    }
+
+    /// Reflow the session to the viewer's shape.
+    ///
+    /// This is what a terminal does when its window changes, and it is why the
+    /// viewer never has to scale: the agent redraws at the size being watched.
+    /// `Drop` puts the session back, so a narrow viewer does not leave the
+    /// agent narrow after it has gone.
+    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        if !(MIN_DIMENSION..=MAX_DIMENSION).contains(&cols)
+            || !(MIN_DIMENSION..=MAX_DIMENSION).contains(&rows)
+        {
+            bail!("implausible viewer size {cols}x{rows}");
+        }
+        self.master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+        self.size = WindowSize {
+            cols,
+            rows: rows.saturating_sub(self.original.status_lines),
+            status_lines: self.original.status_lines,
+        };
+        Ok(())
     }
 
     /// Send keystrokes to the agent.
@@ -193,6 +265,26 @@ impl Drop for Attachment {
         // agent carries on exactly as it was.
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // tmux leaves the window at whatever the last client made it, so a
+        // viewer that reflowed it has to put it back — otherwise looking at an
+        // agent through a narrow panel would leave it narrow for good.
+        let target = exact_target(&self.session);
+        let _ = tmux_command()
+            .args([
+                "resize-window",
+                "-t",
+                &target,
+                "-x",
+                &self.original.cols.to_string(),
+                "-y",
+                &self.original.rows.to_string(),
+            ])
+            .output();
+        // `resize-window` pins the window to a manual size; unset it so a human
+        // attaching later resizes it as they always did.
+        let _ = tmux_command()
+            .args(["set-option", "-t", &target, "-u", "window-size"])
+            .output();
     }
 }
 
@@ -214,7 +306,7 @@ mod tests {
     impl Drop for SessionGuard {
         fn drop(&mut self) {
             let _ = tmux_command()
-                .args(["kill-session", "-t", &self.0])
+                .args(["kill-session", "-t", &exact_session(&self.0)])
                 .output();
         }
     }
@@ -231,7 +323,7 @@ mod tests {
         // other tmux tests.
         let session = "omar-terminal-relay-probe";
         let _ = tmux_command()
-            .args(["kill-session", "-t", session])
+            .args(["kill-session", "-t", &exact_session(session)])
             .output();
         let _guard = SessionGuard(session.to_string());
 
@@ -255,7 +347,7 @@ mod tests {
         assert_eq!((before.cols, before.rows), (173, 47));
 
         {
-            let mut attachment = Attachment::open("", session).expect("attach");
+            let mut attachment = Attachment::open_session(session).expect("attach");
             assert_eq!(
                 attachment.size, before,
                 "the viewer adopts the agent's size"
@@ -285,6 +377,176 @@ mod tests {
             window_size(session).expect("size after"),
             before,
             "detaching must leave the window as it was"
+        );
+    }
+
+    #[test]
+    fn a_viewer_reflows_the_session_and_puts_it_back() {
+        // The viewer resizes the session to its own shape rather than scaling a
+        // picture of it — that is what makes the text crisp at any panel size.
+        // Leaving the agent at the viewer's shape afterwards is the cost that
+        // has to be paid back on detach.
+        if !tmux_available() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let session = "omar-terminal-reflow-probe";
+        let _ = tmux_command()
+            .args(["kill-session", "-t", &exact_session(session)])
+            .output();
+        let _guard = SessionGuard(session.to_string());
+        tmux_command()
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                session,
+                "-x",
+                "200",
+                "-y",
+                "50",
+                "sh",
+            ])
+            .output()
+            .expect("tmux runs");
+        let before = window_size(session).expect("size before");
+        assert_eq!((before.cols, before.rows), (200, 50));
+
+        {
+            let mut attachment = Attachment::open("", session).expect("attach");
+            attachment.resize(96, 30).expect("resize");
+            // tmux follows the client, so the agent is now drawing at the
+            // viewer's shape.
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let during = window_size(session).expect("size during");
+            assert_eq!(during.cols, 96, "the session did not follow the viewer");
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let after = window_size(session).expect("size after");
+        assert_eq!(
+            (after.cols, after.rows),
+            (before.cols, before.rows),
+            "the viewer left the agent at its own shape"
+        );
+    }
+
+    #[test]
+    fn a_failed_attach_leaves_the_session_as_it_found_it() {
+        // Mouse tracking is turned on for the viewer's benefit. An attempt that
+        // never attaches has no viewer, so it has no business changing anything.
+        if !tmux_available() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let session = "omar-terminal-failed-attach";
+        let _ = tmux_command()
+            .args(["kill-session", "-t", &exact_session(session)])
+            .output();
+        let _guard = SessionGuard(session.to_string());
+        tmux_command()
+            .args(["new-session", "-d", "-s", session, "sh"])
+            .output()
+            .expect("tmux runs");
+        tmux_command()
+            .args(["set-option", "-t", &exact_target(session), "mouse", "off"])
+            .output()
+            .expect("tmux runs");
+
+        // A name that does not resolve: the attach fails before any viewer.
+        assert!(Attachment::open("", "omar-terminal-does-not-exist").is_err());
+
+        let mouse = tmux_command()
+            .args(["show-options", "-t", &exact_target(session), "-v", "mouse"])
+            .output()
+            .expect("tmux answers");
+        assert_eq!(String::from_utf8_lossy(&mouse.stdout).trim(), "off");
+    }
+
+    #[test]
+    fn attaching_lets_the_viewer_scroll() {
+        // Without mouse tracking a tmux client never sees a wheel event, so the
+        // viewer cannot scroll back through what the agent already drew.
+        if !tmux_available() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let session = "omar-terminal-mouse-probe";
+        let _ = tmux_command()
+            .args(["kill-session", "-t", &exact_session(session)])
+            .output();
+        let _guard = SessionGuard(session.to_string());
+        tmux_command()
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                session,
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "sh",
+            ])
+            .output()
+            .expect("tmux runs");
+        tmux_command()
+            .args(["set-option", "-t", &exact_target(session), "mouse", "off"])
+            .output()
+            .expect("tmux runs");
+
+        let attachment = Attachment::open("", session).expect("attach");
+
+        let reported = tmux_command()
+            .args(["show-options", "-t", &exact_target(session), "-v", "mouse"])
+            .output()
+            .expect("tmux answers");
+        drop(attachment);
+        assert_eq!(String::from_utf8_lossy(&reported.stdout).trim(), "on");
+    }
+
+    #[test]
+    fn a_missing_session_is_not_confused_with_its_neighbour() {
+        // tmux resolves `-t name` by prefix when nothing matches exactly, so a
+        // lookup for an agent that has gone would land on one whose name it is
+        // a prefix of — reporting that agent's size, or attaching to it.
+        if !tmux_available() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let gone = "omar-terminal-prefix";
+        let neighbour = "omar-terminal-prefix2";
+        for name in [gone, neighbour] {
+            let _ = tmux_command()
+                .args(["kill-session", "-t", &exact_session(name)])
+                .output();
+        }
+        let _guard = SessionGuard(neighbour.to_string());
+        tmux_command()
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                neighbour,
+                "-x",
+                "111",
+                "-y",
+                "31",
+                "sh",
+            ])
+            .output()
+            .expect("tmux runs");
+
+        // The neighbour is fine to read; the one that does not exist must not
+        // resolve to it.
+        assert_eq!(window_size(neighbour).expect("neighbour").cols, 111);
+        assert!(
+            window_size(gone).is_err(),
+            "a session that does not exist resolved to '{neighbour}'"
+        );
+        assert!(
+            Attachment::open("", gone).is_err(),
+            "attached to the wrong session"
         );
     }
 
