@@ -129,6 +129,10 @@ struct Context_ {
     chat: Arc<Mutex<Chat>>,
     /// Authenticates the EA's MCP sidecar on the agent-only endpoints.
     agent_token: String,
+    /// The command the assistant runs, and where to reach this server when it
+    /// is relaunched on a different backend.
+    command: Arc<Mutex<String>>,
+    address: SocketAddr,
 }
 
 impl Context_ {
@@ -202,6 +206,8 @@ impl Serve {
             runs: Runs::default(),
             chat: Arc::new(Mutex::new(Chat::default())),
             agent_token: agent_token.clone(),
+            command: Arc::new(Mutex::new(config.agent.default_command.clone())),
+            address,
         });
         // Blocking accept rather than a polling loop: `Drop` wakes it with a
         // self-connection, so there is no need to spin, and no added latency on
@@ -444,6 +450,8 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
             (200, json!({"messages": chat.messages}))
         }
         ("POST", "/v1/chat") => send_to_ea(&context, &read_body(content_length)?),
+        ("GET", "/v1/agent") => (200, describe_agent(&context)),
+        ("POST", "/v1/agent/backend") => switch_backend(&context, &read_body(content_length)?),
         // EA-only, authenticated with the token handed to its MCP sidecar.
         ("POST", "/v1/agent/reply") => agent_reply(&context, &read_body(content_length)?),
         ("POST", "/v1/agent/proposals") => {
@@ -471,6 +479,85 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
 }
 
 /// Relay an operator message into the EA's tmux session.
+/// What the assistant is running on, and what else it could run on.
+fn describe_agent(context: &Arc<Context_>) -> Value {
+    let command = context
+        .command
+        .lock()
+        .expect("serve command poisoned")
+        .clone();
+    json!({
+        "backend": crate::config::backend_of_command(&command),
+        "available": crate::config::ASSISTANT_BACKENDS,
+    })
+}
+
+/// Relaunch the assistant on a different backend.
+///
+/// A backend is chosen when the process starts, so changing it means a new
+/// process: the assistant's current session does not survive. That is the
+/// operator's call to make, which is why this is an explicit request rather
+/// than something inferred.
+fn switch_backend(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
+    #[derive(Deserialize)]
+    struct Request {
+        backend: String,
+    }
+    let request: Request = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(error) => return (400, json!({"error": format!("invalid request: {error}")})),
+    };
+    let command = match crate::config::resolve_backend(&request.backend) {
+        Ok(command) => command,
+        Err(reason) => return (400, json!({"error": reason})),
+    };
+    if !crate::config::ASSISTANT_BACKENDS.contains(&request.backend.as_str()) {
+        return (
+            400,
+            json!({"error": format!("'{}' is not an assistant backend", request.backend)}),
+        );
+    }
+
+    match relaunch_ea(context, &command) {
+        Ok(session) => {
+            *context.command.lock().expect("serve command poisoned") = command;
+            (200, json!({"backend": request.backend, "session": session}))
+        }
+        Err(error) => (502, json!({"error": format!("{error:#}")})),
+    }
+}
+
+fn relaunch_ea(context: &Arc<Context_>, command: &str) -> Result<String> {
+    let client = TmuxClient::new(crate::ea::ea_prefix(context.ea_id, &context.session_prefix));
+    let existing = crate::ea::ea_manager_session(context.ea_id, &context.session_prefix);
+    if client.has_session(&existing)? {
+        client.kill_session(&existing)?;
+    }
+    let name = crate::ea::load_registry(&context.omar_dir)
+        .into_iter()
+        .find(|ea| ea.id == context.ea_id)
+        .map(|ea| ea.name)
+        .unwrap_or_else(|| format!("ea-{}", context.ea_id));
+    let (session, _) = crate::manager::ensure_manager_session(
+        &client,
+        command,
+        context.ea_id,
+        &name,
+        &context.omar_dir,
+        &context.session_prefix,
+        &crate::manager::ManagerRuntimeOptions {
+            default_workdir: context.default_workdir.clone(),
+            health_idle_warning: context.health_idle_warning,
+            // Without this the new process has no way to answer the operator.
+            serve: Some(crate::manager::ServeMcpContext {
+                endpoint: context.address.to_string(),
+                token: context.agent_token.clone(),
+            }),
+        },
+    )?;
+    Ok(session)
+}
+
 fn send_to_ea(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     let request: ChatRequest = match serde_json::from_slice(body) {
         Ok(request) => request,
@@ -1067,6 +1154,54 @@ mod tests {
             "{manager} unexpectedly sits under {prefix}; prefix-scoped lookups \
              would now work and this guard is obsolete"
         );
+    }
+
+    #[test]
+    fn the_agent_endpoint_names_the_backend_and_the_alternatives() {
+        let server = test_server();
+
+        let response = request(server.address(), "GET", "/v1/agent", None);
+
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        // Whatever this machine defaults to, the choices are the ones an
+        // operator can actually pick.
+        assert!(response.contains("\"available\""), "{response}");
+        for backend in crate::config::ASSISTANT_BACKENDS {
+            assert!(
+                response.contains(backend),
+                "{backend} missing from {response}"
+            );
+        }
+        // The stub answers invocations without a model; there is nobody to talk
+        // to, so it is not on offer.
+        assert!(!response.contains("\"stub\""), "{response}");
+    }
+
+    #[test]
+    fn an_unknown_backend_is_refused_before_anything_is_killed() {
+        // Switching restarts the assistant, so a bad name must be caught while
+        // the running one is still untouched.
+        let server = test_server();
+
+        let refused = request(
+            server.address(),
+            "POST",
+            "/v1/agent/backend",
+            Some(&json!({"backend": "notabackend"}).to_string()),
+        );
+
+        assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
+        assert!(refused.contains("Unknown backend"), "{refused}");
+
+        // The stub compiles as a backend but is not one an operator talks to.
+        let stub = request(
+            server.address(),
+            "POST",
+            "/v1/agent/backend",
+            Some(&json!({"backend": "stub"}).to_string()),
+        );
+        assert!(stub.starts_with("HTTP/1.1 400"), "{stub}");
+        assert!(stub.contains("not an assistant backend"), "{stub}");
     }
 
     #[test]

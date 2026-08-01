@@ -145,6 +145,22 @@ fn default_command() -> String {
     detect_agent_command()
 }
 
+/// Backends an operator can run an assistant on.
+///
+/// `stub` is deliberately absent: it answers invocations without a model, which
+/// is useful for exercising a run and useless for talking to.
+pub const ASSISTANT_BACKENDS: [&str; 5] = ["claude", "codex", "cursor", "opencode", "agy"];
+
+/// The backend a launch command came from, when it came from one of ours.
+///
+/// The config stores a command rather than a name, so this is how the daemon
+/// reports which backend an assistant is currently running.
+pub fn backend_of_command(command: &str) -> Option<&'static str> {
+    ASSISTANT_BACKENDS
+        .into_iter()
+        .find(|name| resolve_backend(name).is_ok_and(|resolved| resolved == command))
+}
+
 /// Map shorthand agent names to full commands.
 ///
 /// - `"claude"` → `"claude --dangerously-skip-permissions"`
