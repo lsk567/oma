@@ -170,6 +170,12 @@ impl Attachment {
         command.args(["attach-session", "-t", exact_session(&session).as_str()]);
         // A nested tmux would refuse to attach.
         command.env_remove("TMUX");
+        // tmux refuses to attach without a terminal it recognises, and the
+        // daemon inherits whatever started it — nothing at all under launchd,
+        // systemd or CI, where the attach exits at once and the viewer shows an
+        // agent that never draws. The far end is xterm.js, so this is not a
+        // guess about the environment: it is what the viewer actually is.
+        command.env("TERM", "xterm-256color");
 
         let child = pty
             .slave
@@ -452,6 +458,25 @@ mod tests {
 
         {
             let mut attachment = Attachment::open_session(session).expect("attach");
+            // `open_session` returns as soon as tmux is spawned, and a tmux that
+            // cannot attach exits instead — which looks exactly like a session
+            // that ignored the resize. Wait for the client to exist first, so a
+            // failure here says which of the two happened.
+            let attached = {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    let listed = clients(session);
+                    if !listed.starts_with("none") || std::time::Instant::now() >= deadline {
+                        break listed;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            };
+            assert!(
+                !attached.starts_with("none"),
+                "no client attached: {attached}"
+            );
+
             attachment.resize(96, 30).expect("resize");
             // tmux follows the client, so the agent is now drawing at the
             // viewer's shape.
