@@ -510,6 +510,23 @@ impl InvocationRegistry {
         }
     }
 
+    /// Whether this invocation has already been answered.
+    ///
+    /// Delivery needs this because an agent that reads its pane a line at a
+    /// time answers before the submit, leaving the terminal with no change to
+    /// show for it. An entry that has gone counts as answered: there is
+    /// nothing left to deliver to either way.
+    fn answered(&self, invocation_id: &str) -> bool {
+        match self.entries.lock() {
+            Ok(entries) => entries
+                .get(invocation_id)
+                .is_none_or(|entry| entry.record.completed),
+            // A poisoned lock is not evidence of an answer, and claiming one
+            // would turn a lost delivery into a silent hang.
+            Err(_) => false,
+        }
+    }
+
     fn execute(&self, team: &str, agent: &str, command: InvocationCommand) -> Result<Value> {
         let mut entries = self
             .entries
@@ -913,7 +930,9 @@ impl ReactionExecutor for TmuxReactionExecutor {
         let session = self.client.session_for(&invocation.agent);
         if let Err(error) = self
             .client
-            .deliver_prompt(&session, &message, &DeliveryOptions::default())
+            .deliver_prompt_until(&session, &message, &DeliveryOptions::default(), &|| {
+                self.registry.answered(&invocation_id)
+            })
             .with_context(|| format!("failed to deliver {}", invocation.reaction_id))
         {
             self.registry.remove(&invocation_id);
