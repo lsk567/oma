@@ -31,6 +31,10 @@ pub const SERVE_PROTOCOL_VERSION: u32 = 1;
 /// compilation and process start-up.
 const DIAGRAM_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BODY_BYTES: usize = 512 * 1024;
+const TERMINAL_PREFIX: &str = "/v1/agents/";
+const TERMINAL_SUFFIX: &str = "/terminal";
+/// How long the relay waits on each side before checking the other.
+const TERMINAL_POLL: Duration = Duration::from_millis(25);
 /// Messages a stalled chat subscriber may fall behind by before it is dropped.
 const CHAT_QUEUE: usize = 256;
 
@@ -395,6 +399,8 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
 
     let mut content_length = 0usize;
     let mut origin = None;
+    let mut origin_header = None;
+    let mut websocket_key = None;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 || line == "\r\n" {
@@ -407,10 +413,35 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
         // Loopback binding does not stop a page the operator visits from
         // calling this, so only loopback origins are granted CORS.
         if let Some(value) = lower.strip_prefix("origin:") {
+            origin_header = Some(value.trim().to_string());
             origin = crate::diagram::allowed_origin(Some(value));
+        }
+        // Header names are case-insensitive but the key's base64 is not, so it
+        // is taken from the original line rather than the lowercased copy.
+        if lower.starts_with("sec-websocket-key:") {
+            websocket_key = line
+                .split_once(':')
+                .map(|(_, value)| value.trim().to_string());
         }
     }
     let origin = origin.as_deref();
+
+    // A terminal is the one endpoint where a wrong answer hands an attacker a
+    // shell, and CORS does not apply to WebSockets: the browser opens the
+    // socket regardless and only the server can refuse it.
+    if method == "GET" && path.starts_with(TERMINAL_PREFIX) && path.ends_with(TERMINAL_SUFFIX) {
+        let agent = path
+            .trim_start_matches(TERMINAL_PREFIX)
+            .trim_end_matches(TERMINAL_SUFFIX)
+            .to_string();
+        return attach_terminal(
+            stream,
+            &context,
+            &agent,
+            websocket_key.as_deref(),
+            origin_header.as_deref(),
+        );
+    }
 
     if method == "OPTIONS" {
         return write_json(&mut stream, 204, &Value::Null, origin);
@@ -471,6 +502,111 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
 }
 
 /// Relay an operator message into the EA's tmux session.
+/// Attach a WebSocket to an agent's tmux session.
+///
+/// Steering an agent means typing into it, which is why this is a socket and
+/// not a stream: keystrokes and screen output share one connection, and closing
+/// it is the detach.
+fn attach_terminal(
+    mut stream: TcpStream,
+    context: &Arc<Context_>,
+    agent: &str,
+    websocket_key: Option<&str>,
+    origin: Option<&str>,
+) -> Result<()> {
+    // Same-origin policy does not cover WebSockets. Without this check any page
+    // the operator happens to visit could open a terminal into their agents and
+    // type into it, loopback binding notwithstanding. A missing Origin is not a
+    // browser, which cannot suppress it.
+    if let Some(origin) = origin {
+        if crate::diagram::allowed_origin(Some(origin)).is_none() {
+            return write_json(&mut stream, 403, &json!({"error": "origin refused"}), None);
+        }
+    }
+    let Some(key) = websocket_key else {
+        return write_json(
+            &mut stream,
+            400,
+            &json!({"error": "terminal requires a WebSocket upgrade"}),
+            None,
+        );
+    };
+
+    let prefix = crate::ea::ea_prefix(context.ea_id, &context.session_prefix);
+    let attachment = match crate::terminal::Attachment::open(&prefix, agent) {
+        Ok(attachment) => attachment,
+        // The socket has not been upgraded yet, so this can still be an
+        // ordinary HTTP error the client can read.
+        Err(error) => {
+            return write_json(
+                &mut stream,
+                404,
+                &json!({"error": format!("{error:#}")}),
+                None,
+            )
+        }
+    };
+
+    let response = format!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
+         Upgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Accept: {}\r\n\r\n",
+        tungstenite::handshake::derive_accept_key(key.as_bytes())
+    );
+    stream.write_all(response.as_bytes())?;
+    stream.flush()?;
+
+    relay_terminal(stream, attachment)
+}
+
+/// Pump bytes between the socket and the pseudo-terminal until either ends.
+fn relay_terminal(stream: TcpStream, mut attachment: crate::terminal::Attachment) -> Result<()> {
+    use tungstenite::{Message, WebSocket};
+
+    // Reads have to give up regularly so the other direction gets a turn; this
+    // is one thread serving a full-duplex connection.
+    stream.set_read_timeout(Some(TERMINAL_POLL))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let mut socket = WebSocket::from_raw_socket(stream, tungstenite::protocol::Role::Server, None);
+
+    // The viewer must render at the agent's size rather than resize it, so it
+    // is told what that size is before any output arrives.
+    let size = attachment.size;
+    let _ = socket.send(Message::Text(
+        json!({"cols": size.cols, "rows": size.rows}).to_string(),
+    ));
+
+    loop {
+        // Keystrokes travelling to the agent.
+        match socket.read() {
+            Ok(Message::Binary(bytes)) => attachment.write(&bytes)?,
+            Ok(Message::Text(text)) => attachment.write(text.as_bytes())?,
+            Ok(Message::Close(_)) => break,
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            // Anything else is the viewer going away, which is a detach.
+            Err(_) => break,
+        }
+
+        // Screen output travelling back.
+        while let Some(bytes) = attachment.read(Duration::from_millis(1)) {
+            if socket.send(Message::Binary(bytes)).is_err() {
+                return Ok(());
+            }
+        }
+        if socket.flush().is_err() {
+            break;
+        }
+    }
+    // Dropping the attachment kills `tmux attach`, which detaches the viewer
+    // and leaves the agent's session running.
+    Ok(())
+}
+
 fn send_to_ea(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     let request: ChatRequest = match serde_json::from_slice(body) {
         Ok(request) => request,
@@ -1161,6 +1297,134 @@ mod tests {
             response.starts_with("HTTP/1.1 400 Bad Request"),
             "{response}"
         );
+    }
+
+    #[test]
+    fn a_terminal_carries_the_agent_screen_and_the_operator_keystrokes() {
+        // The whole point is steering, so this drives a real tmux session
+        // through a real socket: the agent's output has to arrive, and typing
+        // has to reach the shell.
+        if crate::tmux::tmux_command().arg("-V").output().is_err() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        // The operator's own tmux server, so the name is distinctive and only
+        // this session is cleaned up. OMAR_TMUX_SERVER is process-global and
+        // would race every other tmux test.
+        let prefix = crate::ea::ea_prefix(0, &Config::default().dashboard.session_prefix);
+        let session = format!("{prefix}wsprobe");
+        let tmux = |args: &[&str]| {
+            let _ = crate::tmux::tmux_command().args(args).output();
+        };
+        tmux(&["kill-session", "-t", &session]);
+        tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            &session,
+            "-x",
+            "120",
+            "-y",
+            "40",
+            "sh",
+        ]);
+
+        let server = test_server();
+        let url = format!("ws://{}/v1/agents/wsprobe/terminal", server.address());
+        let (mut socket, _) = tungstenite::connect(&url).expect("terminal connects");
+
+        // The viewer is told the agent's size before anything else, so it can
+        // render at that size instead of resizing the agent.
+        let size: Value = serde_json::from_str(
+            &socket
+                .read()
+                .expect("size frame")
+                .into_text()
+                .expect("text"),
+        )
+        .expect("json");
+        assert_eq!(size["cols"], json!(120));
+        assert_eq!(size["rows"], json!(40));
+
+        socket
+            .send(tungstenite::Message::Binary(b"echo omar-ws-ok\n".to_vec()))
+            .expect("keystrokes");
+
+        let mut seen = String::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !seen.contains("omar-ws-ok") && std::time::Instant::now() < deadline {
+            match socket.read() {
+                Ok(tungstenite::Message::Binary(bytes)) => {
+                    seen.push_str(&String::from_utf8_lossy(&bytes))
+                }
+                Ok(_) => {}
+                Err(error) => panic!("socket ended early: {error} after {seen}"),
+            }
+        }
+        assert!(seen.contains("omar-ws-ok"), "got: {seen}");
+
+        // Closing the socket detaches without taking the agent with it.
+        drop(socket);
+        std::thread::sleep(Duration::from_millis(500));
+        let survived = crate::terminal::window_size(&session).is_ok();
+        tmux(&["kill-session", "-t", &session]);
+        assert!(survived, "the agent session outlives its viewer");
+    }
+
+    /// A WebSocket handshake for the terminal, with whatever Origin is given.
+    fn terminal_handshake(address: SocketAddr, agent: &str, origin: Option<&str>) -> String {
+        let mut stream = TcpStream::connect(address).expect("connect");
+        let origin = origin
+            .map(|value| format!("Origin: {value}\r\n"))
+            .unwrap_or_default();
+        write!(
+            stream,
+            "GET /v1/agents/{agent}/terminal HTTP/1.1\r\nHost: {address}\r\n\
+             Upgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             {origin}\r\n"
+        )
+        .expect("request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
+        let mut response = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut stream, &mut response);
+        String::from_utf8_lossy(&response).into_owned()
+    }
+
+    #[test]
+    fn a_terminal_refuses_an_origin_it_does_not_know() {
+        // CORS never reaches a WebSocket: the browser opens the socket whatever
+        // the server would have said about cross-origin reads, so a page the
+        // operator merely visits could otherwise get a shell in their agent.
+        let server = test_server();
+
+        let refused = terminal_handshake(server.address(), "worker", Some("https://evil.example"));
+
+        assert!(refused.starts_with("HTTP/1.1 403"), "{refused}");
+        assert!(!refused.contains("101 Switching Protocols"), "{refused}");
+    }
+
+    #[test]
+    fn a_terminal_for_an_agent_that_is_not_running_is_not_an_upgrade() {
+        // The failure has to arrive before the upgrade, while the client can
+        // still read an ordinary HTTP error.
+        let server = test_server();
+
+        let missing = terminal_handshake(server.address(), "nobody", Some("http://localhost:3000"));
+
+        assert!(missing.starts_with("HTTP/1.1 404"), "{missing}");
+    }
+
+    #[test]
+    fn a_terminal_without_an_upgrade_is_rejected() {
+        let server = test_server();
+
+        let plain = request(server.address(), "GET", "/v1/agents/worker/terminal", None);
+
+        assert!(plain.starts_with("HTTP/1.1 400"), "{plain}");
+        assert!(plain.contains("WebSocket"), "{plain}");
     }
 
     fn request(address: SocketAddr, method: &str, path: &str, body: Option<&str>) -> String {

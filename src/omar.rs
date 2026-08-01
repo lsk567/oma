@@ -16,6 +16,7 @@ mod projects;
 mod scheduler;
 mod serve;
 mod stub_agent;
+mod terminal;
 mod tmux;
 mod topology;
 mod ui;
