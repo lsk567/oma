@@ -1,0 +1,182 @@
+// Adversarial cross-backend PR review.
+//
+// Three reviewers on three different backends read the same diff through three
+// different lenses. A skeptic on a fourth backend tries to REFUTE everything
+// they report. The coordinator merges what survived, re-scatters the reviewers
+// at whatever has not been examined yet, and stops when a round adds nothing
+// new or the round cap is reached. Read-only: nothing is posted to GitHub.
+team AdversarialPRReview[coordinator     : ClaudeCode,
+                         rev_correctness : ClaudeCode,
+                         rev_security    : Codex,
+                         rev_quality     : Cursor,
+                         skeptic         : OpenCode]
+{
+    input  pr         : int     // pull request number, read with `gh pr diff`
+    input  max_rounds : int     // hard cap on scatter rounds, bounds the loop
+    output report     : string  // the entire deliverable
+
+    action round_brief : string // coordinator -> all three reviewers
+    action correctness : string
+    action security    : string
+    action quality     : string
+    action ledger      : string // skeptic -> coordinator, this round's verdicts
+
+    // ---- seed the first round ------------------------------------------------
+    prompt coordinator(pr, max_rounds) -> round_brief
+    "
+        You are coordinating an adversarial review of GitHub pull request #$(pr)
+        in the current repository. The review runs for at most $(max_rounds) rounds.
+
+        Run `gh pr view $(pr)` and `gh pr diff $(pr)` to see what is being changed.
+        Do not modify any files and do not post anything to GitHub. This whole run
+        is read-only.
+
+        Set `round_brief` to a briefing for three parallel reviewers containing,
+        in plain text:
+          - the line `PR: $(pr)`
+          - the line `ROUND: 1 of $(max_rounds)`
+          - two sentences on what the PR is trying to do
+          - the changed files worth attention, and which look riskiest
+          - the line `CONFIRMED SO FAR: none`
+          - the line `REFUTED SO FAR: none`
+
+        Keep it under 300 words. The reviewers can run `gh pr diff` themselves, so
+        do not paste the diff into the briefing.
+    "
+
+    // ---- three lenses, three backends, one tag -------------------------------
+    prompt rev_correctness(round_brief) -> correctness
+    "
+        $(round_brief)
+
+        Review this pull request for CORRECTNESS only: logic errors, unhandled edge
+        cases, off-by-one and boundary mistakes, race conditions and ordering bugs,
+        error paths that swallow failures, API contracts used wrongly, and tests
+        that do not actually test what they claim. Read the diff with `gh pr diff`
+        using the PR number in the briefing above, and open the surrounding files
+        for context. Do not modify anything.
+
+        Ignore anything already listed as CONFIRMED or REFUTED in the briefing, and
+        prioritise wherever the briefing says nobody has looked yet.
+
+        Set `correctness` to a numbered list. Every entry gives the file, the line
+        or symbol, one sentence naming the defect, and one concrete failure
+        scenario: the inputs or state that produce the wrong result. No style
+        opinions, no praise, no summary. If you find nothing new, set `correctness`
+        to exactly `NONE`.
+    "
+
+    prompt rev_security(round_brief) -> security
+    "
+        $(round_brief)
+
+        Review this pull request for SECURITY and ROBUSTNESS only: injection and
+        unescaped interpolation, path traversal, unvalidated external input, authn
+        and authz gaps, secrets or tokens in code and logs, unsafe deserialisation,
+        TOCTOU races, resource exhaustion and unbounded growth, panics or unwraps
+        reachable from untrusted input, and CORS or network exposure that is wider
+        than it needs to be. Read the diff with `gh pr diff` using the PR number in
+        the briefing above, and open the surrounding files for context. Do not
+        modify anything.
+
+        Ignore anything already listed as CONFIRMED or REFUTED in the briefing, and
+        prioritise wherever the briefing says nobody has looked yet.
+
+        Set `security` to a numbered list. Every entry gives the file, the line or
+        symbol, one sentence naming the weakness, and one concrete attack or
+        failure path that reaches it. Say who has to be able to do what for it to
+        matter. If you find nothing new, set `security` to exactly `NONE`.
+    "
+
+    prompt rev_quality(round_brief) -> quality
+    "
+        $(round_brief)
+
+        Review this pull request for DESIGN QUALITY only: duplicated logic that
+        should be shared, abstractions built for a single caller, dead or
+        unreachable code the change leaves behind, functions doing several
+        unrelated jobs, names that mislead, error handling for cases that cannot
+        happen, and complexity that a simpler construction would remove. Read the
+        diff with `gh pr diff` using the PR number in the briefing above, and open
+        the surrounding files for context. Do not modify anything.
+
+        Ignore anything already listed as CONFIRMED or REFUTED in the briefing, and
+        prioritise wherever the briefing says nobody has looked yet.
+
+        Set `quality` to a numbered list. Every entry gives the file, the line or
+        symbol, one sentence naming the problem, and the concrete cost of leaving
+        it: what breaks later, or what a reader gets wrong. Formatting nits and
+        personal preference do not count. If you find nothing new, set `quality` to
+        exactly `NONE`.
+    "
+
+    // ---- the tag barrier delivers all three reports in one invocation --------
+    prompt skeptic(correctness, security, quality) -> ledger
+    "
+        Three reviewers running on three different models have just reported. Your
+        job is to REFUTE them, not to agree with them.
+
+        Correctness reviewer:
+        $(correctness)
+
+        Security reviewer:
+        $(security)
+
+        Design quality reviewer:
+        $(quality)
+
+        Take each claim and read the actual code to show that it is wrong: the
+        guard already exists somewhere the reviewer did not look, that input cannot
+        reach that path, the behaviour is deliberate, the API is being used
+        correctly, the case is already covered by a test, or the finding is taste
+        rather than a defect. Default to refuted when you are not sure. A claim
+        survives only if you can state the concrete failure it causes. A finding
+        that two reviewers reported independently still has to survive on the
+        evidence and not on the vote count. Do not modify anything.
+
+        Set `ledger` to exactly this shape:
+          CONFIRMED:
+          <numbered surviving findings, each with file, defect, failure scenario,
+           and severity high, medium or low. Write `none` if nothing survived.>
+          REFUTED:
+          <numbered refuted claims, one line each with the reason it does not hold.
+           Write `none` if nothing was refuted.>
+          NEW THIS ROUND: <how many findings you just added to CONFIRMED>
+          UNEXAMINED: <files or concerns in the diff that no reviewer touched this
+           round, or `none`>
+    "
+
+    // ---- merge, then loop or finish ------------------------------------------
+    prompt coordinator(ledger) -> (round_brief | report)
+    "
+        The skeptic has returned this round's verdicts:
+        $(ledger)
+
+        You wrote the previous briefing, so you already know the PR number, the
+        round number, the round cap, and everything confirmed or refuted in earlier
+        rounds. Merge this round's verdicts into those running lists.
+
+        Set exactly one effect.
+
+        Set `round_brief` for another round when this round added at least one new
+        confirmed finding AND the round number is still below the cap. It repeats
+        the `PR:` line, gives `ROUND: <n> of <cap>` with the number incremented,
+        restates the merged `CONFIRMED SO FAR:` and `REFUTED SO FAR:` lists in full
+        so the reviewers do not re-report them, and points the reviewers at what the
+        skeptic listed as unexamined. Name those files and concerns explicitly.
+        Keep it under 400 words.
+
+        Otherwise set `report`, because the review has converged: either this round
+        added nothing new, or the cap has been reached. The report contains the PR
+        number and title, a one-paragraph verdict recommending approve or request
+        changes, the confirmed findings grouped by severity with file, defect and
+        failure scenario, a short list of the most notable refuted claims so the
+        author can see they were considered and dismissed, and the number of rounds
+        that ran. Nothing has been posted to GitHub, so this text is the entire
+        deliverable.
+    "
+}
+
+main {
+    review = AdversarialPRReview()
+}

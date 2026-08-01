@@ -413,7 +413,7 @@ mod tests {
         assert_eq!((before.cols, before.rows), (200, 50));
 
         {
-            let mut attachment = Attachment::open("", session).expect("attach");
+            let mut attachment = Attachment::open_session(session).expect("attach");
             attachment.resize(96, 30).expect("resize");
             // tmux follows the client, so the agent is now drawing at the
             // viewer's shape.
@@ -454,7 +454,7 @@ mod tests {
             .expect("tmux runs");
 
         // A name that does not resolve: the attach fails before any viewer.
-        assert!(Attachment::open("", "omar-terminal-does-not-exist").is_err());
+        assert!(Attachment::open_session("omar-terminal-does-not-exist").is_err());
 
         let mouse = tmux_command()
             .args(["show-options", "-t", &exact_target(session), "-v", "mouse"])
@@ -495,7 +495,7 @@ mod tests {
             .output()
             .expect("tmux runs");
 
-        let attachment = Attachment::open("", session).expect("attach");
+        let attachment = Attachment::open_session(session).expect("attach");
 
         let reported = tmux_command()
             .args(["show-options", "-t", &exact_target(session), "-v", "mouse"])
@@ -545,7 +545,7 @@ mod tests {
             "a session that does not exist resolved to '{neighbour}'"
         );
         assert!(
-            Attachment::open("", gone).is_err(),
+            Attachment::open_session(gone).is_err(),
             "attached to the wrong session"
         );
     }

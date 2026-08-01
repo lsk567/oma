@@ -1,0 +1,115 @@
+team Planner[agent : Claude]
+{
+    input topic : string
+    output spec : string
+
+    prompt agent(topic) -> spec "You are the Planner. Topic: $(topic). Produce a numbered build spec with exactly 6 independent work items, one per builder, each 1-2 sentences. Output only the list."
+}
+
+team Builder(idx : int)[agent : Claude]
+{
+    input spec : string
+    output part : string
+
+    prompt agent(spec) -> part "You are Builder $(idx). Spec: $(spec). Implement ONLY work item $(idx). If the spec is revision guidance from a previous round, revise your item accordingly. Reply with a short section titled 'Item $(idx)'."
+}
+
+team Integrator[agent : Claude]
+{
+    input p1 : string
+    input p2 : string
+    input p3 : string
+    input p4 : string
+    input p5 : string
+    input p6 : string
+    output build : string
+
+    prompt agent(p1, p2, p3, p4, p5, p6) -> build "You are the Integrator. Merge these six parts into one coherent artifact, resolving overlaps and contradictions. Parts: 1) $(p1) 2) $(p2) 3) $(p3) 4) $(p4) 5) $(p5) 6) $(p6). Output the merged artifact only."
+}
+
+team Auditor(lens : string)[agent : Claude]
+{
+    input build : string
+    output finding : string
+
+    prompt agent(build) -> finding "You are an Auditor with one lens: $(lens). Artifact: $(build). Report only defects visible through your lens, most severe first. If you find none, say NONE."
+}
+
+team Judge[agent : Claude]
+{
+    input f1 : string
+    input f2 : string
+    input f3 : string
+    output verdict : string
+
+    prompt agent(f1, f2, f3) -> verdict "You are the Judge. Three audits: A) $(f1) B) $(f2) C) $(f3). Discard findings you cannot substantiate. Output a verdict beginning with either ACCEPT or REVISE, followed by the surviving defects."
+}
+
+team Reviser[agent : Claude]
+{
+    input verdict : string
+    output guidance : string
+
+    prompt agent(verdict) -> guidance "You are the Reviser. Verdict: $(verdict). Rewrite it as a fresh 6-item spec for the builders, each item naming what to change and why. Carry forward anything already correct unchanged."
+}
+
+team Reporter[agent : Claude]
+{
+    input verdict : string
+    output report : string
+
+    prompt agent(verdict) -> report "You are the Reporter. Verdict: $(verdict). Summarise the current round for a human: what was built, what survived audit, what the next round will change. Under 200 words."
+}
+
+main LoopTest {
+    p = Planner()
+
+    b1 = Builder(1)
+    b2 = Builder(2)
+    b3 = Builder(3)
+    b4 = Builder(4)
+    b5 = Builder(5)
+    b6 = Builder(6)
+
+    intg = Integrator()
+
+    a1 = Auditor("correctness")
+    a2 = Auditor("completeness")
+    a3 = Auditor("consistency")
+
+    j = Judge()
+    r = Reviser()
+    rep = Reporter()
+
+    p.spec -> b1.spec
+    p.spec -> b2.spec
+    p.spec -> b3.spec
+    p.spec -> b4.spec
+    p.spec -> b5.spec
+    p.spec -> b6.spec
+
+    b1.part -> intg.p1
+    b2.part -> intg.p2
+    b3.part -> intg.p3
+    b4.part -> intg.p4
+    b5.part -> intg.p5
+    b6.part -> intg.p6
+
+    intg.build -> a1.build
+    intg.build -> a2.build
+    intg.build -> a3.build
+
+    a1.finding -> j.f1
+    a2.finding -> j.f2
+    a3.finding -> j.f3
+
+    j.verdict -> rep.verdict
+    j.verdict -> r.verdict
+
+    r.guidance -> b1.spec
+    r.guidance -> b2.spec
+    r.guidance -> b3.spec
+    r.guidance -> b4.spec
+    r.guidance -> b5.spec
+    r.guidance -> b6.spec
+}
