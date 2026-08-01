@@ -27,6 +27,11 @@ ansi-to-tui = "7"
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 tracing = "0.1.44"
+# Terminal attach. `tungstenite` is the sync API, which matches the blocking
+# thread-per-connection model `omar serve` already uses; TLS is off because the
+# server binds loopback only.
+tungstenite = { version = "0.24", default-features = false }
+portable-pty = "0.8"
 
 [dev-dependencies]
 pretty_assertions = "1"
