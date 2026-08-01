@@ -19,6 +19,25 @@ use crate::tmux::{flatten_agent_name, tmux_command};
 const MIN_DIMENSION: u16 = 2;
 const MAX_DIMENSION: u16 = 1000;
 
+/// A session target that matches this session and nothing else.
+///
+/// tmux resolves `-t name` by prefix when nothing matches it exactly, so with
+/// sessions like `…-w` and `…-w2` a lookup for one that has since gone lands
+/// silently on its neighbour — reading the wrong agent's size, or turning the
+/// wrong agent's mouse on.
+fn exact_session(session: &str) -> String {
+    format!("={session}")
+}
+
+/// The same, for the commands that want a target inside the session.
+///
+/// `display-message`, `set-option` and `show-options` reject a bare `=name`
+/// ("no such session"); the trailing colon is what makes it the session's
+/// current window rather than a window called `=name`.
+fn exact_target(session: &str) -> String {
+    format!("={session}:")
+}
+
 /// The size tmux is currently drawing a session at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowSize {
@@ -52,7 +71,7 @@ pub fn window_size(session: &str) -> Result<WindowSize> {
             "display-message",
             "-p",
             "-t",
-            session,
+            &exact_target(session),
             "#{window_width}x#{window_height}x#{status}",
         ])
         .output()
@@ -74,7 +93,7 @@ pub fn window_size(session: &str) -> Result<WindowSize> {
 /// failing to set it costs scrolling, not the attachment.
 fn enable_mouse(session: &str) {
     let _ = tmux_command()
-        .args(["set-option", "-t", session, "mouse", "on"])
+        .args(["set-option", "-t", &exact_target(session), "mouse", "on"])
         .output();
 }
 
@@ -141,7 +160,7 @@ impl Attachment {
                 command.args(["-L", &server]);
             }
         }
-        command.args(["attach-session", "-t", &format!("={session}")]);
+        command.args(["attach-session", "-t", exact_session(&session).as_str()]);
         // A nested tmux would refuse to attach.
         command.env_remove("TMUX");
 
@@ -227,7 +246,7 @@ mod tests {
     impl Drop for SessionGuard {
         fn drop(&mut self) {
             let _ = tmux_command()
-                .args(["kill-session", "-t", &self.0])
+                .args(["kill-session", "-t", &exact_session(&self.0)])
                 .output();
         }
     }
@@ -244,7 +263,7 @@ mod tests {
         // other tmux tests.
         let session = "omar-terminal-relay-probe";
         let _ = tmux_command()
-            .args(["kill-session", "-t", session])
+            .args(["kill-session", "-t", &exact_session(session)])
             .output();
         let _guard = SessionGuard(session.to_string());
 
@@ -311,7 +330,7 @@ mod tests {
         }
         let session = "omar-terminal-mouse-probe";
         let _ = tmux_command()
-            .args(["kill-session", "-t", session])
+            .args(["kill-session", "-t", &exact_session(session)])
             .output();
         let _guard = SessionGuard(session.to_string());
         tmux_command()
@@ -329,18 +348,63 @@ mod tests {
             .output()
             .expect("tmux runs");
         tmux_command()
-            .args(["set-option", "-t", session, "mouse", "off"])
+            .args(["set-option", "-t", &exact_target(session), "mouse", "off"])
             .output()
             .expect("tmux runs");
 
         let attachment = Attachment::open("", session).expect("attach");
 
         let reported = tmux_command()
-            .args(["show-options", "-t", session, "-v", "mouse"])
+            .args(["show-options", "-t", &exact_target(session), "-v", "mouse"])
             .output()
             .expect("tmux answers");
         drop(attachment);
         assert_eq!(String::from_utf8_lossy(&reported.stdout).trim(), "on");
+    }
+
+    #[test]
+    fn a_missing_session_is_not_confused_with_its_neighbour() {
+        // tmux resolves `-t name` by prefix when nothing matches exactly, so a
+        // lookup for an agent that has gone would land on one whose name it is
+        // a prefix of — reporting that agent's size, or attaching to it.
+        if !tmux_available() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let gone = "omar-terminal-prefix";
+        let neighbour = "omar-terminal-prefix2";
+        for name in [gone, neighbour] {
+            let _ = tmux_command()
+                .args(["kill-session", "-t", &exact_session(name)])
+                .output();
+        }
+        let _guard = SessionGuard(neighbour.to_string());
+        tmux_command()
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                neighbour,
+                "-x",
+                "111",
+                "-y",
+                "31",
+                "sh",
+            ])
+            .output()
+            .expect("tmux runs");
+
+        // The neighbour is fine to read; the one that does not exist must not
+        // resolve to it.
+        assert_eq!(window_size(neighbour).expect("neighbour").cols, 111);
+        assert!(
+            window_size(gone).is_err(),
+            "a session that does not exist resolved to '{neighbour}'"
+        );
+        assert!(
+            Attachment::open("", gone).is_err(),
+            "attached to the wrong session"
+        );
     }
 
     #[test]
