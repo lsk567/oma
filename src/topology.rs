@@ -38,6 +38,9 @@ pub enum Instruction {
     DeclareInstance {
         name: String,
         team: String,
+        /// The instance that declared it, empty for one `main` declared.
+        #[serde(default)]
+        parent: String,
     },
     SpawnAgent {
         name: String,
@@ -102,6 +105,10 @@ pub struct AgentState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceState {
     pub team: String,
+    /// Which instance declared it. Empty for a top-level one, and for bytecode
+    /// that predates teams being able to instantiate teams.
+    #[serde(default)]
+    pub parent: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,14 +292,25 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
         match instruction {
             Instruction::BeginPlan { .. } if index == 0 => {}
             Instruction::BeginPlan { .. } => bail!("duplicate begin_plan at instruction {index}"),
-            Instruction::DeclareInstance { name, team } => {
+            Instruction::DeclareInstance { name, team, parent } => {
                 require_identifier("instance", name)?;
                 if team.trim().is_empty() {
                     bail!("instance '{name}' names no team");
                 }
+                // A parent is declared before its children, so this also
+                // rejects a cycle: neither end could be declared first.
+                if !parent.is_empty() && !state.instances.contains_key(parent) {
+                    bail!("instance '{name}' names undeclared parent '{parent}'");
+                }
                 if state
                     .instances
-                    .insert(name.clone(), InstanceState { team: team.clone() })
+                    .insert(
+                        name.clone(),
+                        InstanceState {
+                            team: team.clone(),
+                            parent: parent.clone(),
+                        },
+                    )
                     .is_some()
                 {
                     bail!("duplicate instance '{name}'");
@@ -446,7 +464,10 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                     let port = state.ports.get(trigger).with_context(|| {
                         format!("reaction '{id}' has unknown trigger '{trigger}'")
                     })?;
-                    if port.kind == PortKind::Output {
+                    // A reaction may read the output of a team its own team
+                    // instantiated — that is how a parent observes what it
+                    // contains. Its own output is what it is there to write.
+                    if port.kind == PortKind::Output && port.instance == *instance {
                         bail!("reaction '{id}' cannot be triggered by output '{trigger}'");
                     }
                 }
@@ -2046,6 +2067,53 @@ mod tests {
         let error = verify(&bytecode).unwrap_err().to_string();
 
         assert!(error.contains("same tmux session"), "{error}");
+    }
+
+    #[test]
+    fn a_nested_instance_names_the_instance_that_declared_it() {
+        // A team can instantiate another team, so instances form a tree rather
+        // than a list. The VM keeps one flat namespace, so the tree only
+        // survives if each instance says who declared it.
+        let bytecode: Bytecode = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Nest",
+              "instructions": [
+                {"op":"begin_plan","team":"Nest"},
+                {"op":"declare_instance","name":"b","team":"B","parent":""},
+                {"op":"declare_instance","name":"b.a","team":"A","parent":"b"},
+                {"op":"spawn_agent","name":"b.a.agent","backend":"Codex","instance":"b.a"},
+                {"op":"define_port","kind":"input","name":"b.a.inp","type":"int","instance":"b.a"},
+                {"op":"define_port","kind":"output","name":"b.done","type":"int","instance":"b"},
+                {"op":"install_reaction","id":"b.a.reaction.0","agent":"b.a.agent","triggers":["b.a.inp"],"effects":["b.done"],"contract":"b.done","prompt":"x","instance":"b.a"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let state = verify(&bytecode).unwrap();
+
+        assert_eq!(state.instances["b"].parent, "");
+        assert_eq!(state.instances["b.a"].parent, "b");
+        assert_eq!(state.instances["b.a"].team, "A");
+
+        // A parent has to exist. Since one is always declared before its
+        // children, this also rules out a cycle: neither end could come first.
+        let orphan: Bytecode = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Orphan",
+              "instructions": [
+                {"op":"begin_plan","team":"Orphan"},
+                {"op":"declare_instance","name":"b.a","team":"A","parent":"b"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let error = verify(&orphan).unwrap_err().to_string();
+        assert!(error.contains("undeclared parent 'b'"), "{error}");
     }
 
     /// Records the tag every invocation arrived at, so a timer's schedule can

@@ -37,6 +37,13 @@ pub struct DiagramInstance {
     pub name: String,
     /// The team it was instantiated from.
     pub team: String,
+    /// The container this one is drawn inside, or empty for a top-level one.
+    ///
+    /// A team can instantiate another team, so containers nest. The id is
+    /// given rather than the name so a client never has to re-derive one from
+    /// the other.
+    #[serde(default)]
+    pub parent: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +133,11 @@ impl DiagramSnapshot {
                 id: instance_id(name),
                 name: name.clone(),
                 team: instance.team.clone(),
+                parent: if instance.parent.is_empty() {
+                    String::new()
+                } else {
+                    instance_id(&instance.parent)
+                },
             })
             .collect();
         let agents = state
@@ -754,12 +766,14 @@ mod tests {
                     "writer".to_string(),
                     InstanceState {
                         team: "Drafter".to_string(),
+                        parent: String::new(),
                     },
                 ),
                 (
                     "reviewer".to_string(),
                     InstanceState {
                         team: "Reviewer".to_string(),
+                        parent: String::new(),
                     },
                 ),
             ]),

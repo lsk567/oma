@@ -294,6 +294,8 @@ run_case Recurrence Recurrence rec.result --input rec.start=0
 # Three instances wired into a ring. Only the seed is supplied; the other two
 # inputs come off the ring itself.
 run_case Ring Ring n1.done --input n1.token=0
+# A team instantiating teams: two nested Stage instances inside one Pipeline.
+run_case Nested Nested run.summary --input run.brief='hierarchy'
 # No --input: a timer is the only thing that starts this one.
 run_case Timer Timer beacon.note
 run_case SameAgentSerial SameAgentSerial serial.result \

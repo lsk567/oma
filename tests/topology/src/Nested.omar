@@ -1,0 +1,39 @@
+// OMAR topology integration source.
+// Exercises hierarchy: a team instantiating another team, so containers nest.
+//
+// `Pipeline` knows nothing about how `Stage` does its work, and `Stage` knows
+// nothing about being nested. The wiring inside `Pipeline` reaches its own
+// instances by name — `refine.inp` — the same spelling `main` uses.
+team Stage(role : string)[worker : Codex]
+{
+    input inp : string
+    output out : string
+
+    prompt worker(inp) -> out
+    "
+        You are the $(role) stage. The text you received is: $(inp)
+        Set `out` to that text with the word $(role) appended.
+    "
+}
+
+team Pipeline[reporter : Codex]
+{
+    input brief : string
+    output summary : string
+
+    draft = Stage("draft");
+    refine = Stage("refine");
+
+    brief -> draft.inp
+    draft.out -> refine.inp
+
+    prompt reporter(refine.out) -> summary
+    "
+        The pipeline produced: $(refine.out)
+        Set `summary` to exactly that text.
+    "
+}
+
+main Nested {
+    run = Pipeline()
+}
