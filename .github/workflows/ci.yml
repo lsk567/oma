@@ -166,6 +166,8 @@ jobs:
                       ), (path, keys)
                   if instruction["op"] == "declare_instance":
                       assert keys == ["op", "name", "team"], (path, keys)
+                  if instruction["op"] == "declare_timer":
+                      assert keys == ["op", "instance", "name", "offset", "period"], (path, keys)
                   # Every member names the container it belongs to, so a client
                   # never has to infer the grouping from a dotted name.
                   if instruction["op"] in ("spawn_agent", "define_port", "install_reaction"):
