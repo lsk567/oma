@@ -55,6 +55,14 @@ pub enum Instruction {
         #[serde(default)]
         instance: String,
     },
+    /// A trigger the runtime fires itself, from the logical clock.
+    DeclareTimer {
+        name: String,
+        offset: u64,
+        period: u64,
+        #[serde(default)]
+        instance: String,
+    },
     ConnectPorts {
         source: String,
         target: String,
@@ -107,6 +115,19 @@ pub struct PortState {
     pub instance: String,
 }
 
+/// `timer t(offset, period)`.
+///
+/// It occupies the same trigger namespace as ports but is not one: nothing can
+/// write to it, and it carries no value of its own beyond the time it fired.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimerState {
+    pub offset: u64,
+    /// `0` fires once. Anything else re-arms, forever.
+    pub period: u64,
+    #[serde(default)]
+    pub instance: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionState {
     pub source: String,
@@ -133,6 +154,8 @@ pub struct VmState {
     #[serde(default)]
     pub instances: BTreeMap<String, InstanceState>,
     pub agents: BTreeMap<String, AgentState>,
+    #[serde(default)]
+    pub timers: BTreeMap<String, TimerState>,
     pub ports: BTreeMap<String, PortState>,
     pub connections: Vec<ConnectionState>,
     pub reactions: BTreeMap<String, ReactionState>,
@@ -248,6 +271,7 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
         team: bytecode.team.clone(),
         instances: BTreeMap::new(),
         agents: BTreeMap::new(),
+        timers: BTreeMap::new(),
         ports: BTreeMap::new(),
         connections: Vec::new(),
         reactions: BTreeMap::new(),
@@ -339,6 +363,37 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                     bail!("duplicate port '{name}'");
                 }
             }
+            Instruction::DeclareTimer {
+                name,
+                offset,
+                period,
+                instance,
+            } => {
+                require_identifier("timer", name)?;
+                check_instance(&state, "timer", name, instance)?;
+                // Triggers are looked up by name in one namespace, so a timer
+                // that shadowed a port would silently take its reactions.
+                if state.ports.contains_key(name) {
+                    bail!("timer '{name}' is also a port; a trigger has one name");
+                }
+                if *offset == 0 && *period == 0 {
+                    bail!("timer '{name}' never fires; give it an offset, a period, or both");
+                }
+                if state
+                    .timers
+                    .insert(
+                        name.clone(),
+                        TimerState {
+                            offset: *offset,
+                            period: *period,
+                            instance: instance.clone(),
+                        },
+                    )
+                    .is_some()
+                {
+                    bail!("duplicate timer '{name}'");
+                }
+            }
             Instruction::ConnectPorts {
                 source,
                 target,
@@ -385,6 +440,9 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                     bail!("reaction '{id}' references unknown agent '{agent}'");
                 }
                 for trigger in triggers {
+                    if state.timers.contains_key(trigger) {
+                        continue;
+                    }
                     let port = state.ports.get(trigger).with_context(|| {
                         format!("reaction '{id}' has unknown trigger '{trigger}'")
                     })?;
@@ -393,6 +451,9 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                     }
                 }
                 for effect in effects {
+                    if state.timers.contains_key(effect) {
+                        bail!("reaction '{id}' cannot write to timer '{effect}'");
+                    }
                     let port = state.ports.get(effect).with_context(|| {
                         format!("reaction '{id}' has unknown effect '{effect}'")
                     })?;
@@ -1225,6 +1286,17 @@ fn run_event_loop_observed<E: ReactionExecutor>(
     observer: &dyn TopologyObserver,
 ) -> Result<BTreeMap<String, Value>> {
     let mut queue = BTreeMap::from([(Tag::START, inputs)]);
+    // Arm every timer for its first firing. A timer's value is the timestamp it
+    // fired at, which is what makes `$(t)` in a prompt worth reading.
+    for (name, timer) in &state.timers {
+        queue
+            .entry(Tag {
+                timestamp: timer.offset,
+                microstep: 0,
+            })
+            .or_default()
+            .insert(name.clone(), json!(timer.offset));
+    }
     let mut outputs = BTreeMap::new();
     let mut steps = 0usize;
 
@@ -1232,7 +1304,28 @@ fn run_event_loop_observed<E: ReactionExecutor>(
         observer.tag_advanced(tag.timestamp, tag.microstep, &events);
         steps += 1;
         if steps > 1024 {
+            // A periodic timer re-arms forever by design, so for those this is
+            // the end of the run rather than a fault: stop with what the
+            // program has produced so far.
+            if state.timers.values().any(|timer| timer.period > 0) {
+                return Ok(outputs);
+            }
             bail!("topology exceeded 1024 logical tags");
+        }
+        for (name, timer) in &state.timers {
+            if timer.period > 0 && events.contains_key(name) {
+                let next = tag
+                    .timestamp
+                    .checked_add(timer.period)
+                    .context("logical timestamp overflow")?;
+                queue
+                    .entry(Tag {
+                        timestamp: next,
+                        microstep: 0,
+                    })
+                    .or_default()
+                    .insert(name.clone(), json!(next));
+            }
         }
         for (name, value) in &events {
             if state
@@ -1686,6 +1779,7 @@ mod tests {
             version: 1,
             team: "HR".into(),
             instances: BTreeMap::new(),
+            timers: BTreeMap::new(),
             agents: BTreeMap::from([
                 (
                     "manager".into(),
@@ -1952,6 +2046,117 @@ mod tests {
         let error = verify(&bytecode).unwrap_err().to_string();
 
         assert!(error.contains("same tmux session"), "{error}");
+    }
+
+    /// Records the tag every invocation arrived at, so a timer's schedule can
+    /// be read off the run rather than inferred from its outputs.
+    struct TimerExecutor {
+        fired: Mutex<Vec<u64>>,
+    }
+
+    impl ReactionExecutor for TimerExecutor {
+        fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+            let at = invocation
+                .trigger_values
+                .values()
+                .next()
+                .and_then(Value::as_u64)
+                .expect("a timer carries the time it fired at");
+            self.fired.lock().unwrap().push(at);
+            let writes = BTreeMap::from([("note".into(), json!("tick"))]);
+            validate_contract(&invocation.contract, &writes)?;
+            Ok(writes)
+        }
+    }
+
+    fn timer_bytecode(offset: u64, period: u64) -> Bytecode {
+        serde_json::from_str(&format!(
+            r#"{{
+              "version": 1,
+              "team": "Poller",
+              "instructions": [
+                {{"op":"begin_plan","team":"Poller"}},
+                {{"op":"spawn_agent","name":"agent","backend":"Codex"}},
+                {{"op":"define_port","kind":"output","name":"note","type":"string"}},
+                {{"op":"declare_timer","name":"t","offset":{offset},"period":{period}}},
+                {{"op":"install_reaction","id":"reaction.0","agent":"agent","triggers":["t"],"effects":["note"],"contract":"note","prompt":"tick at $(t)"}},
+                {{"op":"commit_plan"}}
+              ]
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_timer_with_no_period_fires_once_at_its_offset() {
+        let state = verify(&timer_bytecode(3, 0)).unwrap();
+        let executor = TimerExecutor {
+            fired: Mutex::new(Vec::new()),
+        };
+
+        let outputs = run_event_loop(&state, BTreeMap::new(), &executor).unwrap();
+
+        // Once, at the offset — not at tag 0, and not again afterwards.
+        assert_eq!(*executor.fired.lock().unwrap(), vec![3]);
+        assert_eq!(outputs, BTreeMap::from([("note".into(), json!("tick"))]));
+    }
+
+    #[test]
+    fn a_periodic_timer_re_arms_itself_at_every_period() {
+        let state = verify(&timer_bytecode(0, 10)).unwrap();
+        let executor = TimerExecutor {
+            fired: Mutex::new(Vec::new()),
+        };
+
+        // A periodic timer never stops on its own, so the run ends at the tag
+        // cap rather than failing: what it produced up to then still stands.
+        let outputs = run_event_loop(&state, BTreeMap::new(), &executor).unwrap();
+
+        let fired = executor.fired.lock().unwrap().clone();
+        assert_eq!(&fired[..4], &[0, 10, 20, 30], "fired at {fired:?}");
+        assert!(
+            fired.len() > 100,
+            "a periodic timer keeps going: {}",
+            fired.len()
+        );
+        assert_eq!(outputs, BTreeMap::from([("note".into(), json!("tick"))]));
+    }
+
+    #[test]
+    fn a_timer_cannot_share_a_name_with_a_port_or_be_written_to() {
+        let shadowing: Bytecode = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Clash",
+              "instructions": [
+                {"op":"begin_plan","team":"Clash"},
+                {"op":"define_port","kind":"input","name":"t","type":"int"},
+                {"op":"declare_timer","name":"t","offset":1,"period":0},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let error = verify(&shadowing).unwrap_err().to_string();
+        assert!(error.contains("a trigger has one name"), "{error}");
+
+        let written: Bytecode = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Written",
+              "instructions": [
+                {"op":"begin_plan","team":"Written"},
+                {"op":"spawn_agent","name":"agent","backend":"Codex"},
+                {"op":"define_port","kind":"input","name":"go","type":"int"},
+                {"op":"declare_timer","name":"t","offset":1,"period":0},
+                {"op":"install_reaction","id":"reaction.0","agent":"agent","triggers":["go"],"effects":["t"],"contract":"t","prompt":"x"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let error = verify(&written).unwrap_err().to_string();
+        assert!(error.contains("cannot write to timer"), "{error}");
     }
 
     struct SuperdenseExecutor {

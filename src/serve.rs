@@ -1169,6 +1169,7 @@ mod tests {
             version: 1,
             team: "Sample".to_string(),
             instances: BTreeMap::new(),
+            timers: BTreeMap::new(),
             agents: BTreeMap::from([(
                 "worker".to_string(),
                 AgentState {

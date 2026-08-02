@@ -58,6 +58,28 @@ main Relay {
 
 Inputs and outputs are then named `instance.port` — `n1.token`, `n2.out`.
 
+A reaction can also be triggered by a timer, which the runtime fires from its
+own logical clock. Nothing feeds a timer and nothing can write to it:
+
+```
+timer t(0, 10)
+```
+
+The first number is the offset of its first firing, the second its period.
+Both are logical time — the same unit an action's `delay` and a connection's
+`after` are counted in, not seconds. A period of `0` fires once and stops:
+
+```
+timer once(5, 0)
+```
+
+A non-zero period re-arms forever, so a program built on one does not finish on
+its own. Prefer `period 0` unless the operator asked for something that repeats.
+`$(t)` in a prompt reads back the time the timer fired at.
+
+A timer is what lets a program start with no input, which is otherwise
+impossible — every other trigger needs something upstream to write to it.
+
 Always name the main block, as `Relay` is named above. That name identifies the
 run in Mission Control, and the runtime lets only one run of a given name go at
 a time, so two designs sharing a name cannot run together.

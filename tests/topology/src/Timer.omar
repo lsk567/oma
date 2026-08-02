@@ -1,0 +1,22 @@
+// OMAR topology integration source.
+// Exercises a timer: a trigger the runtime fires from its own logical clock
+// rather than from another reaction. The program takes no input at all — the
+// timer is what starts it, which is the point.
+//
+// The period is 0, so it fires once, at logical time 5. A non-zero period
+// re-arms forever and has no place in a test that must finish.
+team Beacon(label : string)[agent : Codex]
+{
+    timer t(5, 0)
+    output note : string
+
+    prompt agent(t) -> note
+    "
+        The $(label) timer fired at logical time $(t).
+        Set `note` to exactly: fired at $(t)
+    "
+}
+
+main Timer {
+    beacon = Beacon("beacon")
+}
