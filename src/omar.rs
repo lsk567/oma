@@ -20,6 +20,7 @@ mod terminal;
 mod tmux;
 mod topology;
 mod ui;
+mod web_assets;
 
 use std::io;
 use std::path::PathBuf;
@@ -192,6 +193,11 @@ enum Commands {
         /// context is still written, so a test harness can stand in for one.
         #[arg(long)]
         no_ea: bool,
+
+        /// Open Mission Control in a browser. It is served from this same
+        /// address, so the page and the API share an origin.
+        #[arg(long)]
+        ui: bool,
     },
 }
 
@@ -248,6 +254,41 @@ enum EventAction {
         /// Event id
         id: String,
     },
+}
+
+/// Waits for `omar serve` to be listening, then opens Mission Control.
+///
+/// Opening before the listener exists shows the operator a connection error and
+/// makes them reload; waiting a bounded time means a daemon that fails to start
+/// does not leave a thread polling for the life of the process.
+fn open_when_listening(address: std::net::SocketAddr) {
+    for _ in 0..100 {
+        if std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
+            open_browser(&format!("http://{address}"));
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    eprintln!("Mission Control is at http://{address}");
+}
+
+/// Asks the desktop to open a URL, and says it plainly if there is no desktop.
+fn open_browser(url: &str) {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let opened = std::process::Command::new(opener)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !opened {
+        println!("Open {url}");
+    }
 }
 
 fn main() -> Result<()> {
@@ -424,8 +465,17 @@ async fn async_main() -> Result<()> {
             address,
             restart_ea,
             no_ea,
+            ui,
         }) => {
+            if ui && !web_assets::is_bundled() {
+                anyhow::bail!(web_assets::MISSING);
+            }
             let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
+            if ui {
+                // `serve::run` blocks, so the browser is opened from a thread
+                // that waits for the listener rather than before it exists.
+                std::thread::spawn(move || open_when_listening(address));
+            }
             serve::run(address, &config, &omar_dir, target.id, restart_ea, !no_ea)
         }
         None => {

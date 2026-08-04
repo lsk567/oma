@@ -89,6 +89,30 @@ jobs:
       - name: Start both, check both, stop both
         run: ./tests/dev-script.test.sh
 
+  # The daemon serving Mission Control itself. Nothing else here loads a page
+  # from the runtime: the browser suite drives a fake on another origin, and the
+  # Rust tests never open one.
+  serve-ui:
+    name: Web Serve UI
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run build:spa
+      # The bundle has to exist before this: the feature embeds it.
+      - name: Build the runtime with the UI in it
+        run: cargo build --bin omar --features ui
+        working-directory: .
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:serve-ui
+
   e2e:
     name: Web E2E
     runs-on: ubuntu-latest

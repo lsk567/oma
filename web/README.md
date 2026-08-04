@@ -26,6 +26,22 @@ npm run dev
 Open `http://localhost:3000`. With no flag it runs the offline demo topology:
 you can draft and inspect, but not run.
 
+## Two builds of the same application
+
+`npm run build` produces the Cloudflare Worker: server-rendered, deployed, and
+told the daemon's address at launch through `OMAR_SERVE_URL`.
+
+`npm run build:spa` produces a static bundle entered from the browser, which
+`omar serve --ui` embeds and hands out from its own port. There the page is
+same-origin with the API, so it reads the address from the page it was served
+by and there is no mode to choose. `spa/main.tsx` is that entry; it renders the
+same `Studio` component.
+
+The bundle is gzipped by `build/compress-spa.mjs` and embedded under the
+runtime's `ui` cargo feature, so a plain `cargo build` needs no Node.
+
+## Running it
+
 Mode is chosen at launch, not in the UI. To run for real, use `make dev` from
 the repository root — it builds the runtime, starts the daemon, starts Mission
 Control pointed at it, and opens a browser. Ctrl-C stops both.

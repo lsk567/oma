@@ -35,6 +35,7 @@ Other features include messaging systems integration (e.g., Slack), computer use
 - tmux 3.0+
 - Rust 1.70+
 - GNU Make
+- Node.js 22.13+ (to build Mission Control, which `make build` embeds)
 - One or more coding agents: [Claude](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview), [Codex](https://developers.openai.com/codex/cli), [Cursor](https://cursor.com/cli), [Opencode](https://github.com/anomalyco/opencode), or [Google Antigravity CLI](https://antigravity.google/product/antigravity-cli).
 
 ### One-liner (recommended)
@@ -93,13 +94,24 @@ Shutdown the test project and its agents.
 The web client for authoring and observing topology programs lives in
 [`web/`](web/), and is built from this same commit as the runtime it talks to.
 
+If you installed `omar`, it is already in the binary:
+
+```bash
+omar serve --ui
+```
+
+Serves Mission Control from the daemon's own address and opens a browser. The
+page and the API share an origin, so there is nothing to point at anything.
+
+Working on the client itself, use the dev server instead — it reloads:
+
 ```bash
 make dev
 ```
 
 Builds the runtime, starts the daemon, starts Mission Control pointed at it,
 and opens a browser. Ctrl-C stops both. Needs Node.js 22.13+; see
-[`web/README.md`](web/README.md) for running the two halves separately.
+[`web/README.md`](web/README.md).
 
 ## Supported Agent Backends
 

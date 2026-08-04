@@ -55,8 +55,20 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y tmux
 
+      # Mission Control is embedded in the binary, so it is built before the
+      # runtime that carries it. Without this the release ships an `omar` whose
+      # `--ui` refuses to start.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build Mission Control
+        run: npm ci && npm run build:spa
+        working-directory: web
+
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --features ui --target ${{ matrix.target }}
 
       - name: Verify direct source execution
         env:
