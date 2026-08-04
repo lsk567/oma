@@ -80,6 +80,41 @@ its own. Prefer `period 0` unless the operator asked for something that repeats.
 A timer is what lets a program start with no input, which is otherwise
 impossible — every other trigger needs something upstream to write to it.
 
+A team can also instantiate another team, so teams nest:
+
+```
+team Stage(role : string)[worker : Codex]
+{
+    input inp : string
+    output out : string
+
+    prompt worker(inp) -> out "You are the $(role) stage. Got $(inp)."
+}
+
+team Pipeline[reporter : Codex]
+{
+    input brief : string
+    output summary : string
+
+    draft = Stage("draft");
+    refine = Stage("refine");
+
+    brief -> draft.inp
+    draft.out -> refine.inp
+
+    prompt reporter(refine.out) -> summary "Report $(refine.out)."
+}
+```
+
+Inside a team, reach what it instantiated as `instance.port` — the same
+spelling `main` uses. A reaction may read a contained instance's *output*
+(`reporter(refine.out)`), which is how a team observes what it contains; to
+send data the other way, connect to the contained input (`brief -> draft.inp`).
+Reach a nested port from outside with the full path: `run.draft.out`.
+
+Nest when it makes a program clearer — a team that is used twice is worth
+naming once — not for its own sake.
+
 Always name the main block, as `Relay` is named above. That name identifies the
 run in Mission Control, and the runtime lets only one run of a given name go at
 a time, so two designs sharing a name cannot run together.

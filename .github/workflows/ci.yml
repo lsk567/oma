@@ -165,7 +165,7 @@ jobs:
                           ["op", "instance", "kind", "name", "type", "delay"],
                       ), (path, keys)
                   if instruction["op"] == "declare_instance":
-                      assert keys == ["op", "name", "team"], (path, keys)
+                      assert keys == ["op", "name", "parent", "team"], (path, keys)
                   if instruction["op"] == "declare_timer":
                       assert keys == ["op", "instance", "name", "offset", "period"], (path, keys)
                   # Every member names the container it belongs to, so a client

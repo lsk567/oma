@@ -61,7 +61,7 @@ private partial def lexChars : List Char -> Except String (List Token)
         match value.toNat? with
         | some value => do pure (Token.nat value :: (← lexChars tail))
         | none => throw s!"invalid natural number '{value}'"
-      else if "(),:{}?|=<>[].".contains c then
+      else if "(),;:{}?|=<>[].".contains c then
         do pure (Token.sym c.toString :: (← lexChars rest))
       else
         throw s!"unexpected character '{c}'"
@@ -130,6 +130,12 @@ inductive Literal where
   | str : String -> Literal
   deriving Repr, BEq
 
+structure Instance where
+  name : String
+  team : String
+  args : Array Literal
+  deriving Repr
+
 /-- A team as written: a template, which `main` instantiates. A team is never
     the program itself — that is what `main` is for. -/
 structure TeamDecl where
@@ -140,12 +146,10 @@ structure TeamDecl where
   timers : Array Timer
   connections : Array Connection
   reactions : Array Reaction
-  deriving Repr
-
-structure Instance where
-  name : String
-  team : String
-  args : Array Literal
+  /-- Teams this one instantiates. A team is a template, so instantiating one
+      inside another nests the template rather than sharing it: `b.a.out` is
+      not `c.a.out`. -/
+  instances : Array Instance := #[]
   deriving Repr
 
 /-- `a.out -> b.in after 1`. Ends are qualified by instance, so unlike a
@@ -171,6 +175,8 @@ structure Main where
 structure InstanceDecl where
   name : String
   team : String
+  /-- The instance that declared it, or empty for one `main` declared. -/
+  parent : String := ""
   deriving Repr
 
 /-- The elaborated program. Names are flattened into one namespace because that
@@ -286,14 +292,38 @@ private partial def takeContract (acc : List Token) : List Token -> Except Strin
   | Token.text prompt :: rest => pure (acc.reverse, prompt, rest)
   | token :: rest => takeContract (token :: acc) rest
 
+/-- `port`, or `instance.port` written as one dotted name. -/
+private def qualifiedTail (head : String) : Parser String
+  | Token.sym "." :: rest => do
+      let (member, rest) ← word rest
+      pure (s!"{head}.{member}", rest)
+  | tokens => pure (head, tokens)
+
 private partial def parseDependencies (acc : Array String) : Parser (Array String)
   | Token.sym ")" :: rest => pure (acc, rest)
   | tokens => do
       let (name, tokens) ← word tokens
+      -- `refine.out` reads a contained instance's output, which is how a team
+      -- observes what it instantiated.
+      let (name, tokens) ← qualifiedTail name tokens
       match tokens with
       | Token.sym "," :: rest => parseDependencies (acc.push name) rest
       | Token.sym ")" :: rest => pure (acc.push name, rest)
       | _ => throw "expected ',' or ')' in prompt dependencies"
+
+private def literal : Parser Literal
+  | Token.nat value :: rest => pure (Literal.int value, rest)
+  | Token.text value :: rest => pure (Literal.str value, rest)
+  | tokens => throw s!"expected an int or string argument, found {reprStr tokens.head?}"
+
+private partial def parseArgs (acc : Array Literal) : Parser (Array Literal)
+  | Token.sym ")" :: rest => pure (acc, rest)
+  | tokens => do
+      let (value, tokens) ← literal tokens
+      match tokens with
+      | Token.sym "," :: rest => parseArgs (acc.push value) rest
+      | Token.sym ")" :: rest => pure (acc.push value, rest)
+      | _ => throw "expected ',' or ')' in team arguments"
 
 private def parseActionDelay : Parser (Option Nat)
   | Token.sym "(" :: Token.word "delay" :: Token.sym "=" :: rest => do
@@ -307,29 +337,36 @@ private partial def parseDeclarations
     (ports : Array Port)
     (timers : Array Timer)
     (connections : Array Connection)
-    (reactions : Array Reaction) :
+    (reactions : Array Reaction)
+    (instances : Array Instance) :
     List Token ->
-      Except String (Array Port × Array Timer × Array Connection × Array Reaction × List Token)
-  | Token.sym "}" :: rest => pure (ports, timers, connections, reactions, rest)
+      Except String
+        (Array Port × Array Timer × Array Connection × Array Reaction × Array Instance ×
+          List Token)
+  | Token.sym "}" :: rest => pure (ports, timers, connections, reactions, instances, rest)
+  -- `a = A();` ends with an optional semicolon; it separates declarations and
+  -- means nothing else.
+  | Token.sym ";" :: rest =>
+      parseDeclarations reactionIndex ports timers connections reactions instances rest
   | Token.word "input" :: rest => do
       let (name, rest) ← word rest
       let (_, rest) ← expectSym ":" rest
       let (type, rest) ← parseType rest
-      parseDeclarations reactionIndex (ports.push { name, kind := .input, type }) timers connections reactions rest
+      parseDeclarations reactionIndex (ports.push { name, kind := .input, type }) timers connections reactions instances rest
   | Token.word "output" :: rest => do
       let (name, rest) ← word rest
       let (_, rest) ← expectSym ":" rest
       let (type, rest) ← parseType rest
-      parseDeclarations reactionIndex (ports.push { name, kind := .output, type }) timers connections reactions rest
+      parseDeclarations reactionIndex (ports.push { name, kind := .output, type }) timers connections reactions instances rest
   | Token.word "action" :: rest => do
       let (name, rest) ← word rest
       let (delay, rest) ← parseActionDelay rest
       match rest with
       | Token.sym ":" :: tail =>
           let (type, tail) ← parseType tail
-          parseDeclarations reactionIndex (ports.push { name, kind := .action, type, delay }) timers connections reactions tail
+          parseDeclarations reactionIndex (ports.push { name, kind := .action, type, delay }) timers connections reactions instances tail
       | _ =>
-          parseDeclarations reactionIndex (ports.push { name, kind := .action, type := "signal", delay }) timers connections reactions rest
+          parseDeclarations reactionIndex (ports.push { name, kind := .action, type := "signal", delay }) timers connections reactions instances rest
   | Token.word "timer" :: rest => do
       let (name, rest) ← word rest
       let (_, rest) ← expectSym "(" rest
@@ -337,12 +374,13 @@ private partial def parseDeclarations
       let (_, rest) ← expectSym "," rest
       let (period, rest) ← natural rest
       let (_, rest) ← expectSym ")" rest
-      parseDeclarations reactionIndex ports (timers.push { name, offset, period }) connections reactions rest
-  | Token.word source :: Token.sym "->" :: rest => do
-      let (target, rest) ← word rest
-      let (_, rest) ← expectWord "after" rest
-      let (delay, rest) ← natural rest
-      parseDeclarations reactionIndex ports timers (connections.push { source, target, delay }) reactions rest
+      parseDeclarations reactionIndex ports (timers.push { name, offset, period }) connections reactions instances rest
+  | Token.word name :: Token.sym "=" :: rest => do
+      let (team, rest) ← word rest
+      let (_, rest) ← expectSym "(" rest
+      let (args, rest) ← parseArgs #[] rest
+      parseDeclarations reactionIndex ports timers connections reactions
+        (instances.push { name, team, args }) rest
   | Token.word "prompt" :: rest => do
       let (agent, rest) ← word rest
       let (_, rest) ← expectSym "(" rest
@@ -355,7 +393,21 @@ private partial def parseDeclarations
         id := s!"reaction.{reactionIndex}"
         agent, triggers, effects, contract, prompt
       }
-      parseDeclarations (reactionIndex + 1) ports timers connections (reactions.push reaction) rest
+      parseDeclarations (reactionIndex + 1) ports timers connections (reactions.push reaction) instances rest
+  | Token.word first :: rest => do
+      -- An endpoint is either a port of this team or `instance.port` of one it
+      -- instantiated. Both are one name once the instance path is prepended,
+      -- so the dot is kept rather than resolved here.
+      let (source, rest) ← qualifiedTail first rest
+      let (_, rest) ← expectSym "->" rest
+      let (target, rest) ← word rest
+      let (target, rest) ← qualifiedTail target rest
+      -- `after` is optional, matching main: a connection with no delay still
+      -- lands on the next microstep.
+      let (delay, rest) ← match rest with
+        | Token.word "after" :: tail => natural tail
+        | _ => pure (0, rest)
+      parseDeclarations reactionIndex ports timers (connections.push { source, target, delay }) reactions instances rest
   | token :: _ => throw s!"unexpected token in team body: {reprStr token}"
   | [] => throw "unterminated team body"
 
@@ -377,22 +429,9 @@ private def parseTeam : Parser TeamDecl := fun tokens => do
         pure (agents, rest)
     | _ => pure (#[], tokens)
   let (_, tokens) ← expectSym "{" tokens
-  let (ports, timers, connections, reactions, tokens) ← parseDeclarations 0 #[] #[] #[] #[] tokens
-  pure ({ name, params, agents, ports, timers, connections, reactions }, tokens)
-
-private def literal : Parser Literal
-  | Token.nat value :: rest => pure (Literal.int value, rest)
-  | Token.text value :: rest => pure (Literal.str value, rest)
-  | tokens => throw s!"expected an int or string argument, found {reprStr tokens.head?}"
-
-private partial def parseArgs (acc : Array Literal) : Parser (Array Literal)
-  | Token.sym ")" :: rest => pure (acc, rest)
-  | tokens => do
-      let (value, tokens) ← literal tokens
-      match tokens with
-      | Token.sym "," :: rest => parseArgs (acc.push value) rest
-      | Token.sym ")" :: rest => pure (acc.push value, rest)
-      | _ => throw "expected ',' or ')' in team arguments"
+  let (ports, timers, connections, reactions, instances, tokens) ←
+    parseDeclarations 0 #[] #[] #[] #[] #[] tokens
+  pure ({ name, params, agents, ports, timers, connections, reactions, instances }, tokens)
 
 private partial def parseMainBody
     (instances : Array Instance)
@@ -468,8 +507,13 @@ private def validate (program : Program) : Except String Program := do
     if !containsName agentNames reaction.agent then
       throw s!"reaction references unknown agent '{reaction.agent}'"
     for trigger in reaction.triggers do
+      -- A reaction reads its own team's inputs and actions, and the *outputs*
+      -- of teams its team instantiated. Reading its own output would be
+      -- reading what it is there to write.
       let valid := program.ports.any (fun port =>
-        port.name == trigger && port.kind != .output) || containsName timerNames trigger
+        port.name == trigger &&
+          (port.kind != .output || port.instance_ != reaction.instance_)) ||
+        containsName timerNames trigger
       if !valid then throw s!"unknown input/action dependency '{trigger}'"
     for effect in reaction.effects do
       if containsName timerNames effect then
@@ -521,8 +565,9 @@ private def qualifyContract (inst : String) (ports : Array Port) (contract : Str
     are accepted by the runtime but not matched here, so inside a team that
     `main` instantiates, write `$(port)`. -/
 private def qualifyPrompt
-    (inst : String) (ports : Array Port) (timers : Array Timer) (text : String) : String :=
-  let named := ports.map (·.name) ++ timers.map (·.name)
+    (inst : String) (ports : Array Port) (timers : Array Timer) (reads : Array String)
+    (text : String) : String :=
+  let named := ports.map (·.name) ++ timers.map (·.name) ++ reads
   named.foldl
     (fun acc name => acc.replace s!"$({name})" s!"$({qualify inst name})")
     text
@@ -540,34 +585,77 @@ private def bindArguments (decl : TeamDecl) (inst : Instance) :
       pure (acc.push (param.name, literalText arg)))
     (#[] : Array (String × String))
 
-private def elaborateInstance (teams : Array TeamDecl) (inst : Instance) :
-    Except String
-      (Array Agent × Array Port × Array Timer × Array Connection × Array Reaction) := do
+/-- Everything one instantiation contributes, its nested instantiations
+    included. -/
+structure Elaborated where
+  agents : Array Agent := #[]
+  ports : Array Port := #[]
+  timers : Array Timer := #[]
+  connections : Array Connection := #[]
+  reactions : Array Reaction := #[]
+  instances : Array InstanceDecl := #[]
+
+private def Elaborated.append (a b : Elaborated) : Elaborated :=
+  { agents := a.agents ++ b.agents
+    ports := a.ports ++ b.ports
+    timers := a.timers ++ b.timers
+    connections := a.connections ++ b.connections
+    reactions := a.reactions ++ b.reactions
+    instances := a.instances ++ b.instances }
+
+/-- How deep teams may nest.
+
+    A team that instantiates itself, directly or through another, describes an
+    infinite program. Nothing else in the language recurses, so rather than
+    tracking the path this stops at a depth no honest program reaches and says
+    what it suspects. -/
+private def maxNesting : Nat := 32
+
+private partial def elaborateInstance
+    (teams : Array TeamDecl) (depth : Nat) (parent : String) (inst : Instance) :
+    Except String Elaborated := do
+  if depth > maxNesting then
+    throw s!"team instantiation nests more than {maxNesting} deep at '{inst.name}'; \
+      is a team instantiating itself?"
   let decl ← match teams.find? (·.name == inst.team) with
     | some decl => pure decl
     | none => throw s!"instance '{inst.name}' names unknown team '{inst.team}'"
   let bindings ← bindArguments decl inst
+  -- The path from `main` down to here. Qualifying by it rather than by the
+  -- instance's own name is the whole of nesting: `b.a.out` and `c.a.out` are
+  -- different ports of different copies of the same team.
+  let path := if parent.isEmpty then inst.name else s!"{parent}.{inst.name}"
+  ensureUnique "instance" (decl.instances.map (·.name))
   let agents := decl.agents.map fun agent =>
-    { agent with name := qualify inst.name agent.name, instance_ := inst.name }
+    { agent with name := qualify path agent.name, instance_ := path }
   let ports := decl.ports.map fun port =>
-    { port with name := qualify inst.name port.name, instance_ := inst.name }
+    { port with name := qualify path port.name, instance_ := path }
   let timers := decl.timers.map fun timer =>
-    { timer with name := qualify inst.name timer.name, instance_ := inst.name }
+    { timer with name := qualify path timer.name, instance_ := path }
+  -- An endpoint written `a.out` is already the nested instance's local name,
+  -- so prefixing the path is all it takes to reach `b.a.out`.
   let connections := decl.connections.map fun connection =>
     { connection with
-        source := qualify inst.name connection.source
-        target := qualify inst.name connection.target }
+        source := qualify path connection.source
+        target := qualify path connection.target }
   let reactions := decl.reactions.map fun reaction =>
     { reaction with
-        id := qualify inst.name reaction.id
-        agent := qualify inst.name reaction.agent
-        triggers := reaction.triggers.map (qualify inst.name)
-        effects := reaction.effects.map (qualify inst.name)
-        instance_ := inst.name
-        contract := qualifyContract inst.name decl.ports reaction.contract
+        id := qualify path reaction.id
+        agent := qualify path reaction.agent
+        triggers := reaction.triggers.map (qualify path)
+        effects := reaction.effects.map (qualify path)
+        instance_ := path
+        contract := qualifyContract path decl.ports reaction.contract
         prompt :=
-          substitute bindings (qualifyPrompt inst.name decl.ports decl.timers reaction.prompt) }
-  pure (agents, ports, timers, connections, reactions)
+          substitute bindings
+            (qualifyPrompt path decl.ports decl.timers reaction.triggers reaction.prompt) }
+  let own : Elaborated :=
+    { agents, ports, timers, connections, reactions
+      instances := #[{ name := path, team := inst.team, parent }] }
+  decl.instances.foldlM
+    (fun acc nested => do
+      pure (acc.append (← elaborateInstance teams (depth + 1) path nested)))
+    own
 
 private def elaborate (programName : String) (teams : Array TeamDecl) (main : Main) :
     Except String Program := do
@@ -577,19 +665,20 @@ private def elaborate (programName : String) (teams : Array TeamDecl) (main : Ma
     for side in #[connection.sourceInstance, connection.targetInstance] do
       if !containsName instanceNames side then
         throw s!"main connection names unknown instance '{side}'"
-  let parts ← main.instances.mapM (elaborateInstance teams)
+  let parts ← main.instances.mapM (elaborateInstance teams 0 "")
   let wired := main.connections.map fun connection =>
     { source := qualify connection.sourceInstance connection.sourcePort
       target := qualify connection.targetInstance connection.targetPort
       delay := connection.delay : Connection }
+  let whole := parts.foldl Elaborated.append {}
   pure {
     team := programName
-    instances := main.instances.map fun inst => { name := inst.name, team := inst.team }
-    agents := parts.foldl (fun acc part => acc ++ part.1) #[]
-    ports := parts.foldl (fun acc part => acc ++ part.2.1) #[]
-    timers := parts.foldl (fun acc part => acc ++ part.2.2.1) #[]
-    connections := parts.foldl (fun acc part => acc ++ part.2.2.2.1) #[] ++ wired
-    reactions := parts.foldl (fun acc part => acc ++ part.2.2.2.2) #[]
+    instances := whole.instances
+    agents := whole.agents
+    ports := whole.ports
+    timers := whole.timers
+    connections := whole.connections ++ wired
+    reactions := whole.reactions
   }
 
 /-- `programName` is the fallback when `main` is not named: the source file,
@@ -623,6 +712,7 @@ def compile (program : Program) : String :=
   let instances := program.instances.map fun inst =>
     instruction "declare_instance" [
       ("name", toJson inst.name),
+      ("parent", toJson inst.parent),
       ("team", toJson inst.team)
     ]
   let agents := program.agents.map fun agent =>
