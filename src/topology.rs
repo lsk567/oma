@@ -2101,6 +2101,56 @@ mod tests {
         assert_eq!(outputs, BTreeMap::from([("note".into(), json!("tick"))]));
     }
 
+
+    /// Reproduces the operator's report: a periodic timer that only fires once
+    /// in a real compiled program (two instances, qualified names, a connection).
+    #[test]
+    fn a_periodic_timer_re_arms_in_a_real_two_instance_program() {
+        let bytecode: Bytecode = serde_json::from_str(
+            r#"{"version": 1, "team": "Heartbeat", "instructions": [{"op": "begin_plan", "team": "Heartbeat"}, {"op": "declare_instance", "name": "pulse", "parent": "", "team": "Pulse"}, {"op": "declare_instance", "name": "watch", "parent": "", "team": "Watch"}, {"op": "spawn_agent", "instance": "pulse", "name": "pulse.monitor", "backend": "ClaudeCode"}, {"op": "spawn_agent", "instance": "watch", "name": "watch.watcher", "backend": "ClaudeCode"}, {"op": "define_port", "instance": "pulse", "kind": "output", "name": "pulse.reading", "type": "string"}, {"op": "define_port", "instance": "watch", "kind": "input", "name": "watch.reading", "type": "string"}, {"op": "define_port", "instance": "watch", "kind": "output", "name": "watch.verdict", "type": "string"}, {"op": "declare_timer", "instance": "pulse", "name": "pulse.tick", "offset": 0, "period": 10}, {"op": "connect_ports", "source": "pulse.reading", "target": "watch.reading", "delay": 0}, {"op": "install_reaction", "instance": "pulse", "id": "pulse.reaction.0", "agent": "pulse.monitor", "triggers": ["pulse.tick"], "effects": ["pulse.reading"], "contract": "pulse.reading", "prompt": "p"}, {"op": "install_reaction", "instance": "watch", "id": "watch.reaction.0", "agent": "watch.watcher", "triggers": ["watch.reading"], "effects": ["watch.verdict"], "contract": "watch.verdict", "prompt": "p"}, {"op": "commit_plan"}]}"#,
+        )
+        .unwrap();
+        let state = verify(&bytecode).unwrap();
+
+        struct Stub {
+            fired: Mutex<Vec<(String, u64)>>,
+        }
+        impl ReactionExecutor for Stub {
+            fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+                self.fired.lock().unwrap().push((
+                    invocation.reaction_id.clone(),
+                    invocation
+                        .trigger_values
+                        .values()
+                        .next()
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                ));
+                let effect = invocation.allowed_effects.keys().next().unwrap().clone();
+                let writes = BTreeMap::from([(effect, json!("x"))]);
+                validate_contract(&invocation.contract, &writes)?;
+                Ok(writes)
+            }
+        }
+
+        let executor = Stub {
+            fired: Mutex::new(Vec::new()),
+        };
+        let result = run_event_loop(&state, BTreeMap::new(), &executor);
+        let fired = executor.fired.lock().unwrap().clone();
+        let ticks: Vec<_> = fired
+            .iter()
+            .filter(|(id, _)| id == "pulse.reaction.0")
+            .collect();
+        panic!(
+            "run result: {:?}\ntotal invocations: {}\npulse ticks: {}\nfirst 8: {:?}",
+            result.as_ref().map(|_| "ok").map_err(|e| e.to_string()),
+            fired.len(),
+            ticks.len(),
+            &fired[..fired.len().min(8)]
+        );
+    }
+
     #[test]
     fn a_periodic_timer_re_arms_itself_at_every_period() {
         let state = verify(&timer_bytecode(0, 10)).unwrap();
