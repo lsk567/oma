@@ -1,0 +1,3023 @@
+{
+ "agents": [
+  {
+   "backend": "Claude",
+   "id": "agent::aw.agent",
+   "instance": "aw",
+   "name": "aw.agent"
+  },
+  {
+   "backend": "Codex",
+   "id": "agent::ax.agent",
+   "instance": "ax",
+   "name": "ax.agent"
+  },
+  {
+   "backend": "Cursor",
+   "id": "agent::ay.agent",
+   "instance": "ay",
+   "name": "ay.agent"
+  },
+  {
+   "backend": "OpenCode",
+   "id": "agent::az.agent",
+   "instance": "az",
+   "name": "az.agent"
+  },
+  {
+   "backend": "Codex",
+   "id": "agent::close.checker",
+   "instance": "close",
+   "name": "close.checker"
+  },
+  {
+   "backend": "Claude",
+   "id": "agent::close.editor",
+   "instance": "close",
+   "name": "close.editor"
+  },
+  {
+   "backend": "Cursor",
+   "id": "agent::close.publisher",
+   "instance": "close",
+   "name": "close.publisher"
+  },
+  {
+   "backend": "Claude",
+   "id": "agent::coord.agent",
+   "instance": "coord",
+   "name": "coord.agent"
+  },
+  {
+   "backend": "Claude",
+   "id": "agent::e1.agent",
+   "instance": "e1",
+   "name": "e1.agent"
+  },
+  {
+   "backend": "Cursor",
+   "id": "agent::e10.agent",
+   "instance": "e10",
+   "name": "e10.agent"
+  },
+  {
+   "backend": "Cursor",
+   "id": "agent::e11.agent",
+   "instance": "e11",
+   "name": "e11.agent"
+  },
+  {
+   "backend": "Cursor",
+   "id": "agent::e12.agent",
+   "instance": "e12",
+   "name": "e12.agent"
+  },
+  {
+   "backend": "OpenCode",
+   "id": "agent::e13.agent",
+   "instance": "e13",
+   "name": "e13.agent"
+  },
+  {
+   "backend": "OpenCode",
+   "id": "agent::e14.agent",
+   "instance": "e14",
+   "name": "e14.agent"
+  },
+  {
+   "backend": "OpenCode",
+   "id": "agent::e15.agent",
+   "instance": "e15",
+   "name": "e15.agent"
+  },
+  {
+   "backend": "OpenCode",
+   "id": "agent::e16.agent",
+   "instance": "e16",
+   "name": "e16.agent"
+  },
+  {
+   "backend": "Claude",
+   "id": "agent::e2.agent",
+   "instance": "e2",
+   "name": "e2.agent"
+  },
+  {
+   "backend": "Claude",
+   "id": "agent::e3.agent",
+   "instance": "e3",
+   "name": "e3.agent"
+  },
+  {
+   "backend": "Claude",
+   "id": "agent::e4.agent",
+   "instance": "e4",
+   "name": "e4.agent"
+  },
+  {
+   "backend": "Codex",
+   "id": "agent::e5.agent",
+   "instance": "e5",
+   "name": "e5.agent"
+  },
+  {
+   "backend": "Codex",
+   "id": "agent::e6.agent",
+   "instance": "e6",
+   "name": "e6.agent"
+  },
+  {
+   "backend": "Codex",
+   "id": "agent::e7.agent",
+   "instance": "e7",
+   "name": "e7.agent"
+  },
+  {
+   "backend": "Codex",
+   "id": "agent::e8.agent",
+   "instance": "e8",
+   "name": "e8.agent"
+  },
+  {
+   "backend": "Cursor",
+   "id": "agent::e9.agent",
+   "instance": "e9",
+   "name": "e9.agent"
+  },
+  {
+   "backend": "Claude",
+   "id": "agent::g1.agent",
+   "instance": "g1",
+   "name": "g1.agent"
+  },
+  {
+   "backend": "Codex",
+   "id": "agent::g2.agent",
+   "instance": "g2",
+   "name": "g2.agent"
+  },
+  {
+   "backend": "Cursor",
+   "id": "agent::g3.agent",
+   "instance": "g3",
+   "name": "g3.agent"
+  },
+  {
+   "backend": "OpenCode",
+   "id": "agent::g4.agent",
+   "instance": "g4",
+   "name": "g4.agent"
+  },
+  {
+   "backend": "Claude",
+   "id": "agent::g5.agent",
+   "instance": "g5",
+   "name": "g5.agent"
+  },
+  {
+   "backend": "Codex",
+   "id": "agent::g6.agent",
+   "instance": "g6",
+   "name": "g6.agent"
+  },
+  {
+   "backend": "Cursor",
+   "id": "agent::g7.agent",
+   "instance": "g7",
+   "name": "g7.agent"
+  },
+  {
+   "backend": "OpenCode",
+   "id": "agent::g8.agent",
+   "instance": "g8",
+   "name": "g8.agent"
+  },
+  {
+   "backend": "Claude",
+   "id": "agent::lead1.agent",
+   "instance": "lead1",
+   "name": "lead1.agent"
+  },
+  {
+   "backend": "Codex",
+   "id": "agent::lead2.agent",
+   "instance": "lead2",
+   "name": "lead2.agent"
+  },
+  {
+   "backend": "Claude",
+   "id": "agent::lead3.agent",
+   "instance": "lead3",
+   "name": "lead3.agent"
+  },
+  {
+   "backend": "Codex",
+   "id": "agent::lead4.agent",
+   "instance": "lead4",
+   "name": "lead4.agent"
+  },
+  {
+   "backend": "Claude",
+   "id": "agent::syn.agent",
+   "instance": "syn",
+   "name": "syn.agent"
+  }
+ ],
+ "current_tag": null,
+ "edges": [
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e1.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e1.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e2.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e2.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e3.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e3.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e4.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e4.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e5.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e5.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e6.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e6.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e7.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e7.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e8.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e8.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e9.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e9.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e10.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e10.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e11.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e11.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e12.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e12.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e13.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e13.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e14.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e14.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e15.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e15.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.spec::e16.spec",
+   "kind": "connection",
+   "source": "port::coord.spec",
+   "target": "port::e16.spec"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e1.note::g1.n1",
+   "kind": "connection",
+   "source": "port::e1.note",
+   "target": "port::g1.n1"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e2.note::g1.n2",
+   "kind": "connection",
+   "source": "port::e2.note",
+   "target": "port::g1.n2"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e3.note::g2.n1",
+   "kind": "connection",
+   "source": "port::e3.note",
+   "target": "port::g2.n1"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e4.note::g2.n2",
+   "kind": "connection",
+   "source": "port::e4.note",
+   "target": "port::g2.n2"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e5.note::g3.n1",
+   "kind": "connection",
+   "source": "port::e5.note",
+   "target": "port::g3.n1"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e6.note::g3.n2",
+   "kind": "connection",
+   "source": "port::e6.note",
+   "target": "port::g3.n2"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e7.note::g4.n1",
+   "kind": "connection",
+   "source": "port::e7.note",
+   "target": "port::g4.n1"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e8.note::g4.n2",
+   "kind": "connection",
+   "source": "port::e8.note",
+   "target": "port::g4.n2"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e9.note::g5.n1",
+   "kind": "connection",
+   "source": "port::e9.note",
+   "target": "port::g5.n1"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e10.note::g5.n2",
+   "kind": "connection",
+   "source": "port::e10.note",
+   "target": "port::g5.n2"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e11.note::g6.n1",
+   "kind": "connection",
+   "source": "port::e11.note",
+   "target": "port::g6.n1"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e12.note::g6.n2",
+   "kind": "connection",
+   "source": "port::e12.note",
+   "target": "port::g6.n2"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e13.note::g7.n1",
+   "kind": "connection",
+   "source": "port::e13.note",
+   "target": "port::g7.n1"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e14.note::g7.n2",
+   "kind": "connection",
+   "source": "port::e14.note",
+   "target": "port::g7.n2"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e15.note::g8.n1",
+   "kind": "connection",
+   "source": "port::e15.note",
+   "target": "port::g8.n1"
+  },
+  {
+   "delay": 0,
+   "id": "connection::e16.note::g8.n2",
+   "kind": "connection",
+   "source": "port::e16.note",
+   "target": "port::g8.n2"
+  },
+  {
+   "delay": 0,
+   "id": "connection::g1.digest::lead1.d1",
+   "kind": "connection",
+   "source": "port::g1.digest",
+   "target": "port::lead1.d1"
+  },
+  {
+   "delay": 0,
+   "id": "connection::g2.digest::lead1.d2",
+   "kind": "connection",
+   "source": "port::g2.digest",
+   "target": "port::lead1.d2"
+  },
+  {
+   "delay": 0,
+   "id": "connection::g3.digest::lead2.d1",
+   "kind": "connection",
+   "source": "port::g3.digest",
+   "target": "port::lead2.d1"
+  },
+  {
+   "delay": 0,
+   "id": "connection::g4.digest::lead2.d2",
+   "kind": "connection",
+   "source": "port::g4.digest",
+   "target": "port::lead2.d2"
+  },
+  {
+   "delay": 0,
+   "id": "connection::g5.digest::lead3.d1",
+   "kind": "connection",
+   "source": "port::g5.digest",
+   "target": "port::lead3.d1"
+  },
+  {
+   "delay": 0,
+   "id": "connection::g6.digest::lead3.d2",
+   "kind": "connection",
+   "source": "port::g6.digest",
+   "target": "port::lead3.d2"
+  },
+  {
+   "delay": 0,
+   "id": "connection::g7.digest::lead4.d1",
+   "kind": "connection",
+   "source": "port::g7.digest",
+   "target": "port::lead4.d1"
+  },
+  {
+   "delay": 0,
+   "id": "connection::g8.digest::lead4.d2",
+   "kind": "connection",
+   "source": "port::g8.digest",
+   "target": "port::lead4.d2"
+  },
+  {
+   "delay": 0,
+   "id": "connection::lead1.sector_view::syn.s1",
+   "kind": "connection",
+   "source": "port::lead1.sector_view",
+   "target": "port::syn.s1"
+  },
+  {
+   "delay": 0,
+   "id": "connection::lead2.sector_view::syn.s2",
+   "kind": "connection",
+   "source": "port::lead2.sector_view",
+   "target": "port::syn.s2"
+  },
+  {
+   "delay": 0,
+   "id": "connection::lead3.sector_view::syn.s3",
+   "kind": "connection",
+   "source": "port::lead3.sector_view",
+   "target": "port::syn.s3"
+  },
+  {
+   "delay": 0,
+   "id": "connection::lead4.sector_view::syn.s4",
+   "kind": "connection",
+   "source": "port::lead4.sector_view",
+   "target": "port::syn.s4"
+  },
+  {
+   "delay": 0,
+   "id": "connection::syn.synthesis::ax.synthesis",
+   "kind": "connection",
+   "source": "port::syn.synthesis",
+   "target": "port::ax.synthesis"
+  },
+  {
+   "delay": 0,
+   "id": "connection::syn.synthesis::ay.synthesis",
+   "kind": "connection",
+   "source": "port::syn.synthesis",
+   "target": "port::ay.synthesis"
+  },
+  {
+   "delay": 0,
+   "id": "connection::syn.synthesis::az.synthesis",
+   "kind": "connection",
+   "source": "port::syn.synthesis",
+   "target": "port::az.synthesis"
+  },
+  {
+   "delay": 0,
+   "id": "connection::syn.synthesis::aw.synthesis",
+   "kind": "connection",
+   "source": "port::syn.synthesis",
+   "target": "port::aw.synthesis"
+  },
+  {
+   "delay": 0,
+   "id": "connection::ax.finding::coord.red",
+   "kind": "connection",
+   "source": "port::ax.finding",
+   "target": "port::coord.red"
+  },
+  {
+   "delay": 0,
+   "id": "connection::ay.finding::coord.blue",
+   "kind": "connection",
+   "source": "port::ay.finding",
+   "target": "port::coord.blue"
+  },
+  {
+   "delay": 0,
+   "id": "connection::az.finding::coord.black",
+   "kind": "connection",
+   "source": "port::az.finding",
+   "target": "port::coord.black"
+  },
+  {
+   "delay": 0,
+   "id": "connection::aw.finding::coord.yellow",
+   "kind": "connection",
+   "source": "port::aw.finding",
+   "target": "port::coord.yellow"
+  },
+  {
+   "delay": 0,
+   "id": "connection::coord.report::close.report",
+   "kind": "connection",
+   "source": "port::coord.report",
+   "target": "port::close.report"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::aw.synthesis::aw.reaction.0",
+   "kind": "trigger",
+   "source": "port::aw.synthesis",
+   "target": "reaction::aw.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::aw.reaction.0::aw.finding",
+   "kind": "effect",
+   "source": "reaction::aw.reaction.0",
+   "target": "port::aw.finding"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::ax.synthesis::ax.reaction.0",
+   "kind": "trigger",
+   "source": "port::ax.synthesis",
+   "target": "reaction::ax.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::ax.reaction.0::ax.finding",
+   "kind": "effect",
+   "source": "reaction::ax.reaction.0",
+   "target": "port::ax.finding"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::ay.synthesis::ay.reaction.0",
+   "kind": "trigger",
+   "source": "port::ay.synthesis",
+   "target": "reaction::ay.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::ay.reaction.0::ay.finding",
+   "kind": "effect",
+   "source": "reaction::ay.reaction.0",
+   "target": "port::ay.finding"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::az.synthesis::az.reaction.0",
+   "kind": "trigger",
+   "source": "port::az.synthesis",
+   "target": "reaction::az.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::az.reaction.0::az.finding",
+   "kind": "effect",
+   "source": "reaction::az.reaction.0",
+   "target": "port::az.finding"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::close.report::close.reaction.0",
+   "kind": "trigger",
+   "source": "port::close.report",
+   "target": "reaction::close.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::close.reaction.0::close.draft",
+   "kind": "effect",
+   "source": "reaction::close.reaction.0",
+   "target": "port::close.draft"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::close.draft::close.reaction.1",
+   "kind": "trigger",
+   "source": "port::close.draft",
+   "target": "reaction::close.reaction.1"
+  },
+  {
+   "delay": 0,
+   "id": "effect::close.reaction.1::close.verdict",
+   "kind": "effect",
+   "source": "reaction::close.reaction.1",
+   "target": "port::close.verdict"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::close.draft::close.reaction.2",
+   "kind": "trigger",
+   "source": "port::close.draft",
+   "target": "reaction::close.reaction.2"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::close.verdict::close.reaction.2",
+   "kind": "trigger",
+   "source": "port::close.verdict",
+   "target": "reaction::close.reaction.2"
+  },
+  {
+   "delay": 0,
+   "id": "effect::close.reaction.2::close.summary",
+   "kind": "effect",
+   "source": "reaction::close.reaction.2",
+   "target": "port::close.summary"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::coord.topic::coord.reaction.0",
+   "kind": "trigger",
+   "source": "port::coord.topic",
+   "target": "reaction::coord.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::coord.max_rounds::coord.reaction.0",
+   "kind": "trigger",
+   "source": "port::coord.max_rounds",
+   "target": "reaction::coord.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::coord.reaction.0::coord.spec",
+   "kind": "effect",
+   "source": "reaction::coord.reaction.0",
+   "target": "port::coord.spec"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::coord.red::coord.reaction.1",
+   "kind": "trigger",
+   "source": "port::coord.red",
+   "target": "reaction::coord.reaction.1"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::coord.blue::coord.reaction.1",
+   "kind": "trigger",
+   "source": "port::coord.blue",
+   "target": "reaction::coord.reaction.1"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::coord.black::coord.reaction.1",
+   "kind": "trigger",
+   "source": "port::coord.black",
+   "target": "reaction::coord.reaction.1"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::coord.yellow::coord.reaction.1",
+   "kind": "trigger",
+   "source": "port::coord.yellow",
+   "target": "reaction::coord.reaction.1"
+  },
+  {
+   "delay": 0,
+   "id": "effect::coord.reaction.1::coord.spec",
+   "kind": "effect",
+   "source": "reaction::coord.reaction.1",
+   "target": "port::coord.spec"
+  },
+  {
+   "delay": 0,
+   "id": "effect::coord.reaction.1::coord.report",
+   "kind": "effect",
+   "source": "reaction::coord.reaction.1",
+   "target": "port::coord.report"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e1.spec::e1.reaction.0",
+   "kind": "trigger",
+   "source": "port::e1.spec",
+   "target": "reaction::e1.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e1.reaction.0::e1.note",
+   "kind": "effect",
+   "source": "reaction::e1.reaction.0",
+   "target": "port::e1.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e10.spec::e10.reaction.0",
+   "kind": "trigger",
+   "source": "port::e10.spec",
+   "target": "reaction::e10.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e10.reaction.0::e10.note",
+   "kind": "effect",
+   "source": "reaction::e10.reaction.0",
+   "target": "port::e10.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e11.spec::e11.reaction.0",
+   "kind": "trigger",
+   "source": "port::e11.spec",
+   "target": "reaction::e11.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e11.reaction.0::e11.note",
+   "kind": "effect",
+   "source": "reaction::e11.reaction.0",
+   "target": "port::e11.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e12.spec::e12.reaction.0",
+   "kind": "trigger",
+   "source": "port::e12.spec",
+   "target": "reaction::e12.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e12.reaction.0::e12.note",
+   "kind": "effect",
+   "source": "reaction::e12.reaction.0",
+   "target": "port::e12.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e13.spec::e13.reaction.0",
+   "kind": "trigger",
+   "source": "port::e13.spec",
+   "target": "reaction::e13.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e13.reaction.0::e13.note",
+   "kind": "effect",
+   "source": "reaction::e13.reaction.0",
+   "target": "port::e13.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e14.spec::e14.reaction.0",
+   "kind": "trigger",
+   "source": "port::e14.spec",
+   "target": "reaction::e14.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e14.reaction.0::e14.note",
+   "kind": "effect",
+   "source": "reaction::e14.reaction.0",
+   "target": "port::e14.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e15.spec::e15.reaction.0",
+   "kind": "trigger",
+   "source": "port::e15.spec",
+   "target": "reaction::e15.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e15.reaction.0::e15.note",
+   "kind": "effect",
+   "source": "reaction::e15.reaction.0",
+   "target": "port::e15.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e16.spec::e16.reaction.0",
+   "kind": "trigger",
+   "source": "port::e16.spec",
+   "target": "reaction::e16.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e16.reaction.0::e16.note",
+   "kind": "effect",
+   "source": "reaction::e16.reaction.0",
+   "target": "port::e16.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e2.spec::e2.reaction.0",
+   "kind": "trigger",
+   "source": "port::e2.spec",
+   "target": "reaction::e2.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e2.reaction.0::e2.note",
+   "kind": "effect",
+   "source": "reaction::e2.reaction.0",
+   "target": "port::e2.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e3.spec::e3.reaction.0",
+   "kind": "trigger",
+   "source": "port::e3.spec",
+   "target": "reaction::e3.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e3.reaction.0::e3.note",
+   "kind": "effect",
+   "source": "reaction::e3.reaction.0",
+   "target": "port::e3.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e4.spec::e4.reaction.0",
+   "kind": "trigger",
+   "source": "port::e4.spec",
+   "target": "reaction::e4.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e4.reaction.0::e4.note",
+   "kind": "effect",
+   "source": "reaction::e4.reaction.0",
+   "target": "port::e4.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e5.spec::e5.reaction.0",
+   "kind": "trigger",
+   "source": "port::e5.spec",
+   "target": "reaction::e5.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e5.reaction.0::e5.note",
+   "kind": "effect",
+   "source": "reaction::e5.reaction.0",
+   "target": "port::e5.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e6.spec::e6.reaction.0",
+   "kind": "trigger",
+   "source": "port::e6.spec",
+   "target": "reaction::e6.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e6.reaction.0::e6.note",
+   "kind": "effect",
+   "source": "reaction::e6.reaction.0",
+   "target": "port::e6.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e7.spec::e7.reaction.0",
+   "kind": "trigger",
+   "source": "port::e7.spec",
+   "target": "reaction::e7.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e7.reaction.0::e7.note",
+   "kind": "effect",
+   "source": "reaction::e7.reaction.0",
+   "target": "port::e7.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e8.spec::e8.reaction.0",
+   "kind": "trigger",
+   "source": "port::e8.spec",
+   "target": "reaction::e8.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e8.reaction.0::e8.note",
+   "kind": "effect",
+   "source": "reaction::e8.reaction.0",
+   "target": "port::e8.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::e9.spec::e9.reaction.0",
+   "kind": "trigger",
+   "source": "port::e9.spec",
+   "target": "reaction::e9.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::e9.reaction.0::e9.note",
+   "kind": "effect",
+   "source": "reaction::e9.reaction.0",
+   "target": "port::e9.note"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g1.n1::g1.reaction.0",
+   "kind": "trigger",
+   "source": "port::g1.n1",
+   "target": "reaction::g1.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g1.n2::g1.reaction.0",
+   "kind": "trigger",
+   "source": "port::g1.n2",
+   "target": "reaction::g1.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::g1.reaction.0::g1.digest",
+   "kind": "effect",
+   "source": "reaction::g1.reaction.0",
+   "target": "port::g1.digest"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g2.n1::g2.reaction.0",
+   "kind": "trigger",
+   "source": "port::g2.n1",
+   "target": "reaction::g2.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g2.n2::g2.reaction.0",
+   "kind": "trigger",
+   "source": "port::g2.n2",
+   "target": "reaction::g2.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::g2.reaction.0::g2.digest",
+   "kind": "effect",
+   "source": "reaction::g2.reaction.0",
+   "target": "port::g2.digest"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g3.n1::g3.reaction.0",
+   "kind": "trigger",
+   "source": "port::g3.n1",
+   "target": "reaction::g3.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g3.n2::g3.reaction.0",
+   "kind": "trigger",
+   "source": "port::g3.n2",
+   "target": "reaction::g3.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::g3.reaction.0::g3.digest",
+   "kind": "effect",
+   "source": "reaction::g3.reaction.0",
+   "target": "port::g3.digest"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g4.n1::g4.reaction.0",
+   "kind": "trigger",
+   "source": "port::g4.n1",
+   "target": "reaction::g4.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g4.n2::g4.reaction.0",
+   "kind": "trigger",
+   "source": "port::g4.n2",
+   "target": "reaction::g4.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::g4.reaction.0::g4.digest",
+   "kind": "effect",
+   "source": "reaction::g4.reaction.0",
+   "target": "port::g4.digest"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g5.n1::g5.reaction.0",
+   "kind": "trigger",
+   "source": "port::g5.n1",
+   "target": "reaction::g5.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g5.n2::g5.reaction.0",
+   "kind": "trigger",
+   "source": "port::g5.n2",
+   "target": "reaction::g5.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::g5.reaction.0::g5.digest",
+   "kind": "effect",
+   "source": "reaction::g5.reaction.0",
+   "target": "port::g5.digest"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g6.n1::g6.reaction.0",
+   "kind": "trigger",
+   "source": "port::g6.n1",
+   "target": "reaction::g6.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g6.n2::g6.reaction.0",
+   "kind": "trigger",
+   "source": "port::g6.n2",
+   "target": "reaction::g6.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::g6.reaction.0::g6.digest",
+   "kind": "effect",
+   "source": "reaction::g6.reaction.0",
+   "target": "port::g6.digest"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g7.n1::g7.reaction.0",
+   "kind": "trigger",
+   "source": "port::g7.n1",
+   "target": "reaction::g7.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g7.n2::g7.reaction.0",
+   "kind": "trigger",
+   "source": "port::g7.n2",
+   "target": "reaction::g7.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::g7.reaction.0::g7.digest",
+   "kind": "effect",
+   "source": "reaction::g7.reaction.0",
+   "target": "port::g7.digest"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g8.n1::g8.reaction.0",
+   "kind": "trigger",
+   "source": "port::g8.n1",
+   "target": "reaction::g8.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::g8.n2::g8.reaction.0",
+   "kind": "trigger",
+   "source": "port::g8.n2",
+   "target": "reaction::g8.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::g8.reaction.0::g8.digest",
+   "kind": "effect",
+   "source": "reaction::g8.reaction.0",
+   "target": "port::g8.digest"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::lead1.d1::lead1.reaction.0",
+   "kind": "trigger",
+   "source": "port::lead1.d1",
+   "target": "reaction::lead1.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::lead1.d2::lead1.reaction.0",
+   "kind": "trigger",
+   "source": "port::lead1.d2",
+   "target": "reaction::lead1.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::lead1.reaction.0::lead1.sector_view",
+   "kind": "effect",
+   "source": "reaction::lead1.reaction.0",
+   "target": "port::lead1.sector_view"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::lead2.d1::lead2.reaction.0",
+   "kind": "trigger",
+   "source": "port::lead2.d1",
+   "target": "reaction::lead2.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::lead2.d2::lead2.reaction.0",
+   "kind": "trigger",
+   "source": "port::lead2.d2",
+   "target": "reaction::lead2.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::lead2.reaction.0::lead2.sector_view",
+   "kind": "effect",
+   "source": "reaction::lead2.reaction.0",
+   "target": "port::lead2.sector_view"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::lead3.d1::lead3.reaction.0",
+   "kind": "trigger",
+   "source": "port::lead3.d1",
+   "target": "reaction::lead3.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::lead3.d2::lead3.reaction.0",
+   "kind": "trigger",
+   "source": "port::lead3.d2",
+   "target": "reaction::lead3.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::lead3.reaction.0::lead3.sector_view",
+   "kind": "effect",
+   "source": "reaction::lead3.reaction.0",
+   "target": "port::lead3.sector_view"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::lead4.d1::lead4.reaction.0",
+   "kind": "trigger",
+   "source": "port::lead4.d1",
+   "target": "reaction::lead4.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::lead4.d2::lead4.reaction.0",
+   "kind": "trigger",
+   "source": "port::lead4.d2",
+   "target": "reaction::lead4.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::lead4.reaction.0::lead4.sector_view",
+   "kind": "effect",
+   "source": "reaction::lead4.reaction.0",
+   "target": "port::lead4.sector_view"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::syn.s1::syn.reaction.0",
+   "kind": "trigger",
+   "source": "port::syn.s1",
+   "target": "reaction::syn.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::syn.s2::syn.reaction.0",
+   "kind": "trigger",
+   "source": "port::syn.s2",
+   "target": "reaction::syn.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::syn.s3::syn.reaction.0",
+   "kind": "trigger",
+   "source": "port::syn.s3",
+   "target": "reaction::syn.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::syn.s4::syn.reaction.0",
+   "kind": "trigger",
+   "source": "port::syn.s4",
+   "target": "reaction::syn.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::syn.reaction.0::syn.synthesis",
+   "kind": "effect",
+   "source": "reaction::syn.reaction.0",
+   "target": "port::syn.synthesis"
+  }
+ ],
+ "instances": [
+  {
+   "id": "instance::aw",
+   "name": "aw",
+   "team": "AdversaryW"
+  },
+  {
+   "id": "instance::ax",
+   "name": "ax",
+   "team": "AdversaryX"
+  },
+  {
+   "id": "instance::ay",
+   "name": "ay",
+   "team": "AdversaryY"
+  },
+  {
+   "id": "instance::az",
+   "name": "az",
+   "team": "AdversaryZ"
+  },
+  {
+   "id": "instance::close",
+   "name": "close",
+   "team": "Closer"
+  },
+  {
+   "id": "instance::coord",
+   "name": "coord",
+   "team": "Coordinator"
+  },
+  {
+   "id": "instance::e1",
+   "name": "e1",
+   "team": "ExplorerC"
+  },
+  {
+   "id": "instance::e10",
+   "name": "e10",
+   "team": "ExplorerU"
+  },
+  {
+   "id": "instance::e11",
+   "name": "e11",
+   "team": "ExplorerU"
+  },
+  {
+   "id": "instance::e12",
+   "name": "e12",
+   "team": "ExplorerU"
+  },
+  {
+   "id": "instance::e13",
+   "name": "e13",
+   "team": "ExplorerO"
+  },
+  {
+   "id": "instance::e14",
+   "name": "e14",
+   "team": "ExplorerO"
+  },
+  {
+   "id": "instance::e15",
+   "name": "e15",
+   "team": "ExplorerO"
+  },
+  {
+   "id": "instance::e16",
+   "name": "e16",
+   "team": "ExplorerO"
+  },
+  {
+   "id": "instance::e2",
+   "name": "e2",
+   "team": "ExplorerC"
+  },
+  {
+   "id": "instance::e3",
+   "name": "e3",
+   "team": "ExplorerC"
+  },
+  {
+   "id": "instance::e4",
+   "name": "e4",
+   "team": "ExplorerC"
+  },
+  {
+   "id": "instance::e5",
+   "name": "e5",
+   "team": "ExplorerX"
+  },
+  {
+   "id": "instance::e6",
+   "name": "e6",
+   "team": "ExplorerX"
+  },
+  {
+   "id": "instance::e7",
+   "name": "e7",
+   "team": "ExplorerX"
+  },
+  {
+   "id": "instance::e8",
+   "name": "e8",
+   "team": "ExplorerX"
+  },
+  {
+   "id": "instance::e9",
+   "name": "e9",
+   "team": "ExplorerU"
+  },
+  {
+   "id": "instance::g1",
+   "name": "g1",
+   "team": "AggregatorA"
+  },
+  {
+   "id": "instance::g2",
+   "name": "g2",
+   "team": "AggregatorB"
+  },
+  {
+   "id": "instance::g3",
+   "name": "g3",
+   "team": "AggregatorU"
+  },
+  {
+   "id": "instance::g4",
+   "name": "g4",
+   "team": "AggregatorO"
+  },
+  {
+   "id": "instance::g5",
+   "name": "g5",
+   "team": "AggregatorA"
+  },
+  {
+   "id": "instance::g6",
+   "name": "g6",
+   "team": "AggregatorB"
+  },
+  {
+   "id": "instance::g7",
+   "name": "g7",
+   "team": "AggregatorU"
+  },
+  {
+   "id": "instance::g8",
+   "name": "g8",
+   "team": "AggregatorO"
+  },
+  {
+   "id": "instance::lead1",
+   "name": "lead1",
+   "team": "SectorLeadA"
+  },
+  {
+   "id": "instance::lead2",
+   "name": "lead2",
+   "team": "SectorLeadB"
+  },
+  {
+   "id": "instance::lead3",
+   "name": "lead3",
+   "team": "SectorLeadA"
+  },
+  {
+   "id": "instance::lead4",
+   "name": "lead4",
+   "team": "SectorLeadB"
+  },
+  {
+   "id": "instance::syn",
+   "name": "syn",
+   "team": "Synthesizer"
+  }
+ ],
+ "ports": [
+  {
+   "delay": null,
+   "id": "port::aw.finding",
+   "instance": "aw",
+   "kind": "output",
+   "last_tag": null,
+   "name": "aw.finding",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::aw.synthesis",
+   "instance": "aw",
+   "kind": "input",
+   "last_tag": null,
+   "name": "aw.synthesis",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::ax.finding",
+   "instance": "ax",
+   "kind": "output",
+   "last_tag": null,
+   "name": "ax.finding",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::ax.synthesis",
+   "instance": "ax",
+   "kind": "input",
+   "last_tag": null,
+   "name": "ax.synthesis",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::ay.finding",
+   "instance": "ay",
+   "kind": "output",
+   "last_tag": null,
+   "name": "ay.finding",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::ay.synthesis",
+   "instance": "ay",
+   "kind": "input",
+   "last_tag": null,
+   "name": "ay.synthesis",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::az.finding",
+   "instance": "az",
+   "kind": "output",
+   "last_tag": null,
+   "name": "az.finding",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::az.synthesis",
+   "instance": "az",
+   "kind": "input",
+   "last_tag": null,
+   "name": "az.synthesis",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::close.draft",
+   "instance": "close",
+   "kind": "action",
+   "last_tag": null,
+   "name": "close.draft",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::close.report",
+   "instance": "close",
+   "kind": "input",
+   "last_tag": null,
+   "name": "close.report",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::close.summary",
+   "instance": "close",
+   "kind": "output",
+   "last_tag": null,
+   "name": "close.summary",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::close.verdict",
+   "instance": "close",
+   "kind": "action",
+   "last_tag": null,
+   "name": "close.verdict",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::coord.black",
+   "instance": "coord",
+   "kind": "input",
+   "last_tag": null,
+   "name": "coord.black",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::coord.blue",
+   "instance": "coord",
+   "kind": "input",
+   "last_tag": null,
+   "name": "coord.blue",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::coord.max_rounds",
+   "instance": "coord",
+   "kind": "input",
+   "last_tag": null,
+   "name": "coord.max_rounds",
+   "type": "int",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::coord.red",
+   "instance": "coord",
+   "kind": "input",
+   "last_tag": null,
+   "name": "coord.red",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::coord.report",
+   "instance": "coord",
+   "kind": "output",
+   "last_tag": null,
+   "name": "coord.report",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::coord.spec",
+   "instance": "coord",
+   "kind": "output",
+   "last_tag": null,
+   "name": "coord.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::coord.topic",
+   "instance": "coord",
+   "kind": "input",
+   "last_tag": null,
+   "name": "coord.topic",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::coord.yellow",
+   "instance": "coord",
+   "kind": "input",
+   "last_tag": null,
+   "name": "coord.yellow",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e1.note",
+   "instance": "e1",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e1.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e1.spec",
+   "instance": "e1",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e1.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e10.note",
+   "instance": "e10",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e10.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e10.spec",
+   "instance": "e10",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e10.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e11.note",
+   "instance": "e11",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e11.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e11.spec",
+   "instance": "e11",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e11.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e12.note",
+   "instance": "e12",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e12.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e12.spec",
+   "instance": "e12",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e12.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e13.note",
+   "instance": "e13",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e13.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e13.spec",
+   "instance": "e13",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e13.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e14.note",
+   "instance": "e14",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e14.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e14.spec",
+   "instance": "e14",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e14.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e15.note",
+   "instance": "e15",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e15.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e15.spec",
+   "instance": "e15",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e15.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e16.note",
+   "instance": "e16",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e16.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e16.spec",
+   "instance": "e16",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e16.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e2.note",
+   "instance": "e2",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e2.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e2.spec",
+   "instance": "e2",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e2.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e3.note",
+   "instance": "e3",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e3.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e3.spec",
+   "instance": "e3",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e3.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e4.note",
+   "instance": "e4",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e4.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e4.spec",
+   "instance": "e4",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e4.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e5.note",
+   "instance": "e5",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e5.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e5.spec",
+   "instance": "e5",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e5.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e6.note",
+   "instance": "e6",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e6.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e6.spec",
+   "instance": "e6",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e6.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e7.note",
+   "instance": "e7",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e7.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e7.spec",
+   "instance": "e7",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e7.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e8.note",
+   "instance": "e8",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e8.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e8.spec",
+   "instance": "e8",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e8.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e9.note",
+   "instance": "e9",
+   "kind": "output",
+   "last_tag": null,
+   "name": "e9.note",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::e9.spec",
+   "instance": "e9",
+   "kind": "input",
+   "last_tag": null,
+   "name": "e9.spec",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g1.digest",
+   "instance": "g1",
+   "kind": "output",
+   "last_tag": null,
+   "name": "g1.digest",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g1.n1",
+   "instance": "g1",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g1.n1",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g1.n2",
+   "instance": "g1",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g1.n2",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g2.digest",
+   "instance": "g2",
+   "kind": "output",
+   "last_tag": null,
+   "name": "g2.digest",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g2.n1",
+   "instance": "g2",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g2.n1",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g2.n2",
+   "instance": "g2",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g2.n2",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g3.digest",
+   "instance": "g3",
+   "kind": "output",
+   "last_tag": null,
+   "name": "g3.digest",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g3.n1",
+   "instance": "g3",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g3.n1",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g3.n2",
+   "instance": "g3",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g3.n2",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g4.digest",
+   "instance": "g4",
+   "kind": "output",
+   "last_tag": null,
+   "name": "g4.digest",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g4.n1",
+   "instance": "g4",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g4.n1",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g4.n2",
+   "instance": "g4",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g4.n2",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g5.digest",
+   "instance": "g5",
+   "kind": "output",
+   "last_tag": null,
+   "name": "g5.digest",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g5.n1",
+   "instance": "g5",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g5.n1",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g5.n2",
+   "instance": "g5",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g5.n2",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g6.digest",
+   "instance": "g6",
+   "kind": "output",
+   "last_tag": null,
+   "name": "g6.digest",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g6.n1",
+   "instance": "g6",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g6.n1",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g6.n2",
+   "instance": "g6",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g6.n2",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g7.digest",
+   "instance": "g7",
+   "kind": "output",
+   "last_tag": null,
+   "name": "g7.digest",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g7.n1",
+   "instance": "g7",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g7.n1",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g7.n2",
+   "instance": "g7",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g7.n2",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g8.digest",
+   "instance": "g8",
+   "kind": "output",
+   "last_tag": null,
+   "name": "g8.digest",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g8.n1",
+   "instance": "g8",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g8.n1",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::g8.n2",
+   "instance": "g8",
+   "kind": "input",
+   "last_tag": null,
+   "name": "g8.n2",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::lead1.d1",
+   "instance": "lead1",
+   "kind": "input",
+   "last_tag": null,
+   "name": "lead1.d1",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::lead1.d2",
+   "instance": "lead1",
+   "kind": "input",
+   "last_tag": null,
+   "name": "lead1.d2",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::lead1.sector_view",
+   "instance": "lead1",
+   "kind": "output",
+   "last_tag": null,
+   "name": "lead1.sector_view",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::lead2.d1",
+   "instance": "lead2",
+   "kind": "input",
+   "last_tag": null,
+   "name": "lead2.d1",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::lead2.d2",
+   "instance": "lead2",
+   "kind": "input",
+   "last_tag": null,
+   "name": "lead2.d2",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::lead2.sector_view",
+   "instance": "lead2",
+   "kind": "output",
+   "last_tag": null,
+   "name": "lead2.sector_view",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::lead3.d1",
+   "instance": "lead3",
+   "kind": "input",
+   "last_tag": null,
+   "name": "lead3.d1",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::lead3.d2",
+   "instance": "lead3",
+   "kind": "input",
+   "last_tag": null,
+   "name": "lead3.d2",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::lead3.sector_view",
+   "instance": "lead3",
+   "kind": "output",
+   "last_tag": null,
+   "name": "lead3.sector_view",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::lead4.d1",
+   "instance": "lead4",
+   "kind": "input",
+   "last_tag": null,
+   "name": "lead4.d1",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::lead4.d2",
+   "instance": "lead4",
+   "kind": "input",
+   "last_tag": null,
+   "name": "lead4.d2",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::lead4.sector_view",
+   "instance": "lead4",
+   "kind": "output",
+   "last_tag": null,
+   "name": "lead4.sector_view",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::syn.s1",
+   "instance": "syn",
+   "kind": "input",
+   "last_tag": null,
+   "name": "syn.s1",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::syn.s2",
+   "instance": "syn",
+   "kind": "input",
+   "last_tag": null,
+   "name": "syn.s2",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::syn.s3",
+   "instance": "syn",
+   "kind": "input",
+   "last_tag": null,
+   "name": "syn.s3",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::syn.s4",
+   "instance": "syn",
+   "kind": "input",
+   "last_tag": null,
+   "name": "syn.s4",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::syn.synthesis",
+   "instance": "syn",
+   "kind": "output",
+   "last_tag": null,
+   "name": "syn.synthesis",
+   "type": "string",
+   "value": null
+  }
+ ],
+ "protocol_version": 1,
+ "reactions": [
+  {
+   "agent": "agent::aw.agent",
+   "contract": "aw.finding",
+   "effects": [
+    "port::aw.finding"
+   ],
+   "id": "reaction::aw.reaction.0",
+   "instance": "aw",
+   "invocation_id": null,
+   "name": "aw.reaction.0",
+   "order": 34,
+   "status": "idle",
+   "triggers": [
+    "port::aw.synthesis"
+   ]
+  },
+  {
+   "agent": "agent::ax.agent",
+   "contract": "ax.finding",
+   "effects": [
+    "port::ax.finding"
+   ],
+   "id": "reaction::ax.reaction.0",
+   "instance": "ax",
+   "invocation_id": null,
+   "name": "ax.reaction.0",
+   "order": 31,
+   "status": "idle",
+   "triggers": [
+    "port::ax.synthesis"
+   ]
+  },
+  {
+   "agent": "agent::ay.agent",
+   "contract": "ay.finding",
+   "effects": [
+    "port::ay.finding"
+   ],
+   "id": "reaction::ay.reaction.0",
+   "instance": "ay",
+   "invocation_id": null,
+   "name": "ay.reaction.0",
+   "order": 32,
+   "status": "idle",
+   "triggers": [
+    "port::ay.synthesis"
+   ]
+  },
+  {
+   "agent": "agent::az.agent",
+   "contract": "az.finding",
+   "effects": [
+    "port::az.finding"
+   ],
+   "id": "reaction::az.reaction.0",
+   "instance": "az",
+   "invocation_id": null,
+   "name": "az.reaction.0",
+   "order": 33,
+   "status": "idle",
+   "triggers": [
+    "port::az.synthesis"
+   ]
+  },
+  {
+   "agent": "agent::close.editor",
+   "contract": "close.draft",
+   "effects": [
+    "port::close.draft"
+   ],
+   "id": "reaction::close.reaction.0",
+   "instance": "close",
+   "invocation_id": null,
+   "name": "close.reaction.0",
+   "order": 35,
+   "status": "idle",
+   "triggers": [
+    "port::close.report"
+   ]
+  },
+  {
+   "agent": "agent::close.checker",
+   "contract": "close.verdict",
+   "effects": [
+    "port::close.verdict"
+   ],
+   "id": "reaction::close.reaction.1",
+   "instance": "close",
+   "invocation_id": null,
+   "name": "close.reaction.1",
+   "order": 36,
+   "status": "idle",
+   "triggers": [
+    "port::close.draft"
+   ]
+  },
+  {
+   "agent": "agent::close.publisher",
+   "contract": "close.summary",
+   "effects": [
+    "port::close.summary"
+   ],
+   "id": "reaction::close.reaction.2",
+   "instance": "close",
+   "invocation_id": null,
+   "name": "close.reaction.2",
+   "order": 37,
+   "status": "idle",
+   "triggers": [
+    "port::close.draft",
+    "port::close.verdict"
+   ]
+  },
+  {
+   "agent": "agent::coord.agent",
+   "contract": "coord.spec",
+   "effects": [
+    "port::coord.spec"
+   ],
+   "id": "reaction::coord.reaction.0",
+   "instance": "coord",
+   "invocation_id": null,
+   "name": "coord.reaction.0",
+   "order": 0,
+   "status": "idle",
+   "triggers": [
+    "port::coord.topic",
+    "port::coord.max_rounds"
+   ]
+  },
+  {
+   "agent": "agent::coord.agent",
+   "contract": "( coord.spec | coord.report )",
+   "effects": [
+    "port::coord.spec",
+    "port::coord.report"
+   ],
+   "id": "reaction::coord.reaction.1",
+   "instance": "coord",
+   "invocation_id": null,
+   "name": "coord.reaction.1",
+   "order": 1,
+   "status": "idle",
+   "triggers": [
+    "port::coord.red",
+    "port::coord.blue",
+    "port::coord.black",
+    "port::coord.yellow"
+   ]
+  },
+  {
+   "agent": "agent::e1.agent",
+   "contract": "e1.note",
+   "effects": [
+    "port::e1.note"
+   ],
+   "id": "reaction::e1.reaction.0",
+   "instance": "e1",
+   "invocation_id": null,
+   "name": "e1.reaction.0",
+   "order": 2,
+   "status": "idle",
+   "triggers": [
+    "port::e1.spec"
+   ]
+  },
+  {
+   "agent": "agent::e10.agent",
+   "contract": "e10.note",
+   "effects": [
+    "port::e10.note"
+   ],
+   "id": "reaction::e10.reaction.0",
+   "instance": "e10",
+   "invocation_id": null,
+   "name": "e10.reaction.0",
+   "order": 11,
+   "status": "idle",
+   "triggers": [
+    "port::e10.spec"
+   ]
+  },
+  {
+   "agent": "agent::e11.agent",
+   "contract": "e11.note",
+   "effects": [
+    "port::e11.note"
+   ],
+   "id": "reaction::e11.reaction.0",
+   "instance": "e11",
+   "invocation_id": null,
+   "name": "e11.reaction.0",
+   "order": 12,
+   "status": "idle",
+   "triggers": [
+    "port::e11.spec"
+   ]
+  },
+  {
+   "agent": "agent::e12.agent",
+   "contract": "e12.note",
+   "effects": [
+    "port::e12.note"
+   ],
+   "id": "reaction::e12.reaction.0",
+   "instance": "e12",
+   "invocation_id": null,
+   "name": "e12.reaction.0",
+   "order": 13,
+   "status": "idle",
+   "triggers": [
+    "port::e12.spec"
+   ]
+  },
+  {
+   "agent": "agent::e13.agent",
+   "contract": "e13.note",
+   "effects": [
+    "port::e13.note"
+   ],
+   "id": "reaction::e13.reaction.0",
+   "instance": "e13",
+   "invocation_id": null,
+   "name": "e13.reaction.0",
+   "order": 14,
+   "status": "idle",
+   "triggers": [
+    "port::e13.spec"
+   ]
+  },
+  {
+   "agent": "agent::e14.agent",
+   "contract": "e14.note",
+   "effects": [
+    "port::e14.note"
+   ],
+   "id": "reaction::e14.reaction.0",
+   "instance": "e14",
+   "invocation_id": null,
+   "name": "e14.reaction.0",
+   "order": 15,
+   "status": "idle",
+   "triggers": [
+    "port::e14.spec"
+   ]
+  },
+  {
+   "agent": "agent::e15.agent",
+   "contract": "e15.note",
+   "effects": [
+    "port::e15.note"
+   ],
+   "id": "reaction::e15.reaction.0",
+   "instance": "e15",
+   "invocation_id": null,
+   "name": "e15.reaction.0",
+   "order": 16,
+   "status": "idle",
+   "triggers": [
+    "port::e15.spec"
+   ]
+  },
+  {
+   "agent": "agent::e16.agent",
+   "contract": "e16.note",
+   "effects": [
+    "port::e16.note"
+   ],
+   "id": "reaction::e16.reaction.0",
+   "instance": "e16",
+   "invocation_id": null,
+   "name": "e16.reaction.0",
+   "order": 17,
+   "status": "idle",
+   "triggers": [
+    "port::e16.spec"
+   ]
+  },
+  {
+   "agent": "agent::e2.agent",
+   "contract": "e2.note",
+   "effects": [
+    "port::e2.note"
+   ],
+   "id": "reaction::e2.reaction.0",
+   "instance": "e2",
+   "invocation_id": null,
+   "name": "e2.reaction.0",
+   "order": 3,
+   "status": "idle",
+   "triggers": [
+    "port::e2.spec"
+   ]
+  },
+  {
+   "agent": "agent::e3.agent",
+   "contract": "e3.note",
+   "effects": [
+    "port::e3.note"
+   ],
+   "id": "reaction::e3.reaction.0",
+   "instance": "e3",
+   "invocation_id": null,
+   "name": "e3.reaction.0",
+   "order": 4,
+   "status": "idle",
+   "triggers": [
+    "port::e3.spec"
+   ]
+  },
+  {
+   "agent": "agent::e4.agent",
+   "contract": "e4.note",
+   "effects": [
+    "port::e4.note"
+   ],
+   "id": "reaction::e4.reaction.0",
+   "instance": "e4",
+   "invocation_id": null,
+   "name": "e4.reaction.0",
+   "order": 5,
+   "status": "idle",
+   "triggers": [
+    "port::e4.spec"
+   ]
+  },
+  {
+   "agent": "agent::e5.agent",
+   "contract": "e5.note",
+   "effects": [
+    "port::e5.note"
+   ],
+   "id": "reaction::e5.reaction.0",
+   "instance": "e5",
+   "invocation_id": null,
+   "name": "e5.reaction.0",
+   "order": 6,
+   "status": "idle",
+   "triggers": [
+    "port::e5.spec"
+   ]
+  },
+  {
+   "agent": "agent::e6.agent",
+   "contract": "e6.note",
+   "effects": [
+    "port::e6.note"
+   ],
+   "id": "reaction::e6.reaction.0",
+   "instance": "e6",
+   "invocation_id": null,
+   "name": "e6.reaction.0",
+   "order": 7,
+   "status": "idle",
+   "triggers": [
+    "port::e6.spec"
+   ]
+  },
+  {
+   "agent": "agent::e7.agent",
+   "contract": "e7.note",
+   "effects": [
+    "port::e7.note"
+   ],
+   "id": "reaction::e7.reaction.0",
+   "instance": "e7",
+   "invocation_id": null,
+   "name": "e7.reaction.0",
+   "order": 8,
+   "status": "idle",
+   "triggers": [
+    "port::e7.spec"
+   ]
+  },
+  {
+   "agent": "agent::e8.agent",
+   "contract": "e8.note",
+   "effects": [
+    "port::e8.note"
+   ],
+   "id": "reaction::e8.reaction.0",
+   "instance": "e8",
+   "invocation_id": null,
+   "name": "e8.reaction.0",
+   "order": 9,
+   "status": "idle",
+   "triggers": [
+    "port::e8.spec"
+   ]
+  },
+  {
+   "agent": "agent::e9.agent",
+   "contract": "e9.note",
+   "effects": [
+    "port::e9.note"
+   ],
+   "id": "reaction::e9.reaction.0",
+   "instance": "e9",
+   "invocation_id": null,
+   "name": "e9.reaction.0",
+   "order": 10,
+   "status": "idle",
+   "triggers": [
+    "port::e9.spec"
+   ]
+  },
+  {
+   "agent": "agent::g1.agent",
+   "contract": "g1.digest",
+   "effects": [
+    "port::g1.digest"
+   ],
+   "id": "reaction::g1.reaction.0",
+   "instance": "g1",
+   "invocation_id": null,
+   "name": "g1.reaction.0",
+   "order": 18,
+   "status": "idle",
+   "triggers": [
+    "port::g1.n1",
+    "port::g1.n2"
+   ]
+  },
+  {
+   "agent": "agent::g2.agent",
+   "contract": "g2.digest",
+   "effects": [
+    "port::g2.digest"
+   ],
+   "id": "reaction::g2.reaction.0",
+   "instance": "g2",
+   "invocation_id": null,
+   "name": "g2.reaction.0",
+   "order": 19,
+   "status": "idle",
+   "triggers": [
+    "port::g2.n1",
+    "port::g2.n2"
+   ]
+  },
+  {
+   "agent": "agent::g3.agent",
+   "contract": "g3.digest",
+   "effects": [
+    "port::g3.digest"
+   ],
+   "id": "reaction::g3.reaction.0",
+   "instance": "g3",
+   "invocation_id": null,
+   "name": "g3.reaction.0",
+   "order": 20,
+   "status": "idle",
+   "triggers": [
+    "port::g3.n1",
+    "port::g3.n2"
+   ]
+  },
+  {
+   "agent": "agent::g4.agent",
+   "contract": "g4.digest",
+   "effects": [
+    "port::g4.digest"
+   ],
+   "id": "reaction::g4.reaction.0",
+   "instance": "g4",
+   "invocation_id": null,
+   "name": "g4.reaction.0",
+   "order": 21,
+   "status": "idle",
+   "triggers": [
+    "port::g4.n1",
+    "port::g4.n2"
+   ]
+  },
+  {
+   "agent": "agent::g5.agent",
+   "contract": "g5.digest",
+   "effects": [
+    "port::g5.digest"
+   ],
+   "id": "reaction::g5.reaction.0",
+   "instance": "g5",
+   "invocation_id": null,
+   "name": "g5.reaction.0",
+   "order": 22,
+   "status": "idle",
+   "triggers": [
+    "port::g5.n1",
+    "port::g5.n2"
+   ]
+  },
+  {
+   "agent": "agent::g6.agent",
+   "contract": "g6.digest",
+   "effects": [
+    "port::g6.digest"
+   ],
+   "id": "reaction::g6.reaction.0",
+   "instance": "g6",
+   "invocation_id": null,
+   "name": "g6.reaction.0",
+   "order": 23,
+   "status": "idle",
+   "triggers": [
+    "port::g6.n1",
+    "port::g6.n2"
+   ]
+  },
+  {
+   "agent": "agent::g7.agent",
+   "contract": "g7.digest",
+   "effects": [
+    "port::g7.digest"
+   ],
+   "id": "reaction::g7.reaction.0",
+   "instance": "g7",
+   "invocation_id": null,
+   "name": "g7.reaction.0",
+   "order": 24,
+   "status": "idle",
+   "triggers": [
+    "port::g7.n1",
+    "port::g7.n2"
+   ]
+  },
+  {
+   "agent": "agent::g8.agent",
+   "contract": "g8.digest",
+   "effects": [
+    "port::g8.digest"
+   ],
+   "id": "reaction::g8.reaction.0",
+   "instance": "g8",
+   "invocation_id": null,
+   "name": "g8.reaction.0",
+   "order": 25,
+   "status": "idle",
+   "triggers": [
+    "port::g8.n1",
+    "port::g8.n2"
+   ]
+  },
+  {
+   "agent": "agent::lead1.agent",
+   "contract": "lead1.sector_view",
+   "effects": [
+    "port::lead1.sector_view"
+   ],
+   "id": "reaction::lead1.reaction.0",
+   "instance": "lead1",
+   "invocation_id": null,
+   "name": "lead1.reaction.0",
+   "order": 26,
+   "status": "idle",
+   "triggers": [
+    "port::lead1.d1",
+    "port::lead1.d2"
+   ]
+  },
+  {
+   "agent": "agent::lead2.agent",
+   "contract": "lead2.sector_view",
+   "effects": [
+    "port::lead2.sector_view"
+   ],
+   "id": "reaction::lead2.reaction.0",
+   "instance": "lead2",
+   "invocation_id": null,
+   "name": "lead2.reaction.0",
+   "order": 27,
+   "status": "idle",
+   "triggers": [
+    "port::lead2.d1",
+    "port::lead2.d2"
+   ]
+  },
+  {
+   "agent": "agent::lead3.agent",
+   "contract": "lead3.sector_view",
+   "effects": [
+    "port::lead3.sector_view"
+   ],
+   "id": "reaction::lead3.reaction.0",
+   "instance": "lead3",
+   "invocation_id": null,
+   "name": "lead3.reaction.0",
+   "order": 28,
+   "status": "idle",
+   "triggers": [
+    "port::lead3.d1",
+    "port::lead3.d2"
+   ]
+  },
+  {
+   "agent": "agent::lead4.agent",
+   "contract": "lead4.sector_view",
+   "effects": [
+    "port::lead4.sector_view"
+   ],
+   "id": "reaction::lead4.reaction.0",
+   "instance": "lead4",
+   "invocation_id": null,
+   "name": "lead4.reaction.0",
+   "order": 29,
+   "status": "idle",
+   "triggers": [
+    "port::lead4.d1",
+    "port::lead4.d2"
+   ]
+  },
+  {
+   "agent": "agent::syn.agent",
+   "contract": "syn.synthesis",
+   "effects": [
+    "port::syn.synthesis"
+   ],
+   "id": "reaction::syn.reaction.0",
+   "instance": "syn",
+   "invocation_id": null,
+   "name": "syn.reaction.0",
+   "order": 30,
+   "status": "idle",
+   "triggers": [
+    "port::syn.s1",
+    "port::syn.s2",
+    "port::syn.s3",
+    "port::syn.s4"
+   ]
+  }
+ ],
+ "sequence": 0,
+ "status": "ready",
+ "team": "GrandTest"
+}

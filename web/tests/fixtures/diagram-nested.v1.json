@@ -1,0 +1,218 @@
+{
+ "agents": [
+  {
+   "backend": "Stub",
+   "id": "agent::run.draft.worker",
+   "instance": "run.draft",
+   "name": "run.draft.worker"
+  },
+  {
+   "backend": "Stub",
+   "id": "agent::run.refine.worker",
+   "instance": "run.refine",
+   "name": "run.refine.worker"
+  },
+  {
+   "backend": "Stub",
+   "id": "agent::run.reporter",
+   "instance": "run",
+   "name": "run.reporter"
+  }
+ ],
+ "current_tag": null,
+ "edges": [
+  {
+   "delay": 0,
+   "id": "connection::run.brief::run.draft.inp",
+   "kind": "connection",
+   "source": "port::run.brief",
+   "target": "port::run.draft.inp"
+  },
+  {
+   "delay": 0,
+   "id": "connection::run.draft.out::run.refine.inp",
+   "kind": "connection",
+   "source": "port::run.draft.out",
+   "target": "port::run.refine.inp"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::run.draft.inp::run.draft.reaction.0",
+   "kind": "trigger",
+   "source": "port::run.draft.inp",
+   "target": "reaction::run.draft.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::run.draft.reaction.0::run.draft.out",
+   "kind": "effect",
+   "source": "reaction::run.draft.reaction.0",
+   "target": "port::run.draft.out"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::run.refine.out::run.reaction.0",
+   "kind": "trigger",
+   "source": "port::run.refine.out",
+   "target": "reaction::run.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::run.reaction.0::run.summary",
+   "kind": "effect",
+   "source": "reaction::run.reaction.0",
+   "target": "port::run.summary"
+  },
+  {
+   "delay": 0,
+   "id": "trigger::run.refine.inp::run.refine.reaction.0",
+   "kind": "trigger",
+   "source": "port::run.refine.inp",
+   "target": "reaction::run.refine.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::run.refine.reaction.0::run.refine.out",
+   "kind": "effect",
+   "source": "reaction::run.refine.reaction.0",
+   "target": "port::run.refine.out"
+  }
+ ],
+ "instances": [
+  {
+   "id": "instance::run",
+   "name": "run",
+   "parent": "",
+   "team": "Pipeline"
+  },
+  {
+   "id": "instance::run.draft",
+   "name": "run.draft",
+   "parent": "instance::run",
+   "team": "Stage"
+  },
+  {
+   "id": "instance::run.refine",
+   "name": "run.refine",
+   "parent": "instance::run",
+   "team": "Stage"
+  }
+ ],
+ "ports": [
+  {
+   "delay": null,
+   "id": "port::run.brief",
+   "instance": "run",
+   "kind": "input",
+   "last_tag": null,
+   "name": "run.brief",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::run.draft.inp",
+   "instance": "run.draft",
+   "kind": "input",
+   "last_tag": null,
+   "name": "run.draft.inp",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::run.draft.out",
+   "instance": "run.draft",
+   "kind": "output",
+   "last_tag": null,
+   "name": "run.draft.out",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::run.refine.inp",
+   "instance": "run.refine",
+   "kind": "input",
+   "last_tag": null,
+   "name": "run.refine.inp",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::run.refine.out",
+   "instance": "run.refine",
+   "kind": "output",
+   "last_tag": null,
+   "name": "run.refine.out",
+   "type": "string",
+   "value": null
+  },
+  {
+   "delay": null,
+   "id": "port::run.summary",
+   "instance": "run",
+   "kind": "output",
+   "last_tag": null,
+   "name": "run.summary",
+   "type": "string",
+   "value": null
+  }
+ ],
+ "protocol_version": 1,
+ "reactions": [
+  {
+   "agent": "agent::run.draft.worker",
+   "contract": "run.draft.out",
+   "effects": [
+    "port::run.draft.out"
+   ],
+   "id": "reaction::run.draft.reaction.0",
+   "instance": "run.draft",
+   "invocation_id": null,
+   "name": "run.draft.reaction.0",
+   "order": 1,
+   "status": "idle",
+   "triggers": [
+    "port::run.draft.inp"
+   ]
+  },
+  {
+   "agent": "agent::run.reporter",
+   "contract": "run.summary",
+   "effects": [
+    "port::run.summary"
+   ],
+   "id": "reaction::run.reaction.0",
+   "instance": "run",
+   "invocation_id": null,
+   "name": "run.reaction.0",
+   "order": 0,
+   "status": "idle",
+   "triggers": [
+    "port::run.refine.out"
+   ]
+  },
+  {
+   "agent": "agent::run.refine.worker",
+   "contract": "run.refine.out",
+   "effects": [
+    "port::run.refine.out"
+   ],
+   "id": "reaction::run.refine.reaction.0",
+   "instance": "run.refine",
+   "invocation_id": null,
+   "name": "run.refine.reaction.0",
+   "order": 2,
+   "status": "idle",
+   "triggers": [
+    "port::run.refine.inp"
+   ]
+  }
+ ],
+ "sequence": 1,
+ "status": "running",
+ "team": "Nested",
+ "timers": []
+}

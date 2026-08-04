@@ -1,0 +1,152 @@
+{
+  "protocol_version": 1,
+  "team": "WorkflowSmokeTest",
+  "sequence": 3,
+  "status": "running",
+  "current_tag": {
+    "timestamp": 0,
+    "microstep": 0
+  },
+  "instances": [
+    {
+      "id": "instance::checker",
+      "name": "checker",
+      "team": "Checker"
+    },
+    {
+      "id": "instance::producer",
+      "name": "producer",
+      "team": "Producer"
+    }
+  ],
+  "agents": [
+    {
+      "id": "agent::checker.agent",
+      "name": "checker.agent",
+      "backend": "Stub",
+      "instance": "checker"
+    },
+    {
+      "id": "agent::producer.agent",
+      "name": "producer.agent",
+      "backend": "Stub",
+      "instance": "producer"
+    }
+  ],
+  "ports": [
+    {
+      "id": "port::checker.draft",
+      "name": "checker.draft",
+      "kind": "input",
+      "type": "string",
+      "delay": null,
+      "value": null,
+      "last_tag": null,
+      "instance": "checker"
+    },
+    {
+      "id": "port::checker.result",
+      "name": "checker.result",
+      "kind": "output",
+      "type": "string",
+      "delay": null,
+      "value": null,
+      "last_tag": null,
+      "instance": "checker"
+    },
+    {
+      "id": "port::producer.draft",
+      "name": "producer.draft",
+      "kind": "output",
+      "type": "string",
+      "delay": null,
+      "value": null,
+      "last_tag": null,
+      "instance": "producer"
+    },
+    {
+      "id": "port::producer.request",
+      "name": "producer.request",
+      "kind": "input",
+      "type": "string",
+      "delay": null,
+      "value": "\"smoke\"",
+      "last_tag": {
+        "timestamp": 0,
+        "microstep": 0
+      },
+      "instance": "producer"
+    }
+  ],
+  "reactions": [
+    {
+      "id": "reaction::checker.reaction.0",
+      "name": "checker.reaction.0",
+      "agent": "agent::checker.agent",
+      "order": 1,
+      "triggers": [
+        "port::checker.draft"
+      ],
+      "effects": [
+        "port::checker.result"
+      ],
+      "contract": "checker.result",
+      "status": "idle",
+      "invocation_id": null,
+      "instance": "checker"
+    },
+    {
+      "id": "reaction::producer.reaction.0",
+      "name": "producer.reaction.0",
+      "agent": "agent::producer.agent",
+      "order": 0,
+      "triggers": [
+        "port::producer.request"
+      ],
+      "effects": [
+        "port::producer.draft"
+      ],
+      "contract": "producer.draft",
+      "status": "running",
+      "invocation_id": "aa20f252-6619-429e-bba5-8c2f1460e192",
+      "instance": "producer"
+    }
+  ],
+  "edges": [
+    {
+      "id": "connection::producer.draft::checker.draft",
+      "kind": "connection",
+      "source": "port::producer.draft",
+      "target": "port::checker.draft",
+      "delay": 0
+    },
+    {
+      "id": "trigger::checker.draft::checker.reaction.0",
+      "kind": "trigger",
+      "source": "port::checker.draft",
+      "target": "reaction::checker.reaction.0",
+      "delay": 0
+    },
+    {
+      "id": "effect::checker.reaction.0::checker.result",
+      "kind": "effect",
+      "source": "reaction::checker.reaction.0",
+      "target": "port::checker.result",
+      "delay": 0
+    },
+    {
+      "id": "trigger::producer.request::producer.reaction.0",
+      "kind": "trigger",
+      "source": "port::producer.request",
+      "target": "reaction::producer.reaction.0",
+      "delay": 0
+    },
+    {
+      "id": "effect::producer.reaction.0::producer.draft",
+      "kind": "effect",
+      "source": "reaction::producer.reaction.0",
+      "target": "port::producer.draft",
+      "delay": 0
+    }
+  ]
+}

@@ -88,6 +88,19 @@ Go back to the EA and type in:
 Shutdown the test project and its agents.
 ```
 
+## Mission Control
+
+The web client for authoring and observing topology programs lives in
+[`web/`](web/), and is built from this same commit as the runtime it talks to.
+
+```bash
+cargo run --bin omar -- serve --address 127.0.0.1:7340   # here
+cd web && OMAR_SERVE_URL=http://127.0.0.1:7340 npm run dev
+```
+
+Open `http://localhost:3000`. Without `OMAR_SERVE_URL` it runs an offline demo
+topology: you can draft and inspect, but not run. See [`web/README.md`](web/README.md).
+
 ## Supported Agent Backends
 
 | Backend | How to launch |

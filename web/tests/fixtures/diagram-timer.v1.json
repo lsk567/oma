@@ -1,0 +1,87 @@
+{
+ "agents": [
+  {
+   "backend": "Stub",
+   "id": "agent::beacon.agent",
+   "instance": "beacon",
+   "name": "beacon.agent"
+  }
+ ],
+ "current_tag": {
+  "microstep": 0,
+  "timestamp": 710
+ },
+ "edges": [
+  {
+   "delay": 0,
+   "id": "trigger::beacon.t::beacon.reaction.0",
+   "kind": "trigger",
+   "source": "timer::beacon.t",
+   "target": "reaction::beacon.reaction.0"
+  },
+  {
+   "delay": 0,
+   "id": "effect::beacon.reaction.0::beacon.note",
+   "kind": "effect",
+   "source": "reaction::beacon.reaction.0",
+   "target": "port::beacon.note"
+  }
+ ],
+ "instances": [
+  {
+   "id": "instance::beacon",
+   "name": "beacon",
+   "team": "Beacon"
+  }
+ ],
+ "ports": [
+  {
+   "delay": null,
+   "id": "port::beacon.note",
+   "instance": "beacon",
+   "kind": "output",
+   "last_tag": {
+    "microstep": 1,
+    "timestamp": 700
+   },
+   "name": "beacon.note",
+   "type": "string",
+   "value": "stub"
+  }
+ ],
+ "protocol_version": 1,
+ "reactions": [
+  {
+   "agent": "agent::beacon.agent",
+   "contract": "beacon.note",
+   "effects": [
+    "port::beacon.note"
+   ],
+   "id": "reaction::beacon.reaction.0",
+   "instance": "beacon",
+   "invocation_id": "12dcbc70-935a-40e8-8ee0-ef78c73956a9",
+   "name": "beacon.reaction.0",
+   "order": 0,
+   "status": "running",
+   "triggers": [
+    "timer::beacon.t"
+   ]
+  }
+ ],
+ "sequence": 287,
+ "status": "running",
+ "team": "Pulse",
+ "timers": [
+  {
+   "id": "timer::beacon.t",
+   "instance": "beacon",
+   "last_tag": {
+    "microstep": 0,
+    "timestamp": 710
+   },
+   "name": "beacon.t",
+   "offset": 0,
+   "period": 10
+  }
+ ]
+}
