@@ -255,16 +255,45 @@ impl Serve {
                 }
             }
         });
-        Ok(Self {
+        let server = Self {
             address,
             agent_token,
             running,
             thread: Some(thread),
-        })
+        };
+        // Before this returns, so that everything downstream of "the server
+        // started" can rely on the context being there. It names this server,
+        // and `attach_ea` — which used to write it — runs after the address is
+        // announced, so anything that took the announcement as readiness could
+        // read the path before it existed.
+        server.write_mcp_context(config, omar_dir, ea_id);
+        Ok(server)
     }
 
     pub fn address(&self) -> SocketAddr {
         self.address
+    }
+
+    /// Record this server in the EA's MCP context.
+    ///
+    /// Written whether or not an assistant is launched: it names this server,
+    /// so a harness can act as the assistant without an agent process existing.
+    fn write_mcp_context(&self, config: &Config, omar_dir: &Path, ea_id: EaId) {
+        let context = crate::manager::McpLaunchContext {
+            omar_dir: omar_dir.to_path_buf(),
+            ea_id,
+            session_prefix: config.dashboard.session_prefix.clone(),
+            default_command: config.agent.default_command.clone(),
+            default_workdir: config.agent.default_workdir.clone(),
+            health_idle_warning: config.health.idle_warning,
+            tmux_server: None,
+            topology: None,
+            serve: Some(crate::manager::ServeMcpContext {
+                endpoint: self.address.to_string(),
+                token: self.agent_token.clone(),
+            }),
+        };
+        crate::manager::materialize_mcp_context_file(&context);
     }
 
     /// Launch the executive assistant with a serve context, so it can converse
@@ -290,23 +319,8 @@ impl Serve {
             ea_id,
             &config.dashboard.session_prefix,
         ));
-        // Write the context even when not launching: it names this server, so a
-        // harness can act as the assistant without an agent process existing.
-        let context = crate::manager::McpLaunchContext {
-            omar_dir: omar_dir.to_path_buf(),
-            ea_id,
-            session_prefix: config.dashboard.session_prefix.clone(),
-            default_command: config.agent.default_command.clone(),
-            default_workdir: config.agent.default_workdir.clone(),
-            health_idle_warning: config.health.idle_warning,
-            tmux_server: None,
-            topology: None,
-            serve: Some(crate::manager::ServeMcpContext {
-                endpoint: self.address.to_string(),
-                token: self.agent_token.clone(),
-            }),
-        };
-        crate::manager::materialize_mcp_context_file(&context);
+        // The context was written by `start`, before the address was announced,
+        // so an assistant launched here reads one that already names us.
         if !launch {
             return Ok(AttachEa::Attached("(not launched)".to_string()));
         }
@@ -1519,6 +1533,36 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 400"), "{response}");
         assert!(response.contains("more than"), "{response}");
+    }
+
+    #[test]
+    fn starting_writes_the_context_before_anyone_can_be_told_the_address() {
+        // `run` prints the address the moment `start` returns, and a harness
+        // takes that as readiness. When the context was written afterwards, by
+        // `attach_ea`, reading it right then found nothing.
+        let omar_dir = std::env::temp_dir().join(format!("omar-serve-ready-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&omar_dir).expect("temp omar dir");
+
+        let server = Serve::start(
+            "127.0.0.1:0".parse().expect("valid address"),
+            &Config::default(),
+            &omar_dir,
+            0,
+        )
+        .expect("server starts");
+
+        // No `attach_ea`: an assistant never has to launch for this to hold.
+        let raw = std::fs::read_to_string(crate::manager::ea_mcp_context_path(&omar_dir, 0))
+            .expect("context exists as soon as the server does");
+        let context: Value = serde_json::from_str(&raw).expect("context is JSON");
+        assert_eq!(
+            context["serve"]["token"].as_str(),
+            Some(server.agent_token.as_str())
+        );
+        assert_eq!(
+            context["serve"]["endpoint"].as_str(),
+            Some(server.address().to_string().as_str())
+        );
     }
 
     #[test]

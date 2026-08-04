@@ -16,7 +16,6 @@
 
 ![Web](img/web.gif)
 
-Alternative Terminal UI:
 ![Demo](img/demo.gif)
 
 ## Features
