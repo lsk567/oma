@@ -26,8 +26,16 @@ npm run dev
 Open `http://localhost:3000`. With no flag it runs the offline demo topology:
 you can draft and inspect, but not run.
 
-Mode is chosen at launch, not in the UI. To run for real, start the daemon and
-point Mission Control at it:
+Mode is chosen at launch, not in the UI. To run for real, use `make dev` from
+the repository root — it builds the runtime, starts the daemon, starts Mission
+Control pointed at it, and opens a browser. Ctrl-C stops both.
+
+```bash
+make dev
+```
+
+`OMAR_SERVE_ADDRESS`, `OMAR_WEB_PORT` and `OMAR_DEV_OPEN=0` adjust it. The two
+halves separately, if you want them in separate terminals:
 
 ```bash
 cargo run --bin omar -- serve --address 127.0.0.1:7340   # from the repository root

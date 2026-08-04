@@ -67,6 +67,28 @@ jobs:
       - name: Compare the fake against the real daemon
         run: npm run test:conformance
 
+  # `make dev` starts two servers and has to point them at each other and stop
+  # them together. Nothing else in either suite exercises that, and every bug it
+  # has had looked fine until something ran it.
+  dev-script:
+    name: Web Dev Script
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      # `omar serve` launches the assistant in a tmux pane.
+      - run: sudo apt-get update && sudo apt-get install -y tmux
+        working-directory: .
+      - run: npm ci
+      - name: Start both, check both, stop both
+        run: ./tests/dev-script.test.sh
+
   e2e:
     name: Web E2E
     runs-on: ubuntu-latest

@@ -94,12 +94,12 @@ The web client for authoring and observing topology programs lives in
 [`web/`](web/), and is built from this same commit as the runtime it talks to.
 
 ```bash
-cargo run --bin omar -- serve --address 127.0.0.1:7340   # here
-cd web && OMAR_SERVE_URL=http://127.0.0.1:7340 npm run dev
+make dev
 ```
 
-Open `http://localhost:3000`. Without `OMAR_SERVE_URL` it runs an offline demo
-topology: you can draft and inspect, but not run. See [`web/README.md`](web/README.md).
+Builds the runtime, starts the daemon, starts Mission Control pointed at it,
+and opens a browser. Ctrl-C stops both. Needs Node.js 22.13+; see
+[`web/README.md`](web/README.md) for running the two halves separately.
 
 ## Supported Agent Backends
 
