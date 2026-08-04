@@ -1,0 +1,52 @@
+// Heartbeat — the smallest thing a periodic timer can drive.
+//
+// `tick(0, 10)` fires at logical time 0 and re-arms every 10 forever. Nothing
+// feeds it and nothing can write to it: the clock alone drives this program,
+// and it takes no input at all.
+//
+// A periodic timer does not stop. This run ends only at the runtime's 1024-tag
+// cap, or when you stop it — whichever comes first. Whatever it produced up to
+// then stands.
+//
+// Both prompts on `monitor` share one agent memory, so each tick sees every
+// tick before it. That is what makes a heartbeat rather than a repeated
+// question.
+
+team Pulse[monitor : ClaudeCode]
+{
+    timer tick(0, 10)
+    output reading : string
+
+    prompt monitor(tick) -> reading
+    "
+        Tick at logical time $(tick).
+
+        Name one risk of running many autonomous coding agents against one
+        repository. Answer from your own knowledge; do not browse or run
+        commands.
+
+        Set `reading` to at most 25 words, and do not repeat a risk you named
+        on an earlier tick.
+    "
+}
+
+team Watch[watcher : ClaudeCode]
+{
+    input reading : string
+    output verdict : string
+
+    prompt watcher(reading) -> verdict
+    "
+        $(reading)
+
+        Set `verdict` to at most 15 words: `real:` or `noise:` and one clause
+        of why. Do not browse or run commands.
+    "
+}
+
+main Heartbeat {
+    pulse = Pulse()
+    watch = Watch()
+
+    pulse.reading -> watch.reading
+}
