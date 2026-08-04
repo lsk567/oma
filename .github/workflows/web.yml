@@ -1,0 +1,94 @@
+name: Web
+
+# Mission Control lives in `web/`. Its jobs are a separate workflow so the
+# client's toolchain is declared in one place rather than threaded through the
+# runtime's. Both workflows run on every pull request: no path filter, because a
+# skipped job never reports and a required check that never reports blocks the
+# pull request forever.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: web
+
+jobs:
+  test:
+    name: Web Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+
+  # The client and the runtime used to live in separate repositories, so this
+  # could only run on a schedule against whatever `main` happened to be. They
+  # are now built from one commit, so it runs on the pull request that changes
+  # either of them — which is the drift it exists to catch.
+  conformance:
+    name: Web Conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: lang
+          build: true
+          test: false
+      - name: Build the runtime
+        run: cargo build --bin omar
+        working-directory: .
+      # Topology agents run in tmux panes, so a real run needs one.
+      - run: sudo apt-get update && sudo apt-get install -y tmux
+        working-directory: .
+      - run: npm ci
+      # Probes the runtime for the features it needs and skips what is missing,
+      # so a client change that lands before the runtime one still passes.
+      - name: Compare the fake against the real daemon
+        run: npm run test:conformance
+
+  e2e:
+    name: Web E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      # Drives prompt -> design -> confirm -> spawn -> finished against a fake
+      # `omar serve`. No model, no Lean toolchain, no tmux.
+      - run: npm run build
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            web/playwright-report/
+            web/test-results/
+          retention-days: 7

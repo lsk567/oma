@@ -1,0 +1,104 @@
+{
+  "protocol_version": 1,
+  "team": "Recurrence",
+  "sequence": 0,
+  "status": "ready",
+  "current_tag": null,
+  "instances": [
+    {
+      "id": "instance::flow",
+      "name": "flow",
+      "team": "ReviewFlow"
+    }
+  ],
+  "agents": [
+    {
+      "id": "agent::flow.counter",
+      "name": "counter",
+      "backend": "Codex",
+      "instance": "flow"
+    }
+  ],
+  "ports": [
+    {
+      "id": "port::flow.next",
+      "name": "next",
+      "kind": "action",
+      "type": "int",
+      "delay": null,
+      "value": null,
+      "last_tag": null,
+      "instance": "flow"
+    },
+    {
+      "id": "port::flow.result",
+      "name": "flow.result",
+      "kind": "output",
+      "type": "int",
+      "delay": null,
+      "value": null,
+      "last_tag": null,
+      "instance": "flow"
+    },
+    {
+      "id": "port::flow.start",
+      "name": "start",
+      "kind": "input",
+      "type": "int",
+      "delay": null,
+      "value": null,
+      "last_tag": null,
+      "instance": "flow"
+    }
+  ],
+  "reactions": [
+    {
+      "id": "reaction::flow.reaction.0",
+      "name": "reaction.0",
+      "agent": "agent::flow.counter",
+      "order": 0,
+      "triggers": [
+        "port::flow.start",
+        "port::flow.next"
+      ],
+      "effects": [
+        "port::flow.next",
+        "port::flow.result"
+      ],
+      "contract": "( next | result )",
+      "status": "idle",
+      "invocation_id": null,
+      "instance": "flow"
+    }
+  ],
+  "edges": [
+    {
+      "id": "trigger::flow.start::flow.reaction.0",
+      "kind": "trigger",
+      "source": "port::flow.start",
+      "target": "reaction::flow.reaction.0",
+      "delay": 0
+    },
+    {
+      "id": "trigger::flow.next::flow.reaction.0",
+      "kind": "trigger",
+      "source": "port::flow.next",
+      "target": "reaction::flow.reaction.0",
+      "delay": 0
+    },
+    {
+      "id": "effect::reaction.0::next",
+      "kind": "effect",
+      "source": "reaction::flow.reaction.0",
+      "target": "port::flow.next",
+      "delay": 0
+    },
+    {
+      "id": "effect::reaction.0::result",
+      "kind": "effect",
+      "source": "reaction::flow.reaction.0",
+      "target": "port::flow.result",
+      "delay": 0
+    }
+  ]
+}
