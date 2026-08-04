@@ -88,6 +88,19 @@ structure Port where
   instance_ : String := ""
   deriving Repr
 
+/-- `timer t(offset, period)`.
+
+    A trigger that fires from the runtime's own clock rather than from another
+    reaction. `period = 0` fires once, at `offset`; a non-zero period re-arms
+    it forever. Both are logical time, the same unit an action's `delay` and a
+    connection's `after` are counted in. -/
+structure Timer where
+  name : String
+  offset : Nat
+  period : Nat
+  instance_ : String := ""
+  deriving Repr
+
 structure Connection where
   source : String
   target : String
@@ -124,6 +137,7 @@ structure TeamDecl where
   params : Array Param
   agents : Array Agent
   ports : Array Port
+  timers : Array Timer
   connections : Array Connection
   reactions : Array Reaction
   deriving Repr
@@ -168,6 +182,7 @@ structure Program where
   instances : Array InstanceDecl
   agents : Array Agent
   ports : Array Port
+  timers : Array Timer
   connections : Array Connection
   reactions : Array Reaction
   deriving Repr
@@ -290,34 +305,44 @@ private def parseActionDelay : Parser (Option Nat)
 private partial def parseDeclarations
     (reactionIndex : Nat)
     (ports : Array Port)
+    (timers : Array Timer)
     (connections : Array Connection)
     (reactions : Array Reaction) :
-    List Token -> Except String (Array Port × Array Connection × Array Reaction × List Token)
-  | Token.sym "}" :: rest => pure (ports, connections, reactions, rest)
+    List Token ->
+      Except String (Array Port × Array Timer × Array Connection × Array Reaction × List Token)
+  | Token.sym "}" :: rest => pure (ports, timers, connections, reactions, rest)
   | Token.word "input" :: rest => do
       let (name, rest) ← word rest
       let (_, rest) ← expectSym ":" rest
       let (type, rest) ← parseType rest
-      parseDeclarations reactionIndex (ports.push { name, kind := .input, type }) connections reactions rest
+      parseDeclarations reactionIndex (ports.push { name, kind := .input, type }) timers connections reactions rest
   | Token.word "output" :: rest => do
       let (name, rest) ← word rest
       let (_, rest) ← expectSym ":" rest
       let (type, rest) ← parseType rest
-      parseDeclarations reactionIndex (ports.push { name, kind := .output, type }) connections reactions rest
+      parseDeclarations reactionIndex (ports.push { name, kind := .output, type }) timers connections reactions rest
   | Token.word "action" :: rest => do
       let (name, rest) ← word rest
       let (delay, rest) ← parseActionDelay rest
       match rest with
       | Token.sym ":" :: tail =>
           let (type, tail) ← parseType tail
-          parseDeclarations reactionIndex (ports.push { name, kind := .action, type, delay }) connections reactions tail
+          parseDeclarations reactionIndex (ports.push { name, kind := .action, type, delay }) timers connections reactions tail
       | _ =>
-          parseDeclarations reactionIndex (ports.push { name, kind := .action, type := "signal", delay }) connections reactions rest
+          parseDeclarations reactionIndex (ports.push { name, kind := .action, type := "signal", delay }) timers connections reactions rest
+  | Token.word "timer" :: rest => do
+      let (name, rest) ← word rest
+      let (_, rest) ← expectSym "(" rest
+      let (offset, rest) ← natural rest
+      let (_, rest) ← expectSym "," rest
+      let (period, rest) ← natural rest
+      let (_, rest) ← expectSym ")" rest
+      parseDeclarations reactionIndex ports (timers.push { name, offset, period }) connections reactions rest
   | Token.word source :: Token.sym "->" :: rest => do
       let (target, rest) ← word rest
       let (_, rest) ← expectWord "after" rest
       let (delay, rest) ← natural rest
-      parseDeclarations reactionIndex ports (connections.push { source, target, delay }) reactions rest
+      parseDeclarations reactionIndex ports timers (connections.push { source, target, delay }) reactions rest
   | Token.word "prompt" :: rest => do
       let (agent, rest) ← word rest
       let (_, rest) ← expectSym "(" rest
@@ -330,7 +355,7 @@ private partial def parseDeclarations
         id := s!"reaction.{reactionIndex}"
         agent, triggers, effects, contract, prompt
       }
-      parseDeclarations (reactionIndex + 1) ports connections (reactions.push reaction) rest
+      parseDeclarations (reactionIndex + 1) ports timers connections (reactions.push reaction) rest
   | token :: _ => throw s!"unexpected token in team body: {reprStr token}"
   | [] => throw "unterminated team body"
 
@@ -352,8 +377,8 @@ private def parseTeam : Parser TeamDecl := fun tokens => do
         pure (agents, rest)
     | _ => pure (#[], tokens)
   let (_, tokens) ← expectSym "{" tokens
-  let (ports, connections, reactions, tokens) ← parseDeclarations 0 #[] #[] #[] tokens
-  pure ({ name, params, agents, ports, connections, reactions }, tokens)
+  let (ports, timers, connections, reactions, tokens) ← parseDeclarations 0 #[] #[] #[] #[] tokens
+  pure ({ name, params, agents, ports, timers, connections, reactions }, tokens)
 
 private def literal : Parser Literal
   | Token.nat value :: rest => pure (Literal.int value, rest)
@@ -429,17 +454,26 @@ private def validate (program : Program) : Except String Program := do
   let portNames := program.ports.map (·.name)
   let connectionNames := program.connections.map fun connection =>
     s!"{connection.source}->{connection.target}"
+  let timerNames := program.timers.map (·.name)
   ensureUnique "agent" agentNames
   ensureUnique "port" portNames
+  ensureUnique "timer" timerNames
   ensureUnique "connection" connectionNames
+  for timer in program.timers do
+    if containsName portNames timer.name then
+      throw s!"timer '{timer.name}' is also a port; a trigger has one name"
+    if timer.offset == 0 && timer.period == 0 then
+      throw s!"timer '{timer.name}' never fires; give it an offset, a period, or both"
   for reaction in program.reactions do
     if !containsName agentNames reaction.agent then
       throw s!"reaction references unknown agent '{reaction.agent}'"
     for trigger in reaction.triggers do
-      let valid := program.ports.any fun port =>
-        port.name == trigger && port.kind != .output
+      let valid := program.ports.any (fun port =>
+        port.name == trigger && port.kind != .output) || containsName timerNames trigger
       if !valid then throw s!"unknown input/action dependency '{trigger}'"
     for effect in reaction.effects do
+      if containsName timerNames effect then
+        throw s!"timer '{effect}' cannot be written to; a timer is a trigger"
       let valid := program.ports.any fun port =>
         port.name == effect && port.kind != .input
       if !valid then throw s!"unknown output/action production '{effect}'"
@@ -486,9 +520,11 @@ private def qualifyContract (inst : String) (ports : Array Port) (contract : Str
     Only the plain spelling is rewritten. `$( port )` and `$(port /* note */)`
     are accepted by the runtime but not matched here, so inside a team that
     `main` instantiates, write `$(port)`. -/
-private def qualifyPrompt (inst : String) (ports : Array Port) (text : String) : String :=
-  ports.foldl
-    (fun acc port => acc.replace s!"$({port.name})" s!"$({qualify inst port.name})")
+private def qualifyPrompt
+    (inst : String) (ports : Array Port) (timers : Array Timer) (text : String) : String :=
+  let named := ports.map (·.name) ++ timers.map (·.name)
+  named.foldl
+    (fun acc name => acc.replace s!"$({name})" s!"$({qualify inst name})")
     text
 
 private def bindArguments (decl : TeamDecl) (inst : Instance) :
@@ -505,7 +541,8 @@ private def bindArguments (decl : TeamDecl) (inst : Instance) :
     (#[] : Array (String × String))
 
 private def elaborateInstance (teams : Array TeamDecl) (inst : Instance) :
-    Except String (Array Agent × Array Port × Array Connection × Array Reaction) := do
+    Except String
+      (Array Agent × Array Port × Array Timer × Array Connection × Array Reaction) := do
   let decl ← match teams.find? (·.name == inst.team) with
     | some decl => pure decl
     | none => throw s!"instance '{inst.name}' names unknown team '{inst.team}'"
@@ -514,6 +551,8 @@ private def elaborateInstance (teams : Array TeamDecl) (inst : Instance) :
     { agent with name := qualify inst.name agent.name, instance_ := inst.name }
   let ports := decl.ports.map fun port =>
     { port with name := qualify inst.name port.name, instance_ := inst.name }
+  let timers := decl.timers.map fun timer =>
+    { timer with name := qualify inst.name timer.name, instance_ := inst.name }
   let connections := decl.connections.map fun connection =>
     { connection with
         source := qualify inst.name connection.source
@@ -526,8 +565,9 @@ private def elaborateInstance (teams : Array TeamDecl) (inst : Instance) :
         effects := reaction.effects.map (qualify inst.name)
         instance_ := inst.name
         contract := qualifyContract inst.name decl.ports reaction.contract
-        prompt := substitute bindings (qualifyPrompt inst.name decl.ports reaction.prompt) }
-  pure (agents, ports, connections, reactions)
+        prompt :=
+          substitute bindings (qualifyPrompt inst.name decl.ports decl.timers reaction.prompt) }
+  pure (agents, ports, timers, connections, reactions)
 
 private def elaborate (programName : String) (teams : Array TeamDecl) (main : Main) :
     Except String Program := do
@@ -547,8 +587,9 @@ private def elaborate (programName : String) (teams : Array TeamDecl) (main : Ma
     instances := main.instances.map fun inst => { name := inst.name, team := inst.team }
     agents := parts.foldl (fun acc part => acc ++ part.1) #[]
     ports := parts.foldl (fun acc part => acc ++ part.2.1) #[]
-    connections := parts.foldl (fun acc part => acc ++ part.2.2.1) #[] ++ wired
-    reactions := parts.foldl (fun acc part => acc ++ part.2.2.2) #[]
+    timers := parts.foldl (fun acc part => acc ++ part.2.2.1) #[]
+    connections := parts.foldl (fun acc part => acc ++ part.2.2.2.1) #[] ++ wired
+    reactions := parts.foldl (fun acc part => acc ++ part.2.2.2.2) #[]
   }
 
 /-- `programName` is the fallback when `main` is not named: the source file,
@@ -600,6 +641,13 @@ def compile (program : Program) : String :=
       | some delay => [("delay", toJson delay)]
       | none => []
     instruction "define_port" fields
+  let timers := program.timers.map fun timer =>
+    instruction "declare_timer" [
+      ("instance", toJson timer.instance_),
+      ("name", toJson timer.name),
+      ("offset", toJson timer.offset),
+      ("period", toJson timer.period)
+    ]
   let connections := program.connections.map fun connection =>
     instruction "connect_ports" [
       ("source", toJson connection.source),
@@ -618,7 +666,7 @@ def compile (program : Program) : String :=
     ]
   let commit := instruction "commit_plan"
   let instructions :=
-    #[begin] ++ instances ++ agents ++ ports ++ connections ++ reactions ++ #[commit]
+    #[begin] ++ instances ++ agents ++ ports ++ timers ++ connections ++ reactions ++ #[commit]
   let rendered := String.intercalate ",\n    " instructions.toList
   "{\n  \"version\": 1,\n  \"team\": " ++ (toJson program.team).compress ++
     ",\n  \"instructions\": [\n    " ++ rendered ++ "\n  ]\n}\n"

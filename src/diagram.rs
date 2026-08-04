@@ -52,6 +52,23 @@ pub struct DiagramPort {
     pub instance: String,
 }
 
+/// A trigger the runtime fires from its own clock.
+///
+/// Drawn as a clock rather than a port, because that is what it is: nothing
+/// feeds it and nothing can write to it. `last_tag` is when it last fired, so a
+/// client can show the hand where the schedule actually is rather than
+/// animating on a guess.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagramTimer {
+    pub id: String,
+    pub name: String,
+    pub offset: u64,
+    /// `0` fires once; anything else re-arms forever.
+    pub period: u64,
+    pub last_tag: Option<DiagramTag>,
+    pub instance: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagramReaction {
     pub id: String,
@@ -93,6 +110,9 @@ pub struct DiagramSnapshot {
     pub instances: Vec<DiagramInstance>,
     pub agents: Vec<DiagramAgent>,
     pub ports: Vec<DiagramPort>,
+    /// Empty for a program with no timer, and for bytecode that predates them.
+    #[serde(default)]
+    pub timers: Vec<DiagramTimer>,
     pub reactions: Vec<DiagramReaction>,
     pub edges: Vec<DiagramEdge>,
 }
@@ -132,6 +152,28 @@ impl DiagramSnapshot {
                 instance: port.instance.clone(),
             })
             .collect();
+        let timers = state
+            .timers
+            .iter()
+            .map(|(name, timer)| DiagramTimer {
+                id: timer_id(name),
+                name: name.clone(),
+                offset: timer.offset,
+                period: timer.period,
+                last_tag: None,
+                instance: timer.instance.clone(),
+            })
+            .collect();
+        // A trigger names either a port or a timer, and the two have separate
+        // id spaces, so which one it is has to be decided here rather than by
+        // the client pattern-matching on the name.
+        let trigger_id = |name: &String| {
+            if state.timers.contains_key(name) {
+                timer_id(name)
+            } else {
+                port_id(name)
+            }
+        };
         let reactions = state
             .reactions
             .iter()
@@ -140,7 +182,7 @@ impl DiagramSnapshot {
                 name: name.clone(),
                 agent: agent_id(&reaction.agent),
                 order: reaction.order,
-                triggers: reaction.triggers.iter().map(|name| port_id(name)).collect(),
+                triggers: reaction.triggers.iter().map(&trigger_id).collect(),
                 effects: reaction.effects.iter().map(|name| port_id(name)).collect(),
                 contract: reaction.contract.clone(),
                 status: "idle".to_string(),
@@ -163,7 +205,7 @@ impl DiagramSnapshot {
                 edges.push(DiagramEdge {
                     id: format!("trigger::{trigger}::{name}"),
                     kind: "trigger".to_string(),
-                    source: port_id(trigger),
+                    source: trigger_id(trigger),
                     target: reaction_id(name),
                     delay: 0,
                 });
@@ -187,6 +229,7 @@ impl DiagramSnapshot {
             instances,
             agents,
             ports,
+            timers,
             reactions,
             edges,
         }
@@ -301,6 +344,13 @@ impl TopologyObserver for DiagramPublisher {
                     if let Some(port) = snapshot.ports.iter_mut().find(|port| port.name == *name) {
                         port.value = Some(value.clone());
                         port.last_tag = Some(tag);
+                    }
+                    // A timer arrives in the same event map as a port; it is
+                    // the one that fired at this tag.
+                    if let Some(timer) =
+                        snapshot.timers.iter_mut().find(|timer| timer.name == *name)
+                    {
+                        timer.last_tag = Some(tag);
                     }
                 }
             },
@@ -623,16 +673,23 @@ fn reaction_id(name: &str) -> String {
     format!("reaction::{name}")
 }
 
+fn timer_id(name: &str) -> String {
+    format!("timer::{name}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::topology::{AgentState, ConnectionState, InstanceState, PortState, ReactionState};
+    use crate::topology::{
+        AgentState, ConnectionState, InstanceState, PortState, ReactionState, TimerState,
+    };
 
     fn sample_state() -> VmState {
         VmState {
             version: 1,
             team: "Sample".to_string(),
             instances: BTreeMap::new(),
+            timers: BTreeMap::new(),
             agents: BTreeMap::from([(
                 "worker".to_string(),
                 AgentState {
@@ -691,6 +748,7 @@ mod tests {
         VmState {
             version: 1,
             team: "SimpleBrief".to_string(),
+            timers: BTreeMap::new(),
             instances: BTreeMap::from([
                 (
                     "writer".to_string(),
@@ -740,6 +798,67 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    #[test]
+    fn a_timer_is_carried_as_a_timer_and_not_as_a_port() {
+        // A timer shares the trigger namespace with ports but nothing else: no
+        // value feeds it and no reaction can write to it. If the snapshot gave
+        // it a port id, a client would draw it as a port and wire an inbound
+        // edge to something that can never have one.
+        let mut state = sample_state();
+        state.timers.insert(
+            "beat".to_string(),
+            TimerState {
+                offset: 0,
+                period: 10,
+                instance: String::new(),
+            },
+        );
+        state
+            .reactions
+            .get_mut("respond")
+            .expect("sample reaction")
+            .triggers = vec!["beat".to_string()];
+
+        let snapshot = DiagramSnapshot::from_vm_state(&state);
+
+        let timer = snapshot.timers.first().expect("the timer is carried");
+        assert_eq!(timer.id, "timer::beat");
+        assert_eq!((timer.offset, timer.period), (0, 10));
+        assert_eq!(timer.last_tag, None, "it has not fired yet");
+        assert!(
+            !snapshot.ports.iter().any(|port| port.name == "beat"),
+            "a timer is not also a port"
+        );
+
+        // The reaction and its edge both reach for the timer's own id.
+        assert_eq!(
+            snapshot.reactions[0].triggers,
+            vec!["timer::beat".to_string()]
+        );
+        let trigger = snapshot
+            .edges
+            .iter()
+            .find(|edge| edge.kind == "trigger")
+            .expect("the timer triggers the reaction");
+        assert_eq!(trigger.source, "timer::beat");
+
+        // Firing is what the clock face reads, so it has to survive the wire.
+        let publisher = DiagramPublisher {
+            snapshot: Arc::new(RwLock::new(snapshot)),
+            subscribers: Arc::new(Mutex::new(Vec::new())),
+            sequence: Arc::new(AtomicU64::new(0)),
+        };
+        publisher.tag_advanced(30, 0, &BTreeMap::from([("beat".into(), json!(30))]));
+        let fired = publisher.snapshot.read().expect("snapshot").clone();
+        assert_eq!(
+            fired.timers[0].last_tag,
+            Some(DiagramTag {
+                timestamp: 30,
+                microstep: 0
+            })
+        );
     }
 
     #[test]
