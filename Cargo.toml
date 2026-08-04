@@ -37,6 +37,12 @@ portable-pty = "0.8"
 pretty_assertions = "1"
 tempfile = "3"
 
+# Embeds the Mission Control bundle from `web/dist/spa` so `omar serve --ui`
+# can hand it out. Off by default: a plain `cargo build` needs no Node. Build
+# the bundle first with `npm run build:spa` in `web/`.
+[features]
+ui = []
+
 [[bin]]
 name = "omar"
 path = "src/omar.rs"

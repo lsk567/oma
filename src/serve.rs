@@ -492,6 +492,15 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
         return write_json(&mut stream, 204, &Value::Null, origin);
     }
 
+    // Anything that is not the API is Mission Control, when this binary was
+    // built with it. Matched after every `/v1` route, so the bundle can never
+    // shadow one, and only for GET: the API owns the verbs.
+    if method == "GET" && !path.starts_with("/v1/") && path != "/health" {
+        if let Some(asset) = crate::web_assets::lookup(&path) {
+            return write_asset(&mut stream, asset);
+        }
+    }
+
     // Streams for as long as the operator keeps Mission Control open.
     if method == "GET" && path == "/v1/chat/events" {
         return stream_chat(stream, &context, origin);
@@ -1155,6 +1164,24 @@ fn write_json(
         crate::diagram::cors_origin_header(origin)
     )?;
     stream.write_all(&payload)?;
+    stream.flush()?;
+    Ok(())
+}
+
+/// Hands out an embedded Mission Control file.
+///
+/// Stored gzipped and sent gzipped: the bundle is 2.2MB raw and 0.65MB
+/// compressed, and this only ever answers loopback, where every client
+/// understands the encoding. `no-store` because the bundle changes whenever the
+/// binary does and the two carry no version between them.
+fn write_asset(stream: &mut TcpStream, asset: &crate::web_assets::Asset) -> Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        asset.content_type,
+        asset.gzipped.len()
+    )?;
+    stream.write_all(asset.gzipped)?;
     stream.flush()?;
     Ok(())
 }

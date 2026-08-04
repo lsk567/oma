@@ -1,0 +1,23 @@
+<!doctype html>
+<!--
+  The same application as the Worker build, entered from the browser instead of
+  from a server render.
+
+  `omar serve --ui` hands this out on its own port, so the client is same-origin
+  with the API it calls. That is what lets the address be read from the page
+  rather than injected at launch, and it is why this entry exists at all.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#08080a" />
+    <title>OMAR Mission Control</title>
+    <link rel="icon" href="/omar-logo.png" />
+    <link rel="apple-touch-icon" href="/omar-logo.png" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

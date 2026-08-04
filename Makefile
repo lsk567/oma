@@ -1,10 +1,17 @@
-.PHONY: build install uninstall test-topology dev
+.PHONY: build install uninstall test-topology dev web-bundle
 
 BINARIES := omar omar-computer omar-slack
 INSTALL_DIR := $(HOME)/.cargo/bin
 
-build:
-	cargo build --release
+# Mission Control, built and compressed for the runtime to embed. Needs Node.
+web-bundle:
+	cd web && npm ci && npm run build:spa
+
+# Built with the UI in it, so an installed `omar serve --ui` has something to
+# serve. A plain `cargo build --release` still works and still needs no Node;
+# it just cannot serve the UI.
+build: web-bundle
+	cargo build --release --features ui
 
 install: build
 	install -d $(INSTALL_DIR)
