@@ -17,6 +17,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { gunzipSync } from "node:zlib";
 import { resolve } from "node:path";
 import test, { after, before, describe } from "node:test";
@@ -42,6 +43,28 @@ function bundled() {
 }
 
 const AVAILABLE = bundled();
+
+/** A GET returning exactly what came over the wire, undecoded. */
+function get(path) {
+  return new Promise((settle, fail) => {
+    const call = httpRequest(
+      { host: "127.0.0.1", port: PORT, path, method: "GET" },
+      (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () =>
+          settle({
+            statusCode: response.statusCode,
+            headers: response.headers,
+            body: Buffer.concat(chunks),
+          }),
+        );
+      },
+    );
+    call.on("error", fail);
+    call.end();
+  });
+}
 
 describe("omar serve --ui", { skip: AVAILABLE ? false : "no bundled runtime" }, () => {
   let daemon;
@@ -76,13 +99,20 @@ describe("omar serve --ui", { skip: AVAILABLE ? false : "no bundled runtime" }, 
   });
 
   test("the bundle is reachable and is really gzip", async () => {
-    const response = await fetch(`${ORIGIN}/app.js`);
-    assert.equal(response.status, 200);
-    assert.match(response.headers.get("content-type"), /javascript/);
-    const raw = Buffer.from(await response.arrayBuffer());
-    // Decoded by fetch already; gunzipping it again would fail, so this checks
-    // the payload is a real script rather than an error page.
-    assert.ok(raw.length > 100_000, `suspiciously small: ${raw.length} bytes`);
+    // `node:http` rather than `fetch`: it hands over the bytes on the wire
+    // instead of decoding them, which is the only way to assert that what is
+    // stored is compressed. It also steps around an undici crash on a large
+    // gzip body followed by a connection close — a client bug, but browsers do
+    // not share it and this is what the daemon actually talks to.
+    const { statusCode, headers, body } = await get("/app.js");
+    assert.equal(statusCode, 200);
+    assert.match(headers["content-type"], /javascript/);
+    assert.equal(headers["content-encoding"], "gzip");
+    assert.equal(Number(headers["content-length"]), body.length);
+    assert.deepEqual([...body.subarray(0, 2)], [0x1f, 0x8b], "not gzip on the wire");
+    const script = gunzipSync(body);
+    assert.ok(script.length > 1_000_000, `suspiciously small: ${script.length} bytes`);
+    assert.match(script.subarray(0, 4096).toString("utf8"), /function|const|var/);
   });
 
   test("an unknown path is the shell, not a 404", async () => {
@@ -136,6 +166,3 @@ test("a runtime without the bundle refuses --ui and explains itself", { skip: AV
   assert.match(said, /no UI in it/);
   assert.match(said, /--features ui/);
 });
-
-// Referenced so the import is not flagged as unused when everything skips.
-void gunzipSync;

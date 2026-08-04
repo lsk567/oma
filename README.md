@@ -4,8 +4,6 @@
 
 **`omar` is a harness for creating powerful multi-agent workflows.**
 
-Lead a team of 100 agents to solve humanity's biggest problems.
-
 <p align="center">
   <a href="https://omar.rs">omar.rs</a>&nbsp; • &nbsp;
   <a href="https://omar.rs/zh/">中文</a>&nbsp; • &nbsp;
@@ -16,6 +14,9 @@ Lead a team of 100 agents to solve humanity's biggest problems.
 
 </div>
 
+![Web](img/web.gif)
+
+Alternative Terminal UI:
 ![Demo](img/demo.gif)
 
 ## Features
