@@ -133,12 +133,31 @@ jobs:
           echo "$output"
           grep -Fq 'Output run.result = "hello"' <<<"$output"
 
-      - name: Check bytecode layout and Codex-only test agents
+      - name: Check bytecode layout and declared agent backends
         run: |
           python3 - <<'PY'
           import glob
           import json
           import os
+          import re
+
+          # `[name : Backend, other : Backend]` on a team. A port's type is
+          # lowercase (`inp : string`), so naming the backends keeps ports out.
+          BACKENDS = "ClaudeCode|Claude|Codex|Cursor|OpenCode|Agy|Stub"
+          declaration = re.compile(rf"\b(\w+)\s*:\s*({BACKENDS})\b")
+
+          def declared_backends(name):
+              """Agent name -> the backends its source gives it.
+
+              A set: two teams may reuse a local agent name, and instantiating
+              qualifies it by a path the source itself never spells.
+              """
+              with open(f"tests/topology/src/{name}.omar", encoding="utf-8") as source:
+                  text = source.read()
+              declared = {}
+              for agent, backend in declaration.findall(text):
+                  declared.setdefault(agent, set()).add(backend)
+              return declared
 
           field_rank = {
               "op": 0, "instance": 1, "kind": 2, "name": 3, "type": 4,
@@ -154,6 +173,8 @@ jobs:
           for path in bytecodes:
               with open(path) as file:
                   bytecode = json.load(file)
+              declared = declared_backends(os.path.basename(path)[: -len(".json")])
+              assert declared, (path, "source declares no agent")
               for instruction in bytecode["instructions"]:
                   keys = list(instruction)
                   assert keys[0] == "op", (path, keys)
@@ -176,8 +197,16 @@ jobs:
                       assert keys == connection_order, (path, keys)
                   if instruction["op"] == "install_reaction":
                       assert keys == reaction_order, (path, keys)
-                  if os.path.basename(path) != "HR.json" and instruction["op"] == "spawn_agent":
-                      assert instruction["backend"] == "Codex", (path, instruction)
+                  # A program picks its own backends; what CI pins is that the
+                  # bytecode spawns the one its source asked for. Instantiating
+                  # qualifies an agent by its instance path, so the declaration
+                  # is found under the last segment.
+                  if instruction["op"] == "spawn_agent":
+                      local = instruction["name"].rsplit(".", 1)[-1]
+                      assert local in declared, (path, instruction)
+                      assert instruction["backend"] in declared[local], (
+                          path, instruction, sorted(declared[local])
+                      )
           PY
 
   popup-quote-integration:

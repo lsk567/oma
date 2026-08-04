@@ -144,8 +144,10 @@ enum Commands {
         /// OMAR source program
         program: PathBuf,
 
-        /// External input in NAME=VALUE form; repeat for multiple inputs
-        #[arg(long = "input", required = true)]
+        /// External input in NAME=VALUE form; repeat for multiple inputs.
+        /// A timer-driven program takes none, and the runtime still rejects a
+        /// missing one by name, so requiring it here only blocked those.
+        #[arg(long = "input")]
         inputs: Vec<String>,
 
         /// Replace existing agent sessions with topology-scoped sessions

@@ -1,0 +1,182 @@
+// A hierarchy four levels deep: main -> Bureau -> Division -> Cell -> Analyst.
+// Every level speaks only to its own children: a team hands work down through a
+// connection to a contained input, and observes what came back by reading a
+// contained output. Nothing reaches past one level, so the containers are real
+// structure rather than decoration.
+//
+// 32 agents. Self-contained: every agent answers from its own knowledge and is
+// told not to browse, read files, or run commands.
+
+team Analyst(lens : string)[analyst : ClaudeCode]
+{
+    input brief : string
+    output finding : string
+
+    prompt analyst(brief) -> finding
+    "
+        You are an analyst working the $(lens) angle. Answer from your own
+        knowledge: do not browse the web, read files, or run commands.
+
+        The brief you were handed: $(brief)
+
+        Set `finding` to at most 80 words — the two or three things the $(lens)
+        angle says about this brief, each stated as a claim someone could argue
+        with. No preamble.
+    "
+}
+
+team Cell(charter : string)[lead : ClaudeCode]
+{
+    input assignment : string
+    output report : string
+
+    evidence = Analyst("supporting evidence");
+    counter = Analyst("counter-evidence");
+    ripple = Analyst("second-order effects");
+
+    assignment -> evidence.brief
+    assignment -> counter.brief
+    assignment -> ripple.brief
+
+    prompt lead(evidence.finding, counter.finding, ripple.finding) -> report
+    "
+        You lead the $(charter) cell. Three analysts worked the same assignment
+        from different angles.
+
+        Supporting evidence: $(evidence.finding)
+        Counter-evidence: $(counter.finding)
+        Second-order effects: $(ripple.finding)
+
+        Set `report` to at most 100 words — what the three agree on, where they
+        genuinely conflict, and the one claim this cell would stake its name on.
+        Do not browse or run commands.
+    "
+}
+
+team Division(mission : string)[director : ClaudeCode]
+{
+    input mandate : string
+    output brief : string
+    action probe_task : string
+    action stress_task : string
+
+    probe = Cell("probe");
+    stress = Cell("stress");
+
+    prompt director(mandate) -> probe_task, stress_task
+    "
+        You direct the $(mission) division. Your mandate: $(mandate)
+
+        Split it into two assignments of at most 40 words each for two cells that
+        must not duplicate each other's work.
+        Set `probe_task` to the assignment that establishes what is true.
+        Set `stress_task` to the assignment that tries to break it.
+        Answer from your own knowledge; do not browse or run commands.
+    "
+
+    probe_task -> probe.assignment
+    stress_task -> stress.assignment
+
+    prompt director(probe.report, stress.report) -> brief
+    "
+        Both of your cells have reported on the $(mission) mandate.
+
+        Probe cell: $(probe.report)
+        Stress cell: $(stress.report)
+
+        Set `brief` to at most 120 words — the division's position on the
+        $(mission) question, the strongest objection to that position, and your
+        confidence in it (low, medium, or high) with one line of why.
+    "
+}
+
+team Bureau[chief : ClaudeCode, editor : ClaudeCode]
+{
+    input topic : string
+    output dossier : string
+    action markets_mandate : string
+    action tech_mandate : string
+    action risk_mandate : string
+
+    d_markets = Division("markets");
+    d_tech = Division("technology");
+    d_risk = Division("risk");
+
+    prompt chief(topic) -> markets_mandate, tech_mandate, risk_mandate
+    "
+        You run a research bureau with three divisions. The topic is: $(topic)
+
+        Write one mandate per division, at most 50 words each, phrased as a
+        question that division can actually answer. They must not overlap.
+        Set `markets_mandate` for the markets division (demand, money, adoption).
+        Set `tech_mandate` for the technology division (what is buildable, and when).
+        Set `risk_mandate` for the risk division (what fails, and who is harmed).
+        Answer from your own knowledge; do not browse or run commands.
+    "
+
+    markets_mandate -> d_markets.mandate
+    tech_mandate -> d_tech.mandate
+    risk_mandate -> d_risk.mandate
+
+    prompt editor(d_markets.brief, d_tech.brief, d_risk.brief) -> dossier
+    "
+        The three divisions have reported on the bureau's topic.
+
+        Markets: $(d_markets.brief)
+        Technology: $(d_tech.brief)
+        Risk: $(d_risk.brief)
+
+        Set `dossier` to at most 250 words, in this shape:
+        a one-sentence bottom line; three bullets, one per division, in that
+        division's own words; then `Tensions:` naming any place two divisions
+        disagree, or `Tensions: none` if they do not. Do not browse or run commands.
+    "
+}
+
+team Referee(standard : string)[referee : ClaudeCode]
+{
+    input dossier : string
+    output verdict : string
+
+    prompt referee(dossier) -> verdict
+    "
+        Judge this dossier on one standard only: $(standard).
+
+        $(dossier)
+
+        Set `verdict` to at most 60 words — a grade of pass, weak, or fail on
+        $(standard), and the single change that would most improve it. Judge from
+        your own knowledge; do not browse or run commands.
+    "
+}
+
+team Audit[judge : ClaudeCode]
+{
+    input dossier : string
+    output ruling : string
+
+    rigor = Referee("rigor: are the claims specific and falsifiable");
+    usefulness = Referee("usefulness: could a decision be made from this");
+
+    dossier -> rigor.dossier
+    dossier -> usefulness.dossier
+
+    prompt judge(rigor.verdict, usefulness.verdict) -> ruling
+    "
+        Two referees graded the bureau's dossier.
+
+        Rigor: $(rigor.verdict)
+        Usefulness: $(usefulness.verdict)
+
+        Set `ruling` to at most 120 words — accept, revise, or reject; the one
+        reason; and, if revise, the single most valuable change. Do not browse or
+        run commands.
+    "
+}
+
+main Bureau {
+    bureau = Bureau()
+    audit = Audit()
+
+    bureau.dossier -> audit.dossier
+}
