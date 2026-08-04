@@ -1,0 +1,165 @@
+// Cadence — a standing review that runs itself on a clock.
+//
+// The program takes no input at all. A timer is what starts it, which nothing
+// else in the language can do: every other trigger needs something upstream to
+// write to it.
+//
+// Timers appear here in three distinct roles:
+//
+//   ignition   `open1(1, 0)`  fires with nothing upstream and opens round 1.
+//              (Offset and period cannot both be 0 — a timer that never fires
+//              is rejected at compile time — so ignition sits at tag 1.)
+//   cadence    `open2(10, 0)`, `open3(20, 0)` open the later rounds. Logical
+//              time is event-driven, so everything at tag 0 — the whole
+//              scout-and-digest fan-out for round 1, including the digest
+//              landing back in the chair's memory — has drained before tag 10
+//              exists. The rounds cannot interleave, and no delay arithmetic
+//              is needed to say so.
+//   deadline   `close(30, 0)` publishes. It is guaranteed to fire after the
+//              last round has fully settled, for the same reason.
+//
+// Every period is 0, so every timer fires once and the program ends on its
+// own. A non-zero period re-arms forever and would run to the tag cap.
+//
+// Self-contained: every agent answers from its own knowledge and is told not
+// to browse, read files, or run commands.
+
+team Scout(lens : string)[scout : ClaudeCode]
+{
+    input brief : string
+    output finding : string
+
+    prompt scout(brief) -> finding
+    "
+        You are a scout working one angle only: $(lens). Answer from your own
+        knowledge — do not browse the web, read files, or run commands.
+
+        This round's brief: $(brief)
+
+        Set `finding` to at most 80 words: the two or three things the $(lens)
+        angle says about this brief, each stated as a claim someone could
+        argue with. If a previous round already covered a point, say something
+        new instead. No preamble.
+    "
+}
+
+team Desk[editor : ClaudeCode]
+{
+    input evidence : string
+    input risk : string
+    input practice : string
+    output digest : string
+
+    prompt editor(evidence, risk, practice) -> digest
+    "
+        Three scouts worked this round from different angles. The tag barrier
+        delivers all three together.
+
+        Evidence: $(evidence)
+        Risk: $(risk)
+        Practice: $(practice)
+
+        Set `digest` to at most 120 words: what the three agree on, the
+        sharpest disagreement between them, and the single question this round
+        leaves open. Answer from your own knowledge; do not browse or run
+        commands.
+    "
+}
+
+team Chair(topic : string)[chair : ClaudeCode]
+{
+    timer open1(1, 0)
+    timer open2(10, 0)
+    timer open3(20, 0)
+    timer close(30, 0)
+
+    input digest : string
+    output brief : string
+    output journal : string
+    output report : string
+
+    // Ignition. Nothing upstream; the clock alone starts the program.
+    prompt chair(open1) -> brief
+    "
+        You chair a standing review of this topic: $(topic)
+
+        This is round 1 of 3, opened by the clock at logical time $(open1).
+        Nothing has been said yet.
+
+        Set `brief` to at most 60 words: the question round 1 should settle,
+        phrased so three scouts working evidence, risk, and practice can each
+        answer it. Answer from your own knowledge; do not browse or run
+        commands.
+    "
+
+    // The digest is not a trigger for the rounds — it only has to land in the
+    // chair's memory, which every prompt on this agent shares. The clock, not
+    // the digest, decides when the chair acts on what it learned.
+    prompt chair(digest) -> journal
+    "
+        A round has just reported. Read it and remember it; you will be asked
+        about it when the clock opens the next round.
+
+        $(digest)
+
+        Set `journal` to at most 25 words — a one-line note to yourself about
+        what changed. Do not browse or run commands.
+    "
+
+    prompt chair(open2) -> brief
+    "
+        The clock has opened round 2 of 3 at logical time $(open2). Round 1 has
+        fully reported and you have already read its digest — recall it from
+        your own memory of this review of $(topic).
+
+        Set `brief` to at most 60 words: the question round 2 should settle.
+        It must follow from what round 1 left open, and must not re-ask what
+        round 1 already answered. Do not browse or run commands.
+    "
+
+    prompt chair(open3) -> brief
+    "
+        The clock has opened round 3 of 3 at logical time $(open3). You have
+        read the digests of rounds 1 and 2 — recall them from your own memory
+        of this review of $(topic).
+
+        Set `brief` to at most 60 words: the question round 3 should settle.
+        This is the last round, so ask the one thing that most changes what a
+        reader would do. Do not browse or run commands.
+    "
+
+    // The deadline. It fires at tag 30, after every round has settled, so it
+    // always publishes a complete review rather than a partial one.
+    prompt chair(close) -> report
+    "
+        The deadline has arrived at logical time $(close). Three rounds have
+        reported on $(topic) and you have read all three digests — recall them
+        from your own memory.
+
+        Set `report` to at most 250 words, in this shape:
+        a one-sentence bottom line; then `Round 1:`, `Round 2:`, `Round 3:`,
+        one or two lines each on what that round established; then
+        `Unresolved:` naming what three rounds did not settle, or
+        `Unresolved: none`. Do not browse or run commands.
+    "
+}
+
+main Cadence {
+    chair = Chair("the operational risks of running many autonomous coding agents in parallel against one repository")
+
+    evidence = Scout("evidence: what is actually known to happen")
+    risk = Scout("risk: what fails, and who it costs")
+    practice = Scout("practice: what a team should do on Monday")
+
+    desk = Desk()
+
+    chair.brief -> evidence.brief
+    chair.brief -> risk.brief
+    chair.brief -> practice.brief
+
+    evidence.finding -> desk.evidence
+    risk.finding -> desk.risk
+    practice.finding -> desk.practice
+
+    desk.digest -> chair.digest
+}

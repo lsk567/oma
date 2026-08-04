@@ -1,7 +1,9 @@
 # OMAR topology integration corpus
 
-The `.omar` sources live in `tests/topology/src/`. Every scenario except the
-heterogeneous `HR.omar` uses Codex for every agent. CI performs login-free
+The `.omar` sources live in `tests/topology/src/`. Each picks its own backends;
+CI checks that the bytecode spawns the backend its source declared, not that
+every source agrees on one. Most use Codex, and running the whole corpus needs
+every backend it names installed and authenticated. CI performs login-free
 compiler and Rust VM dry-run checks on every pull request. The authenticated
 suite runs from trusted branches and can also be invoked locally.
 
@@ -22,6 +24,13 @@ Coverage:
   additive connection delay, and chronological delivery.
 - `HR.omar`: the heterogeneous hiring example using Claude and Codex.
 - `HRCodex.omar`: the original hiring example using Codex for every role.
+- `Cadence.omar`: one-shot timers opening three rounds and a deadline, with a
+  chair whose four prompts share one agent memory. Claude Code.
+- `Bureau.omar`: four levels of containment and 32 agents — the heaviest case
+  here. Claude Code.
+- `Heartbeat.omar`: a periodic timer driving a program that never finishes.
+  Compiled and checked, never run: `run_local.sh` waits for a completion
+  marker this program does not produce.
 
 Every program declares its teams and then instantiates them in a `main` block,
 so ports are named `instance.port` and each program takes its source file's
