@@ -44,7 +44,7 @@ Other features include messaging systems integration (e.g., Slack), computer use
 - Rust 1.70+
 - GNU Make
 - Node.js 22.13+ (to build Mission Control, which `make build` embeds)
-- One or more coding agents: [Claude](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview), [Codex](https://developers.openai.com/codex/cli), [Cursor](https://cursor.com/cli), [Opencode](https://github.com/anomalyco/opencode), or [Google Antigravity CLI](https://antigravity.google/product/antigravity-cli).
+- One or more coding agents [listed here](#supported-agent-backends).
 
 ### One-liner (recommended)
 
@@ -86,9 +86,9 @@ the topology it compiles to.
 Nothing runs until you press **Confirm deploy**,
 then the diagram goes live.
 
-### Terminal UI
+### Terminal UI (Legacy)
 
-The same runtime, driven from tmux instead.
+Note: The legacy terminal UI does not yet implement the deterministic model in the mission control.
 
 #### Step 1: Launch `omar`
 
@@ -115,20 +115,6 @@ Go back to the EA and type in:
 ```
 Shutdown the test project and its agents.
 ```
-
-## Working on Mission Control
-
-The web client lives in [`web/`](web/) and is built from this same commit as the
-runtime it talks to. `omar serve --ui` hands out a bundle compiled into the
-binary; to work on the client itself, use the dev server instead — it reloads:
-
-```bash
-make dev
-```
-
-Builds the runtime, starts the daemon, starts Mission Control pointed at it,
-and opens a browser. Ctrl-C stops both. Needs Node.js 22.13+; see
-[`web/README.md`](web/README.md).
 
 ## Supported Agent Backends
 
