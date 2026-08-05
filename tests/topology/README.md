@@ -27,7 +27,8 @@ Coverage:
 - `Cadence.omar`: one-shot timers opening three rounds and a deadline, with a
   chair whose four prompts share one agent memory. Claude Code.
 - `Bureau.omar`: four levels of containment and 32 agents — the heaviest case
-  here. Claude Code.
+  here. Claude Code. Compiled and checked, not run: eight sequential stages of
+  live agents is not something the release gate should be finding out about.
 - `Heartbeat.omar`: a periodic timer driving a program that never finishes.
   Compiled and checked, never run: `run_local.sh` waits for a completion
   marker this program does not produce.
