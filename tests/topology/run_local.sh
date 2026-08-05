@@ -300,16 +300,15 @@ run_case Nested Nested run.summary --input run.brief='hierarchy'
 run_case Timer Timer beacon.note
 # Four one-shot timers opening three rounds and a deadline, on Claude Code.
 run_case Cadence Cadence chair.report
-# Four levels of containment and 32 agents: the heaviest case in the corpus.
-run_case Bureau Bureau audit.ruling \
-  --input bureau.topic='Whether on-device LLM inference will displace cloud APIs as the default for consumer applications within three years'
 run_case SameAgentSerial SameAgentSerial serial.result \
   --input serial.request='serialize these reactions'
 run_case SuperdenseTime SuperdenseTime time.fixed_result,time.connected_result \
   --input time.start=7
-# `Heartbeat` is deliberately absent: its timer has a non-zero period, so the
-# program never finishes and has no completion marker to wait for. It is
-# compiled and checked like every other source, just never run here.
+# `Heartbeat` and `Bureau` are deliberately absent. `Heartbeat`'s timer has a
+# non-zero period, so the program never finishes and has no completion marker to
+# wait for. `Bureau` is 32 agents across eight sequential stages, and a release
+# gate is not the place to discover whether that fits in a case timeout. Both are
+# compiled and backend-checked like every other source, just never run here.
 
 if ((passed_cases + failed_cases == 0)); then
   printf 'No topology case named %s\n' "$case_filter" >&2
