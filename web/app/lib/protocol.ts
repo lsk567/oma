@@ -83,7 +83,12 @@ export type DiagramSnapshot = {
   protocol_version: number;
   team: string;
   sequence: number;
-  status: "ready" | "running" | "completed" | "failed";
+  /**
+   * `awaiting_input` is not a kind of finished: the program has nothing left to
+   * do until the operator sets an open input. A client that collapses it into
+   * `completed` shows a run as over before anything has happened.
+   */
+  status: "ready" | "running" | "awaiting_input" | "completed" | "failed";
   current_tag: DiagramTag | null;
   /** Containers to draw. Empty means the runtime predates instances, and the
       program is drawn as one box named after itself. */
@@ -95,6 +100,18 @@ export type DiagramSnapshot = {
   reactions: DiagramReaction[];
   edges: DiagramEdge[];
 };
+
+/**
+ * The ports the operator is expected to set: inputs nothing inside the topology
+ * writes to. Everything else takes its value from a connection, and setting one
+ * from outside would be a second writer the program does not describe.
+ */
+export function openInputs(snapshot: DiagramSnapshot): DiagramPort[] {
+  const fed = new Set(
+    snapshot.edges.filter((edge) => edge.kind === "connection").map((edge) => edge.target),
+  );
+  return snapshot.ports.filter((port) => port.kind === "input" && !fed.has(port.id));
+}
 
 export type DiagramEvent = {
   protocol_version: number;
@@ -173,7 +190,12 @@ export type RunRecord = {
 
 export type RunRequest = {
   program: string;
-  inputs: Record<string, unknown>;
+  /**
+   * Seeds, not requirements. Deploying and deciding what to feed a program are
+   * separate acts: anything omitted is set afterwards over
+   * `POST /v1/runs/{id}/inputs`, and until then the run waits.
+   */
+  inputs?: Record<string, unknown>;
 };
 
 export function isRunFinished(status: RunRecord["status"]): boolean {

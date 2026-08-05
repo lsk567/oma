@@ -278,6 +278,12 @@ pub trait TopologyObserver: Send + Sync {
         _writes: &BTreeMap<String, Value>,
     ) {
     }
+    /// The run has nothing left to do until the operator sets one of these.
+    ///
+    /// Distinct from finishing: a program with an open input is not over, it is
+    /// waiting, and a client that cannot tell the two apart shows a run as
+    /// complete when nothing has happened yet.
+    fn awaiting_input(&self, _ports: &[String]) {}
     fn run_completed(&self, _outputs: &BTreeMap<String, Value>) {}
     fn run_failed(&self, _message: &str) {}
 }
@@ -339,6 +345,17 @@ impl DiagramPublisher {
 impl TopologyObserver for DiagramPublisher {
     fn run_started(&self) {
         self.publish_status("run_started", "running", json!({}));
+    }
+
+    fn awaiting_input(&self, ports: &[String]) {
+        // Named in the event as well as the status: the client draws a panel
+        // over exactly these, and deriving them from the graph would mean
+        // re-deciding what "open" means in two places.
+        self.publish_status(
+            "awaiting_input",
+            "awaiting_input",
+            json!({ "ports": ports }),
+        );
     }
 
     fn tag_advanced(&self, timestamp: u64, microstep: u64, ports: &BTreeMap<String, Value>) {

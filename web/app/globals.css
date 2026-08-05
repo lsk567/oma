@@ -1437,6 +1437,147 @@ h2 {
 
 /* A terminal attached to a running agent. It sits over the studio rather than
    in a separate window so the diagram stays behind it for context. */
+/* Set values for open input ports.
+
+   Slides in over the diagram rather than replacing it: the operator picked
+   these ports by clicking them, and a list of qualified names is much easier to
+   place when the drawing is still behind it. */
+.input-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 35;
+  width: min(420px, 92vw);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  box-shadow: -24px 0 60px rgba(0, 0, 0, 0.5);
+  animation: input-panel-in 160ms ease-out;
+}
+
+@keyframes input-panel-in {
+  from {
+    transform: translateX(16px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .input-panel {
+    animation: none;
+  }
+}
+
+.input-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.input-panel-head h2 {
+  margin: 2px 0 0;
+  font-size: 15px;
+}
+
+.input-panel-close {
+  border: 0;
+  background: transparent;
+  color: #9d97a8;
+  font-size: 11px;
+  text-decoration: underline;
+}
+
+.input-panel-close:hover {
+  color: #d8caff;
+}
+
+.input-panel-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* Scrolls on its own: a program can have more open inputs than fit. */
+.input-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.input-port {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+/* The one the operator clicked on the diagram. */
+.input-port.focused {
+  border-color: var(--purple);
+  box-shadow: 0 0 0 1px var(--purple-soft);
+}
+
+.input-port-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.input-port-type {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.input-port input {
+  grid-column: 1 / -1;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.input-port input:focus {
+  outline: none;
+  border-color: var(--purple);
+}
+
+.input-panel-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* An open input is the operator's to set, so it reads as actionable rather
+   than as one more thing the drawing happens to contain. */
+.omar-port-group.open-input {
+  cursor: pointer;
+}
+
+.omar-port-group.open-input .omar-port {
+  stroke: var(--purple);
+  stroke-width: 1.5;
+}
+
+.omar-port-group.open-input:hover .omar-port {
+  fill: var(--purple);
+}
+
 .terminal-overlay {
   position: fixed;
   inset: 0;

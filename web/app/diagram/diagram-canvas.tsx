@@ -991,12 +991,17 @@ export function DiagramCanvas({
   selection = [],
   onToggleComponent,
   onOpenTerminal,
+  openInputs,
+  onSetInput,
 }: {
   snapshot: DiagramSnapshot;
   selection?: string[];
   onToggleComponent?: (component: string) => void;
   /** Given only while agents are actually running and can be attached to. */
   onOpenTerminal?: (agent: string) => void;
+  /** Port ids the operator may set: inputs nothing in the topology writes to. */
+  openInputs?: ReadonlySet<string>;
+  onSetInput?: (portId: string) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [layout, setLayout] = useState<Layout | null>(null);
@@ -1408,8 +1413,26 @@ export function DiagramCanvas({
               {layout.ports.map((port) => (
                 <g
                   key={port.id}
-                  {...selectable(port.id, `omar-port-group ${port.kind}`)}
+                  {...selectable(
+                    port.id,
+                    `omar-port-group ${port.kind}${
+                      openInputs?.has(port.id) ? " open-input" : ""
+                    }`,
+                  )}
                   transform={`translate(${port.center.x},${port.center.y})`}
+                  // An open input is the operator's to set, so clicking it
+                  // opens the panel on that port rather than only selecting it.
+                  onClickCapture={
+                    openInputs?.has(port.id) && onSetInput
+                      ? (event) => {
+                          event.stopPropagation();
+                          // The id, not the drawn name: the label is
+                          // stripped of its instance prefix and the runtime
+                          // wants the qualified port.
+                          onSetInput(port.id);
+                        }
+                      : undefined
+                  }
                 >
                   <polygon className="omar-port" points={portTriangle(ORIGIN)} />
                   {/* Sits above the connection line so routing never crosses text. */}

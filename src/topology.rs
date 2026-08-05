@@ -815,7 +815,12 @@ fn validate_invocation_owner(team: &str, agent: &str, invocation: &InvocationRec
     Ok(())
 }
 
-fn validate_value(ty: &str, value: &Value) -> Result<()> {
+/// Whether a value is usable as a port of this type.
+///
+/// Public because `omar serve` checks what the operator sends before it reaches
+/// a run: a mistyped value is a rejected request, not a run that fails later
+/// for a reason nobody can trace back to what they typed.
+pub fn validate_value(ty: &str, value: &Value) -> Result<()> {
     if let Some(inner) = generic_inner(ty, "list") {
         let values = value
             .as_array()
@@ -1050,6 +1055,13 @@ pub struct TopologyRunConfig<'a> {
     /// Receives the bound diagram address once the server is up. `omar serve`
     /// needs it while the run is still in flight; `omar run` prints it instead.
     pub diagram_ready: Option<mpsc::Sender<std::net::SocketAddr>>,
+    /// Values the operator sends after the run has started.
+    ///
+    /// Present, the run may be deployed before anyone has decided what to feed
+    /// it: open inputs need not be supplied up front, and the loop waits for
+    /// them rather than finishing. Absent — `omar run` — every open input is
+    /// required at the command line, as it always was.
+    pub inbox: Option<mpsc::Receiver<BTreeMap<String, Value>>>,
 }
 
 pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Result<()> {
@@ -1088,7 +1100,13 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
     let prepared = (|| -> Result<(InvocationServer, BTreeMap<String, Value>)> {
         let invocation_server = InvocationServer::start()?;
         spawn_topology_agents(&state, &client, &runtime_dir, &invocation_server, &config)?;
-        let inputs = parse_inputs(&state, config.inputs)?;
+        // Agents are up either way. What differs is whether the program can
+        // start: with an inbox the operator supplies open inputs afterwards.
+        let inputs = if config.inbox.is_some() {
+            parse_partial_inputs(&state, config.inputs)?
+        } else {
+            parse_inputs(&state, config.inputs)?
+        };
         Ok((invocation_server, inputs))
     })();
     let (invocation_server, inputs) = match prepared {
@@ -1104,13 +1122,14 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
         registry: invocation_server.registry.clone(),
         timeout: config.timeout,
     };
-    let outputs = match run_event_loop_observed(&state, inputs, &executor, observer) {
-        Ok(outputs) => outputs,
-        Err(error) => {
-            observer.run_failed(&error.to_string());
-            return Err(error);
-        }
-    };
+    let outputs =
+        match run_event_loop_fed(&state, inputs, &executor, observer, config.inbox.as_ref()) {
+            Ok(outputs) => outputs,
+            Err(error) => {
+                observer.run_failed(&error.to_string());
+                return Err(error);
+            }
+        };
     observer.run_completed(&outputs);
     write_json_atomic(&runtime_dir.join("state.json"), &state)?;
     println!("Topology '{}' completed", state.team);
@@ -1184,7 +1203,47 @@ fn spawn_topology_agents(
     Ok(())
 }
 
+/// Input ports nothing inside the topology writes to.
+///
+/// These are the operator's to set; every other input takes its value from a
+/// connection. A program whose open inputs are unset and whose timers have not
+/// fired has nothing that can advance it — which is the point: it is waiting,
+/// not finished.
+pub fn open_inputs(state: &VmState) -> Vec<String> {
+    state
+        .ports
+        .iter()
+        .filter(|(name, port)| {
+            port.kind == PortKind::Input
+                && !state
+                    .connections
+                    .iter()
+                    .any(|connection| connection.target == **name)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Every open input must be supplied: the run starts and finishes in one go.
 pub fn parse_inputs(state: &VmState, raw_inputs: &[String]) -> Result<BTreeMap<String, Value>> {
+    parse_inputs_inner(state, raw_inputs, true)
+}
+
+/// Only what is supplied is checked. The rest are left for the operator to send
+/// once the run is up, which is how a run can be deployed before anyone has
+/// decided what to feed it.
+pub fn parse_partial_inputs(
+    state: &VmState,
+    raw_inputs: &[String],
+) -> Result<BTreeMap<String, Value>> {
+    parse_inputs_inner(state, raw_inputs, false)
+}
+
+fn parse_inputs_inner(
+    state: &VmState,
+    raw_inputs: &[String],
+    require_all: bool,
+) -> Result<BTreeMap<String, Value>> {
     let mut inputs = BTreeMap::new();
     for raw in raw_inputs {
         let (name, raw_value) = raw
@@ -1207,16 +1266,14 @@ pub fn parse_inputs(state: &VmState, raw_inputs: &[String]) -> Result<BTreeMap<S
         validate_value(&port.ty, &value)?;
         inputs.insert(name.to_string(), value);
     }
-    for (name, port) in &state.ports {
-        // An input fed by a connection gets its value from inside the topology,
-        // so the operator has nothing to supply. Supplying one anyway is still
-        // allowed: that is how a feedback loop is seeded.
-        let connected = state
-            .connections
-            .iter()
-            .any(|connection| connection.target == *name);
-        if port.kind == PortKind::Input && !connected && !inputs.contains_key(name) {
-            bail!("missing input '{name}'");
+    if require_all {
+        for name in open_inputs(state) {
+            // An input fed by a connection gets its value from inside the
+            // topology, so the operator has nothing to supply. Supplying one
+            // anyway is still allowed: that is how a feedback loop is seeded.
+            if !inputs.contains_key(&name) {
+                bail!("missing input '{name}'");
+            }
         }
     }
     Ok(inputs)
@@ -1297,15 +1354,33 @@ fn run_event_loop<E: ReactionExecutor>(
     inputs: BTreeMap<String, Value>,
     executor: &E,
 ) -> Result<BTreeMap<String, Value>> {
-    run_event_loop_observed(state, inputs, executor, &NoopTopologyObserver)
+    run_event_loop_fed(state, inputs, executor, &NoopTopologyObserver, None)
 }
 
-fn run_event_loop_observed<E: ReactionExecutor>(
+/// The event loop, optionally fed by the operator while it runs.
+///
+/// Without an `inbox` this is what it always was: seed the queue, drain it,
+/// return. With one, a drained queue is not the end — a program with an open
+/// input nobody has set yet is waiting rather than finished, and this blocks
+/// until someone sets it. Everything sent in one message lands at one tag, so
+/// reactions reading several of those ports see them together rather than
+/// firing once per value.
+fn run_event_loop_fed<E: ReactionExecutor>(
     state: &VmState,
     inputs: BTreeMap<String, Value>,
     executor: &E,
     observer: &dyn TopologyObserver,
+    inbox: Option<&mpsc::Receiver<BTreeMap<String, Value>>>,
 ) -> Result<BTreeMap<String, Value>> {
+    // What the operator still owes the program. Seeded with whatever came in at
+    // admission, so a run given everything up front never waits.
+    let mut unset: BTreeSet<String> = open_inputs(state)
+        .into_iter()
+        .filter(|name| !inputs.contains_key(name))
+        .collect();
+    // Where injected values land: after everything already seen, so they cannot
+    // arrive at a tag the run has moved past.
+    let mut frontier = Tag::START;
     let mut queue = BTreeMap::from([(Tag::START, inputs)]);
     // Arm every timer for its first firing. A timer's value is the timestamp it
     // fired at, which is what makes `$(t)` in a prompt worth reading.
@@ -1321,7 +1396,29 @@ fn run_event_loop_observed<E: ReactionExecutor>(
     let mut outputs = BTreeMap::new();
     let mut steps = 0usize;
 
-    while let Some((tag, events)) = queue.pop_first() {
+    loop {
+        let Some((tag, events)) = queue.pop_first() else {
+            // Nothing to do at any tag. Whether that is the end depends on
+            // whether anyone can still make something happen.
+            let Some(inbox) = inbox else { break };
+            if unset.is_empty() {
+                break;
+            }
+            let pending: Vec<String> = unset.iter().cloned().collect();
+            observer.awaiting_input(&pending);
+            let Ok(values) = inbox.recv() else { break };
+            let arrival = Tag {
+                timestamp: frontier.timestamp.saturating_add(1),
+                microstep: 0,
+            };
+            let slot = queue.entry(arrival).or_default();
+            for (name, value) in values {
+                unset.remove(&name);
+                slot.insert(name, value);
+            }
+            continue;
+        };
+        frontier = tag;
         observer.tag_advanced(tag.timestamp, tag.microstep, &events);
         steps += 1;
         if steps > 1024 {
@@ -2114,6 +2211,209 @@ mod tests {
         .unwrap();
         let error = verify(&orphan).unwrap_err().to_string();
         assert!(error.contains("undeclared parent 'b'"), "{error}");
+    }
+
+    /// A two-input program with nothing feeding it: exactly the shape that has
+    /// to sit still until the operator sends something.
+    fn open_input_bytecode() -> Bytecode {
+        serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Desk",
+              "instructions": [
+                {"op":"begin_plan","team":"Desk"},
+                {"op":"spawn_agent","name":"clerk","backend":"Codex"},
+                {"op":"define_port","kind":"input","name":"topic","type":"string"},
+                {"op":"define_port","kind":"input","name":"depth","type":"int"},
+                {"op":"define_port","kind":"output","name":"memo","type":"string"},
+                {"op":"install_reaction","id":"reaction.0","agent":"clerk",
+                 "triggers":["topic","depth"],"effects":["memo"],
+                 "contract":"memo","prompt":"p"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap()
+    }
+
+    /// Records which triggers arrived together, which is how a batch sent at
+    /// one tag is told apart from values dribbled in one at a time.
+    struct BatchExecutor {
+        seen: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl ReactionExecutor for BatchExecutor {
+        fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(invocation.trigger_values.keys().cloned().collect());
+            let writes = BTreeMap::from([("memo".into(), json!("done"))]);
+            validate_contract(&invocation.contract, &writes)?;
+            Ok(writes)
+        }
+    }
+
+    #[test]
+    fn open_inputs_are_the_ones_nothing_writes_to() {
+        let state = verify(&open_input_bytecode()).unwrap();
+        assert_eq!(open_inputs(&state), vec!["depth", "topic"]);
+
+        // An input a connection targets belongs to the topology, not to the
+        // operator, so it is not theirs to set.
+        let state = verify(&program()).unwrap();
+        for name in open_inputs(&state) {
+            assert!(
+                !state.connections.iter().any(|c| c.target == name),
+                "{name} is fed by a connection"
+            );
+        }
+    }
+
+    #[test]
+    fn a_run_with_an_unset_open_input_waits_instead_of_finishing() {
+        let state = verify(&open_input_bytecode()).unwrap();
+        let executor = BatchExecutor {
+            seen: Mutex::new(Vec::new()),
+        };
+        let (sender, receiver) = mpsc::channel();
+
+        // Everything the operator owes, in one message: the reaction must see
+        // both triggers in one invocation rather than firing twice.
+        sender
+            .send(BTreeMap::from([
+                ("topic".to_string(), json!("nesting")),
+                ("depth".to_string(), json!(3)),
+            ]))
+            .unwrap();
+        drop(sender);
+
+        let outputs = run_event_loop_fed(
+            &state,
+            BTreeMap::new(),
+            &executor,
+            &NoopTopologyObserver,
+            Some(&receiver),
+        )
+        .unwrap();
+
+        let seen = executor.seen.lock().unwrap().clone();
+        assert_eq!(seen, vec![vec!["depth".to_string(), "topic".to_string()]]);
+        assert_eq!(outputs.get("memo"), Some(&json!("done")));
+    }
+
+    #[test]
+    fn a_partly_fed_run_keeps_waiting_for_the_rest() {
+        let state = verify(&open_input_bytecode()).unwrap();
+        let executor = BatchExecutor {
+            seen: Mutex::new(Vec::new()),
+        };
+        let (sender, receiver) = mpsc::channel();
+
+        // One port now, the other later: two tags, so the reaction runs twice.
+        sender
+            .send(BTreeMap::from([("topic".to_string(), json!("nesting"))]))
+            .unwrap();
+        sender
+            .send(BTreeMap::from([("depth".to_string(), json!(3))]))
+            .unwrap();
+        drop(sender);
+
+        run_event_loop_fed(
+            &state,
+            BTreeMap::new(),
+            &executor,
+            &NoopTopologyObserver,
+            Some(&receiver),
+        )
+        .unwrap();
+
+        let seen = executor.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![vec!["topic".to_string()], vec!["depth".to_string()]],
+            "each send is its own tag"
+        );
+    }
+
+    #[test]
+    fn a_run_given_everything_up_front_never_waits() {
+        // The inbox is present but empty and never dropped. If the loop waited
+        // on it this test would hang rather than fail, so it is also the guard
+        // against waiting when there is nothing left to wait for.
+        let state = verify(&open_input_bytecode()).unwrap();
+        let executor = BatchExecutor {
+            seen: Mutex::new(Vec::new()),
+        };
+        let (_sender, receiver) = mpsc::channel();
+
+        let outputs = run_event_loop_fed(
+            &state,
+            BTreeMap::from([
+                ("topic".to_string(), json!("nesting")),
+                ("depth".to_string(), json!(3)),
+            ]),
+            &executor,
+            &NoopTopologyObserver,
+            Some(&receiver),
+        )
+        .unwrap();
+
+        assert_eq!(outputs.get("memo"), Some(&json!("done")));
+    }
+
+    #[test]
+    fn an_operator_value_lands_after_everything_already_run() {
+        // The injected tag is placed past the frontier, so a value the operator
+        // sends cannot arrive at a tag the run has already moved through.
+        struct TagRecorder {
+            tags: Mutex<Vec<(u64, u64)>>,
+        }
+        impl TopologyObserver for TagRecorder {
+            fn tag_advanced(
+                &self,
+                timestamp: u64,
+                microstep: u64,
+                _ports: &BTreeMap<String, Value>,
+            ) {
+                self.tags.lock().unwrap().push((timestamp, microstep));
+            }
+        }
+
+        let state = verify(&open_input_bytecode()).unwrap();
+        let executor = BatchExecutor {
+            seen: Mutex::new(Vec::new()),
+        };
+        let observer = TagRecorder {
+            tags: Mutex::new(Vec::new()),
+        };
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(BTreeMap::from([
+                ("topic".to_string(), json!("a")),
+                ("depth".to_string(), json!(1)),
+            ]))
+            .unwrap();
+        drop(sender);
+
+        run_event_loop_fed(
+            &state,
+            BTreeMap::new(),
+            &executor,
+            &observer,
+            Some(&receiver),
+        )
+        .unwrap();
+
+        let tags = observer.tags.lock().unwrap().clone();
+        // Tag 0 is the empty start; the batch lands at 1, and the memo it
+        // produces at the microstep after.
+        assert_eq!(tags[0], (0, 0));
+        assert_eq!(tags[1], (1, 0));
+        assert!(
+            tags.iter().all(|(timestamp, _)| *timestamp <= 1),
+            "nothing ran before the batch: {tags:?}"
+        );
     }
 
     /// Records the tag every invocation arrived at, so a timer's schedule can

@@ -430,6 +430,69 @@ describe(
       assert.equal(latest.status, "completed", JSON.stringify(latest));
       assert.equal(latest.error, null);
     });
+
+    test("deployed without inputs, it waits until the operator sends them", async () => {
+      // Deploying and deciding what to feed a program are separate acts. With
+      // no inputs the run comes up, spawns its agents, and stops at its first
+      // tag — which is a state the old admission path could not even express,
+      // because it refused a program whose open inputs were unset.
+      const created = await fetch(`${real.url}/v1/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ program: STUB_FLOW }),
+      });
+      const raw = await created.text();
+      assert.equal(created.status, 201, raw);
+      const record = JSON.parse(raw);
+
+      const diagram = async () =>
+        (await fetch(`http://${record.diagram_address}/v1/diagram`)).json();
+
+      // It is waiting, not finished, and nothing has advanced.
+      const deadline = Date.now() + 15_000;
+      let snapshot;
+      do {
+        snapshot = await diagram();
+        if (snapshot.status === "awaiting_input") break;
+        await new Promise((wait) => setTimeout(wait, 200));
+      } while (Date.now() < deadline);
+      assert.equal(snapshot.status, "awaiting_input", JSON.stringify(snapshot.status));
+      assert.deepEqual(snapshot.current_tag, { timestamp: 0, microstep: 0 });
+      assert.equal(
+        snapshot.ports.find((port) => port.name === "flow.blurb")?.value ?? null,
+        null,
+        "nothing ran",
+      );
+
+      const send = (values) =>
+        fetch(`${real.url}/v1/runs/${record.run_id}/inputs`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ values }),
+        });
+
+      // A port the topology feeds is not the operator's to set, and a value of
+      // the wrong type is refused before it can reach the run.
+      const closed = await send({ "flow.draft": "no" });
+      assert.equal(closed.status, 400, await closed.text());
+
+      const accepted = await send({ "flow.topic": "release notes" });
+      assert.equal(accepted.status, 202, await accepted.text());
+
+      // Fed, it runs to completion on its own.
+      const done = Date.now() + 30_000;
+      let latest;
+      do {
+        latest = await (await fetch(`${real.url}/v1/runs/${record.run_id}`)).json();
+        if (latest.status === "completed") break;
+        await new Promise((wait) => setTimeout(wait, 200));
+      } while (Date.now() < done);
+      assert.equal(latest.status, "completed", JSON.stringify(latest));
+
+      // And sending to a run that is over is refused rather than silently lost.
+      const late = await send({ "flow.topic": "again" });
+      assert.equal(late.status, 409, await late.text());
+    });
   },
 );
 

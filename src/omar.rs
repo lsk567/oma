@@ -457,6 +457,9 @@ async fn async_main() -> Result<()> {
                     timeout: Duration::from_secs(timeout_seconds),
                     diagram_address: diagram_server.then_some(diagram_address),
                     diagram_ready: None,
+                    // `omar run` is not interactive: every open input is on the
+                    // command line, and the run finishes when the queue drains.
+                    inbox: None,
                 },
             )
         }

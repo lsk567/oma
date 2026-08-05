@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatMessage as ChatMessageView } from "./chat-message";
 import { AgentTerminal } from "./agent-terminal";
+import { InputPanel } from "./input-panel";
 import { BackendMenu } from "./backend-menu";
 import { DiagramCanvas } from "./diagram/diagram-canvas";
 import { OmarSource } from "./omar-source";
@@ -17,6 +18,7 @@ import { reviewProgram, reviewWorkflow } from "./lib/fixtures";
 import {
   applyDiagramEvent,
   isRunFinished,
+  openInputs,
   type ChatMessage,
   type DiagramEvent,
   type DiagramSnapshot,
@@ -29,6 +31,7 @@ import {
   diagramUrlFor,
   fetchDiagram,
   fetchRun,
+  sendRunInputs,
   startRun,
   subscribeToDiagram,
 } from "./lib/runtime-client";
@@ -110,6 +113,29 @@ export function Studio({
   const [selection, setSelection] = useState<string[]>([]);
   /** The agent whose terminal is open, if any. */
   const [terminalAgent, setTerminalAgent] = useState<string | null>(null);
+  /** The open input the operator clicked, which also opens the panel. */
+  const [focusedInput, setFocusedInput] = useState<string | null>(null);
+  const [sendingInputs, setSendingInputs] = useState(false);
+  const settable = useMemo(() => (snapshot ? openInputs(snapshot) : []), [snapshot]);
+  const settableIds = useMemo(
+    () => new Set(settable.map((port) => port.id)),
+    [settable],
+  );
+
+  /** Send what the operator typed, as one batch at one tag. */
+  async function pushInputs(values: Record<string, string>) {
+    if (!run) return;
+    setSendingInputs(true);
+    setError("");
+    try {
+      await sendRunInputs(serveUrl, run.run_id, values);
+      setFocusedInput(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSendingInputs(false);
+    }
+  }
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [events, setEvents] = useState<DiagramEvent[]>([]);
   const disconnectRef = useRef<null | (() => void)>(null);
@@ -282,10 +308,10 @@ export function Studio({
     setPhase("spawning");
     setError("");
     try {
-      const record = await startRun(serveUrl, {
-        program: design.program,
-        inputs: design.inputs,
-      });
+      // Deployed, not started: the agents come up and the program waits at
+      // its first tag until the operator sets its open inputs. A program with a
+      // timer still moves on its own, which is what a timer is for.
+      const record = await startRun(serveUrl, { program: design.program });
       setSnapshot((current) => (current ? { ...current, team: record.team } : current));
       setRun(record);
       setPhase("observing");
@@ -582,6 +608,10 @@ export function Studio({
             // Agents outlive the run that spawned them, so a finished run can
             // still be opened; before a run there is nothing behind the node.
             onOpenTerminal={canRun && run ? setTerminalAgent : undefined}
+            // Only while a run can actually take them: before deploy there is
+            // nothing to send to, and after it ends nothing is listening.
+            openInputs={run && !isRunFinished(run.status) ? settableIds : undefined}
+            onSetInput={run && !isRunFinished(run.status) ? setFocusedInput : undefined}
           />
         </section>
         ) : null}
@@ -649,6 +679,16 @@ export function Studio({
         </aside>
         ) : null}
       </section>
+
+      {focusedInput && snapshot ? (
+        <InputPanel
+          ports={settable}
+          focused={focusedInput}
+          pending={sendingInputs}
+          onClose={() => setFocusedInput(null)}
+          onSend={(values) => void pushInputs(values)}
+        />
+      ) : null}
 
       {terminalAgent ? (
         <AgentTerminal

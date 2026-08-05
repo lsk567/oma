@@ -77,6 +77,20 @@ fn default_timeout_seconds() -> u64 {
 
 type Runs = Arc<Mutex<BTreeMap<String, RunRecord>>>;
 
+/// Where a live run takes operator input.
+///
+/// Held apart from `RunRecord` because a record is serialised to callers and a
+/// channel is not. Dropped when the run ends, which is also what tells a late
+/// sender the run is over.
+struct Inbox {
+    sender: mpsc::Sender<BTreeMap<String, Value>>,
+    /// The open inputs and their types. Kept here so a value can be checked
+    /// against the port it is for without recompiling the program per request.
+    open: BTreeMap<String, String>,
+}
+
+type Inboxes = Arc<Mutex<BTreeMap<String, Inbox>>>;
+
 /// One entry in the operator/EA conversation. `design` is set only on
 /// proposals, and carries a program the operator has *not* yet approved.
 #[derive(Debug, Clone, Serialize)]
@@ -141,6 +155,7 @@ struct Context_ {
     default_workdir: String,
     health_idle_warning: i64,
     runs: Runs,
+    inboxes: Inboxes,
     chat: Arc<Mutex<Chat>>,
     /// Authenticates the EA's MCP sidecar on the agent-only endpoints.
     agent_token: String,
@@ -231,6 +246,7 @@ impl Serve {
             default_workdir: config.agent.default_workdir.clone(),
             health_idle_warning: config.health.idle_warning,
             runs: Runs::default(),
+            inboxes: Inboxes::default(),
             chat: Arc::new(Mutex::new(Chat::default())),
             agent_token: agent_token.clone(),
             command: Arc::new(Mutex::new(config.agent.default_command.clone())),
@@ -557,6 +573,16 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
         ("GET", "/v1/runs") => {
             let runs = context.runs.lock().expect("serve runs poisoned");
             (200, json!({"runs": runs.values().collect::<Vec<_>>()}))
+        }
+        ("POST", rest) if rest.starts_with("/v1/runs/") && rest.ends_with("/inputs") => {
+            let id = rest
+                .trim_start_matches("/v1/runs/")
+                .trim_end_matches("/inputs");
+            if content_length > MAX_BODY_BYTES {
+                (413, json!({"error": "inputs too large"}))
+            } else {
+                send_run_inputs(&context, id, &read_body(content_length)?)
+            }
         }
         ("GET", rest) if rest.starts_with("/v1/runs/") => {
             let id = rest.trim_start_matches("/v1/runs/");
@@ -1006,7 +1032,10 @@ fn start_run(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
         Ok(inputs) => inputs,
         Err(error) => return (400, json!({"error": format!("{error:#}")})),
     };
-    if let Err(error) = topology::parse_inputs(&state, &inputs) {
+    // Only what was supplied is checked. Deploying is not the same act as
+    // deciding what to feed the program: the rest arrive over
+    // `POST /v1/runs/{id}/inputs`, and until they do the run waits.
+    if let Err(error) = topology::parse_partial_inputs(&state, &inputs) {
         return (400, json!({"error": format!("{error:#}")}));
     }
 
@@ -1041,7 +1070,31 @@ fn start_run(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
         .insert(run_id.clone(), record);
 
     let (ready_sender, ready_receiver) = mpsc::channel();
-    spawn_run_thread(context, &run_id, bytecode, inputs, &request, ready_sender);
+    let (input_sender, input_receiver) = mpsc::channel();
+    let open = topology::open_inputs(&state)
+        .into_iter()
+        .filter_map(|name| state.ports.get(&name).map(|port| (name, port.ty.clone())))
+        .collect();
+    context
+        .inboxes
+        .lock()
+        .expect("serve inboxes poisoned")
+        .insert(
+            run_id.clone(),
+            Inbox {
+                sender: input_sender,
+                open,
+            },
+        );
+    spawn_run_thread(
+        context,
+        &run_id,
+        bytecode,
+        inputs,
+        &request,
+        ready_sender,
+        input_receiver,
+    );
 
     match ready_receiver.recv_timeout(DIAGRAM_READY_TIMEOUT) {
         Ok(diagram_address) => {
@@ -1066,6 +1119,73 @@ fn start_run(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     }
 }
 
+/// Values the operator set, on their way to a live run.
+#[derive(Debug, Deserialize)]
+struct RunInputs {
+    values: BTreeMap<String, Value>,
+}
+
+/// Push a batch of operator-set inputs into a running topology.
+///
+/// Everything in one request lands at one tag, which is the point of batching
+/// them: a reaction reading two of these ports sees both together rather than
+/// firing once per value. Values are checked against the port types here, so a
+/// mistyped one is a 400 rather than a run that fails later for a reason the
+/// caller cannot connect to what they sent.
+fn send_run_inputs(context: &Arc<Context_>, run_id: &str, body: &[u8]) -> (u16, Value) {
+    let request: RunInputs = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(error) => return (400, json!({"error": format!("invalid request: {error}")})),
+    };
+    if request.values.is_empty() {
+        return (400, json!({"error": "no values to send"}));
+    }
+
+    let state = {
+        let runs = context.runs.lock().expect("serve runs poisoned");
+        match runs.get(run_id) {
+            None => return (404, json!({"error": "unknown run"})),
+            Some(record) if !is_active(&record.status) => {
+                return (409, json!({"error": format!("run is {}", record.status)}))
+            }
+            Some(record) => record.team.clone(),
+        }
+    };
+
+    let sender = {
+        let inboxes = context.inboxes.lock().expect("serve inboxes poisoned");
+        let inbox = match inboxes.get(run_id) {
+            Some(inbox) => inbox,
+            // The record is still active but the run has let go of its inbox,
+            // so it is on its way down.
+            None => return (409, json!({"error": "run is no longer taking input"})),
+        };
+        for (name, value) in &request.values {
+            // Only open inputs: everything else takes its value from a
+            // connection, and writing one from outside would be a second
+            // writer the program does not describe.
+            let Some(ty) = inbox.open.get(name) else {
+                return (
+                    400,
+                    json!({"error": format!("'{name}' is not an open input of this run")}),
+                );
+            };
+            if let Err(error) = topology::validate_value(ty, value) {
+                return (400, json!({"error": format!("{name}: {error:#}")}));
+            }
+        }
+        inbox.sender.clone()
+    };
+
+    match sender.send(request.values.clone()) {
+        Ok(()) => (
+            202,
+            json!({"run_id": run_id, "team": state, "sent": request.values.keys().collect::<Vec<_>>()}),
+        ),
+        Err(_) => (409, json!({"error": "run is no longer taking input"})),
+    }
+}
+
 fn spawn_run_thread(
     context: &Arc<Context_>,
     run_id: &str,
@@ -1073,6 +1193,7 @@ fn spawn_run_thread(
     inputs: Vec<String>,
     request: &StartRunRequest,
     ready_sender: mpsc::Sender<SocketAddr>,
+    input_receiver: mpsc::Receiver<BTreeMap<String, Value>>,
 ) {
     let context = context.clone();
     let run_id = run_id.to_string();
@@ -1093,8 +1214,14 @@ fn spawn_run_thread(
                 timeout,
                 diagram_address: Some(diagram_address),
                 diagram_ready: Some(ready_sender),
+                inbox: Some(input_receiver),
             },
         );
+        context
+            .inboxes
+            .lock()
+            .expect("serve inboxes poisoned")
+            .remove(&run_id);
         let mut runs = context.runs.lock().expect("serve runs poisoned");
         if let Some(record) = runs.get_mut(&run_id) {
             record.finished_at = Some(now_unix());

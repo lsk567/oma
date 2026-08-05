@@ -173,6 +173,31 @@ export async function startRun(
   return assertRunRecord(await response.json());
 }
 
+/**
+ * Send operator-set values into a live run.
+ *
+ * Everything here lands at one tag, which is why the panel batches rather than
+ * sending on each keystroke: a reaction reading two of these ports sees both in
+ * one invocation instead of firing twice.
+ */
+export async function sendRunInputs(
+  serveUrl: string,
+  runId: string,
+  values: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const base = normalizeRuntimeUrl(serveUrl);
+  const response = await fetch(`${base}/v1/runs/${encodeURIComponent(runId)}/inputs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ values }),
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+}
+
 export async function fetchRun(
   serveUrl: string,
   runId: string,
