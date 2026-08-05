@@ -71,6 +71,30 @@ cd omar && make install
 
 ## Quick Start
 
+#### Step 1: Launch Mission Control
+
+```bash
+$ omar serve --ui
+```
+
+Serves the web UI from the daemon's own address and opens it in your browser.
+The page and the API share an origin, so there is nothing to point at anything.
+
+> The bundle is compiled into the binary, so this needs an `omar` built with it.
+> Releases carry it from the next tag onward; before that, `make install`. A
+> binary without it refuses `--ui` and says so rather than serving a blank page.
+
+#### Step 2: Describe a workflow
+
+Type what the team should do. The assistant drafts an OMAR program and shows you
+the topology it compiles to. Nothing runs until you press **Confirm deploy** —
+then the diagram goes live: ports carry values, reactions light up as their
+agents work, and you can open any agent's terminal by double-clicking it.
+
+### Terminal UI
+
+The same runtime, driven from tmux instead.
+
 #### Step 1: Launch `omar`
 
 ```bash
@@ -97,21 +121,11 @@ Go back to the EA and type in:
 Shutdown the test project and its agents.
 ```
 
-## Mission Control
+## Working on Mission Control
 
-The web client for authoring and observing topology programs lives in
-[`web/`](web/), and is built from this same commit as the runtime it talks to.
-
-If you installed `omar`, it is already in the binary:
-
-```bash
-omar serve --ui
-```
-
-Serves Mission Control from the daemon's own address and opens a browser. The
-page and the API share an origin, so there is nothing to point at anything.
-
-Working on the client itself, use the dev server instead — it reloads:
+The web client lives in [`web/`](web/) and is built from this same commit as the
+runtime it talks to. `omar serve --ui` hands out a bundle compiled into the
+binary; to work on the client itself, use the dev server instead — it reloads:
 
 ```bash
 make dev
