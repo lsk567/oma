@@ -67,14 +67,17 @@ jobs:
       - name: Build
         run: cargo build --release --features ui --target ${{ matrix.target }}
 
+      # `direct_run.omar` instantiates its team in a `main` block, so its ports
+      # are named for the instance. CI was updated when that changed and this
+      # was not, so every release since has failed here.
       - name: Verify direct source execution
         env:
           OMARC_BIN: ${{ github.workspace }}/lang/.lake/build/bin/omarc
         run: |
           output=$(target/${{ matrix.target }}/release/omar run \
-            tests/ci/direct_run.omar --input request=hello --replace)
+            tests/ci/direct_run.omar --input run.request=hello --replace)
           echo "$output"
-          grep -Fq 'Output result = "hello"' <<<"$output"
+          grep -Fq 'Output run.result = "hello"' <<<"$output"
 
       - name: Package
         run: |
