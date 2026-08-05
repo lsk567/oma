@@ -2,7 +2,9 @@
 
 <img src="img/full-black-banner.jpg" alt="OMAR" width="250">
 
-**`omar` is a harness for creating powerful multi-agent workflows.**
+**LLM agents are unpredictable. Their coordination doesn't have to be.**
+
+**`omar` delivers deterministic, formally specified orchestration for multi-agent systems.**
 
 <p align="center">
   <a href="https://omar.rs">omar.rs</a>&nbsp; • &nbsp;
@@ -12,12 +14,17 @@
   <a href="https://discord.gg/X76PSzmfWr"><img src="https://img.shields.io/discord/1467663881588572182?label=Discord&logo=discord&logoColor=white&color=5865F2&cacheSeconds=60" alt="Discord" valign="middle"/></a>
 </p>
 
+<p align="center">
+<img src="./img/web.gif" alt="Web UI" valign="middle"/>
+Web UI
+</p>
+
+<p align="center">
+<img src="./img/demo.gif" alt="Terminal UI" valign="middle"/>
+Terminal UI
+</p>
+
 </div>
-
-![Web](img/web.gif)
-
-Alternative Terminal UI:
-![Demo](img/demo.gif)
 
 ## Features
 
