@@ -78,7 +78,7 @@ $ omar serve --ui
 ```
 
 Serves the web UI from the daemon's own address and opens it in your browser.
-The page and the API share an origin, so there is nothing to point at anything.
+The page and the API share an origin, so you don’t need to configure a URL.
 
 > The bundle is compiled into the binary, so this needs an `omar` built with it.
 > Releases carry it from the next tag onward; before that, `make install`. A
