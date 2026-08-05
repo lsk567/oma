@@ -8,16 +8,13 @@ permissions:
   contents: write
 
 jobs:
-  topology-ci-test:
-    name: Topology CI Test
-    uses: ./.github/workflows/topology-ci-test.yml
-    secrets:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
+  # The live topology suite used to gate this. It runs real agents against real
+  # models, which made every release wait on a long, paid, model-dependent run
+  # that failed for reasons no change in the release introduced. It is still
+  # here — `Topology Release Gate`, run it from the Actions tab — just not
+  # between a tag and its artifacts.
   build:
     name: Build (${{ matrix.suffix }})
-    needs: topology-ci-test
     strategy:
       matrix:
         include:

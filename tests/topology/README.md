@@ -60,12 +60,15 @@ It runs every case even if an earlier case fails. Each case must compile, exit
 successfully after completing all effect contracts, print its completion marker,
 and produce every declared output expected by the test.
 
-The authenticated suite runs only as the first gate in the tag-triggered
-`Release` GitHub Actions workflow. Every release build depends on this gate, so
-a topology failure prevents artifact publication and the Homebrew update. It
-does not run for pull requests, ordinary `main` pushes, or on a schedule. The
-release workflow supplies the `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`
-repository secrets explicitly.
+The authenticated suite runs on demand: `Topology Release Gate` in the Actions
+tab, which supplies the `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` repository
+secrets. It does not run for pull requests, ordinary `main` pushes, or on a
+schedule.
+
+It used to gate every release. Driving real agents against real models made a
+release wait on a long, paid run that could fail for reasons nothing in the
+release introduced, so publishing no longer depends on it. What that costs is
+worth naming: nothing between a tag and its artifacts exercises a live agent.
 
 The runner prints per-case duration and assertion counts, followed by an
 aggregate PASS/FAIL verdict. It exits nonzero if any case fails. Logs and a
