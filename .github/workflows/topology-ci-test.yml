@@ -1,6 +1,10 @@
 name: Topology Release Gate
 
+# Run on demand, from the Actions tab. It drives every registered program with
+# live agents, so it is slow, paid, and only as reliable as the models behind
+# it — worth running deliberately, and no longer worth blocking a release on.
 on:
+  workflow_dispatch:
   workflow_call:
     secrets:
       OPENAI_API_KEY:
