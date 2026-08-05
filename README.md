@@ -78,18 +78,13 @@ $ omar serve --ui
 ```
 
 Serves the web UI from the daemon's own address and opens it in your browser.
-The page and the API share an origin, so you don’t need to configure a URL.
-
-> The bundle is compiled into the binary, so this needs an `omar` built with it.
-> Releases carry it from the next tag onward; before that, `make install`. A
-> binary without it refuses `--ui` and says so rather than serving a blank page.
 
 #### Step 2: Describe a workflow
 
 Type what the team should do. The assistant drafts an OMAR program and shows you
-the topology it compiles to. Nothing runs until you press **Confirm deploy** —
-then the diagram goes live: ports carry values, reactions light up as their
-agents work, and you can open any agent's terminal by double-clicking it.
+the topology it compiles to.
+Nothing runs until you press **Confirm deploy**,
+then the diagram goes live.
 
 ### Terminal UI
 
