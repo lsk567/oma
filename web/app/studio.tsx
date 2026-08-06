@@ -501,6 +501,10 @@ export function Studio({
           setSourceErrors(result.ok ? [] : (result.errors ?? []));
           setSteps(result.steps ?? []);
           setTruncated(result.truncated ?? false);
+          // The drawing follows the text. Only while nothing is running: a live
+          // run's diagram is a record of what is happening, not of what has
+          // been typed since.
+          if (result.preview && !run) setSnapshot(result.preview);
           // A recomputed projection replaces the tail, so a hand-held position
           // past its end would be pointing at nothing.
           setStepIndex((current) => Math.min(current, Math.max(0, (result.steps?.length ?? 1) - 1)));
@@ -517,7 +521,11 @@ export function Studio({
       clearTimeout(timer);
       abort.abort();
     };
-  }, [source, filename, serveUrl, canRun, presentKey]);
+    // `run` decides whether the drawing may be replaced, so a run appearing
+    // has to re-run this rather than leave a stale rule in a closure. The key
+    // rather than the array: this effect sets the snapshot `present` is
+    // derived from, so depending on its identity would ask forever.
+  }, [source, filename, serveUrl, canRun, presentKey, run]);
 
   const isDeployed = run !== null;
 

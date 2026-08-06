@@ -393,6 +393,31 @@ export async function startFakeServe({
       reactions: [reaction.name],
     }));
     const present = request.present ?? [];
+    // A topology shaped by what was typed: one container per `x = Team()` in
+    // the source. Not a compiler — enough that a diagram which follows the
+    // text is told apart from one that does not.
+    const preview = structuredClone(golden);
+    const declared = [...request.program.matchAll(/(\w+)\s*=\s*\w+\s*\(/g)].map((m) => m[1]);
+    if (declared.length > 0) {
+      preview.instances = declared.map((name) => ({
+        id: `instance::${name}`,
+        name,
+        team: "Team",
+        parent: "",
+      }));
+      // A container with nothing in it is not drawn, and rightly so: give each
+      // one a member so the drawing has something to put in the box.
+      preview.agents = declared.map((name) => ({
+        id: `agent::${name}.worker`,
+        name: `${name}.worker`,
+        backend: "Codex",
+        instance: name,
+      }));
+      preview.ports = [];
+      preview.timers = [];
+      preview.reactions = [];
+      preview.edges = [];
+    }
     return json(response, 200, {
       ok: true,
       team: golden.team,
@@ -401,6 +426,7 @@ export async function startFakeServe({
       // to be able to show.
       steps: present.length > 0 ? steps : [],
       truncated: false,
+      preview,
     });
   }
 

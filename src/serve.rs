@@ -1157,6 +1157,10 @@ fn project_program(body: &[u8]) -> (u16, Value) {
                     // Said rather than implied: a timeline that stops is not the
                     // same as a program that does.
                     "truncated": truncated,
+                    // The topology as edited. An editor whose diagram lags the
+                    // text is showing a program that no longer exists, and the
+                    // client has no compiler of its own to build one with.
+                    "preview": crate::diagram::DiagramSnapshot::from_vm_state(&state),
                 }),
             )
         }
