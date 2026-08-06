@@ -123,7 +123,7 @@ export function Studio({
   );
 
   /** Send what the operator typed, as one batch at one tag. */
-  async function pushInputs(values: Record<string, string>) {
+  async function pushInputs(values: Record<string, unknown>) {
     if (!run) return;
     setSendingInputs(true);
     setError("");

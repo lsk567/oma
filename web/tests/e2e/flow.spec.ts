@@ -37,6 +37,31 @@ async function deploy(page: import("@playwright/test").Page) {
   await page.getByRole("button", { name: "Confirm deploy" }).click();
 }
 
+/**
+ * Set every open input, which is what makes a deployed program start.
+ *
+ * Deploying brings the agents up and leaves the program at its first tag; a
+ * test that wants a run in motion has to do this too. Tests specifically about
+ * the waiting state drive the panel themselves.
+ */
+async function feedOpenInputs(page: import("@playwright/test").Page) {
+  const glyphs = page.locator(".omar-port-group.open-input .omar-port");
+  // Waited for rather than counted: the diagram arrives a moment after the run
+  // is admitted, and a helper that quietly did nothing would leave the run
+  // waiting and the failure would surface somewhere else entirely.
+  await glyphs.first().waitFor({ state: "visible", timeout: 15_000 });
+  await glyphs.first().click();
+  const panel = page.getByRole("dialog", { name: "Set input ports" });
+  await expect(panel).toBeVisible();
+  for (const field of await panel.locator("input").all()) {
+    const label = (await field.getAttribute("aria-label")) ?? "";
+    // Typed as the port declares, or the runtime refuses the batch.
+    await field.fill(label.includes("(int)") ? "1" : "go");
+  }
+  await panel.getByRole("button", { name: /^Send/ }).click();
+  await expect(panel).toBeHidden();
+}
+
 /** Drag a divider horizontally by `dx` pixels. */
 async function dragDivider(
   page: import("@playwright/test").Page,
@@ -93,12 +118,18 @@ test("prompt to finished run, gated on an explicit confirmation", async ({ page 
   await page.getByRole("button", { name: "Deploy", exact: true }).click();
   await page.getByRole("button", { name: "Confirm deploy" }).click();
 
-  // 4. The run is spawned and observed over the event stream.
+  // 4. Deployed is not started: the agents are up and the program waits at its
+  //    first tag for the port nobody has set.
+  await expect(page.locator(".run-stats")).toContainText("awaiting_input");
+  await expect(page.locator(".event-strip")).not.toContainText("reaction started");
+  await feedOpenInputs(page);
+
+  // 5. Fed, it runs, and is observed over the event stream.
   await expect(phase).toContainText("observing");
   await expect(page.locator(".event-strip")).toContainText("run started");
   await expect(page.locator(".event-strip")).toContainText("reaction started");
 
-  // 5. It finishes successfully.
+  // 6. It finishes successfully.
   await expect(phase).toContainText("finished", { timeout: 30_000 });
   await expect(page.locator(".event-strip")).toContainText("run completed");
   // The run's recorded status lives with the source; the tabs switch back.
@@ -110,6 +141,7 @@ test("the diagram reflects live reaction state from the run", async ({ page }) =
   await useFakeServe(page);
   await draftUntilProposed(page);
   await deploy(page);
+  await feedOpenInputs(page);
   await expect(page.locator(".connection")).toContainText("finished", {
     timeout: 30_000,
   });
@@ -198,7 +230,9 @@ test("discarding a design leaves the gate without running anything", async ({
   await useFakeServe(page);
   let admissions = 0;
   page.on("request", (request) => {
-    if (request.method() === "POST" && request.url().includes("/v1/runs")) {
+    // Admissions only. `/v1/runs/{id}/inputs` is also a POST under this path
+    // and is not one, so match the endpoint rather than a prefix of it.
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/v1/runs") {
       admissions += 1;
     }
   });
@@ -244,6 +278,7 @@ test("a design the compiler rejects is reported and stays unconfirmed", async ({
       body: JSON.stringify({ error: "omarc failed: expected identifier" }),
     });
   });
+  // No run is admitted, so nothing below feeds one.
 
   await deploy(page);
 
@@ -300,7 +335,9 @@ test("deploying is armed, reversible, and only then shows events", async ({
   await useFakeServe(page);
   let admissions = 0;
   page.on("request", (request) => {
-    if (request.method() === "POST" && request.url().includes("/v1/runs")) {
+    // Admissions only. `/v1/runs/{id}/inputs` is also a POST under this path
+    // and is not one, so match the endpoint rather than a prefix of it.
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/v1/runs") {
       admissions += 1;
     }
   });
@@ -324,6 +361,7 @@ test("deploying is armed, reversible, and only then shows events", async ({
   expect(admissions).toBe(0);
 
   await deploy(page);
+  await feedOpenInputs(page);
   expect(admissions).toBe(1);
 
   // Deployed: events exist, and the view moves to them.
@@ -552,6 +590,13 @@ test("a zoomed diagram stays put while the run updates it", async ({ page }) => 
 
   const view = page.locator(".diagram-canvas > g");
   await expect(view).toBeVisible();
+
+  // Deploy and feed before zooming: setting an input means clicking a port,
+  // and a zoomed diagram is exactly the state where that is awkward. What is
+  // under test is what the run does to the view afterwards.
+  await deploy(page);
+  await feedOpenInputs(page);
+
   // Zoom in deliberately, the way an operator inspecting a reaction would.
   await page.getByRole("button", { name: "Zoom in" }).click();
   await page.getByRole("button", { name: "Zoom in" }).click();
@@ -559,7 +604,6 @@ test("a zoomed diagram stays put while the run updates it", async ({ page }) => 
 
   // The run republishes the snapshot on every event; none of that should
   // reclaim the view.
-  await deploy(page);
   await expect(page.locator(".connection")).toContainText("finished", {
     timeout: 30_000,
   });
@@ -729,6 +773,7 @@ test("a finished run leaves nothing running and still opens a terminal", async (
   await page.getByLabel("Draft workflow").click();
   await page.getByRole("button", { name: "Deploy", exact: true }).click();
   await page.getByRole("button", { name: "Confirm deploy" }).click();
+  await feedOpenInputs(page);
   await expect(page.locator(".connection")).toContainText("finished");
 
   // The per-run diagram server dies with the run, so the refetch that follows
@@ -1079,6 +1124,93 @@ test("an edge into a reaction actually reaches it", async ({ page }) => {
       expect(line.y).toBeLessThanOrEqual(box.y + box.height + 2);
     }
   }
+});
+
+test("an open input opens a panel, and sending it starts the run", async ({ page }) => {
+  // Deploying and deciding what to feed a program are separate acts. The run
+  // comes up waiting, and this is the whole way out of that state.
+  await useFakeServe(page);
+  await page.getByLabel("Describe a workflow").fill("Review the release plan");
+  await page.getByLabel("Draft workflow").click();
+  await page.getByLabel("Describe a workflow").fill("The planner");
+  await page.getByLabel("Draft workflow").click();
+  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm deploy" }).click();
+
+  // Nothing ran: the program is waiting for the port nobody has set.
+  await expect(page.locator(".run-stats")).toContainText("awaiting_input");
+
+  const panel = page.getByRole("dialog", { name: "Set input ports" });
+  await expect(panel).toBeHidden();
+
+  // The glyph, not the group: a group's box is mostly the gap between its
+  // triangle and its label, so its centre is empty space.
+  await page.locator(".omar-port-group.open-input .omar-port").first().click();
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText("flow.request");
+  await expect(panel).toContainText("string");
+
+  // Nothing to send until something is typed.
+  const send = panel.getByRole("button", { name: /^Send/ });
+  await expect(send).toBeDisabled();
+
+  await panel.getByLabel("flow.request (string)").fill("ship it");
+  await expect(send).toBeEnabled();
+  await send.click();
+
+  // Fed, it runs — and the panel gets out of the way.
+  await expect(panel).toBeHidden();
+  await expect(page.locator(".run-stats")).toContainText("running", { timeout: 15_000 });
+  await expect(page.locator(".omar-reaction.running").first()).toBeVisible({
+    timeout: 15_000,
+  });
+});
+
+test("a value that is not of the port's type is caught before it is sent", async ({
+  page,
+}) => {
+  // The runtime checks a value against its port and refuses the whole batch.
+  // Reading the text as the declared type here means the operator sees which
+  // field is wrong rather than a send that fails.
+  await fake.close();
+  fake = (await startFakeServe({
+    stepMs: 30,
+    port: FAKE_SERVE_PORT,
+    // Two open inputs, one of them an int.
+    snapshot: "diagram-grand-test.v1.json",
+  })) as FakeServe;
+  await useFakeServe(page);
+  await page.getByLabel("Describe a workflow").fill("Review the release plan");
+  await page.getByLabel("Draft workflow").click();
+  await page.getByLabel("Describe a workflow").fill("The planner");
+  await page.getByLabel("Draft workflow").click();
+  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm deploy" }).click();
+
+  await page.locator(".omar-port-group.open-input .omar-port").first().click();
+  const panel = page.getByRole("dialog", { name: "Set input ports" });
+  await expect(panel).toBeVisible();
+
+  const rounds = panel.getByLabel("coord.max_rounds (int)");
+  const send = panel.getByRole("button", { name: /^Send/ });
+
+  await rounds.fill("three");
+  await expect(panel.locator(".input-port.invalid")).toContainText("not a int");
+  await expect(send).toBeDisabled();
+
+  // A value that reads as the type clears it, and is sent as a number rather
+  // than as the characters that were typed.
+  await rounds.fill("3");
+  await expect(panel.locator(".input-port.invalid")).toHaveCount(0);
+  await expect(send).toBeEnabled();
+
+  const sent = page.waitForRequest(
+    (request) => request.url().includes("/inputs") && request.method() === "POST",
+  );
+  await send.click();
+  expect(JSON.parse((await sent).postData() ?? "{}")).toEqual({
+    values: { "coord.max_rounds": 3 },
+  });
 });
 
 test("the assistant's terminal opens from the wait, not from a menu", async ({

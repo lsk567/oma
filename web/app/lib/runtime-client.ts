@@ -247,6 +247,9 @@ export function subscribeToDiagram(
   const kinds: DiagramEvent["kind"][] = [
     "run_started",
     "tag_advanced",
+    // Without this a run that stalls waiting for input never reaches the
+    // client, which goes on showing whatever it saw last.
+    "awaiting_input",
     "reaction_started",
     "reaction_completed",
     "run_completed",

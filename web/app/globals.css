@@ -1398,7 +1398,11 @@ h2 {
    the nodes drawn on it, since a node's box is mostly the gap between its
    glyph and its label. Events fall through to the canvas, which still pans. */
 .omar-team-body,
-.omar-team-title {
+.omar-team-title,
+/* The shadow is drawn past the container's edge, which is exactly where a
+   port sits, so left hit-testable it swallows clicks on the ports it is
+   behind. */
+.omar-team-shadow {
   pointer-events: none;
 }
 
@@ -1555,6 +1559,18 @@ h2 {
 .input-port input:focus {
   outline: none;
   border-color: var(--purple);
+}
+
+/* Typed text that cannot be read as the port's type. Caught here rather than
+   by the run refusing the batch. */
+.input-port.invalid input {
+  border-color: #c2607a;
+}
+
+.input-port-problem {
+  grid-column: 1 / -1;
+  color: #d98aa0;
+  font-size: 11px;
 }
 
 .input-panel-empty {

@@ -113,6 +113,50 @@ export function openInputs(snapshot: DiagramSnapshot): DiagramPort[] {
   return snapshot.ports.filter((port) => port.kind === "input" && !fed.has(port.id));
 }
 
+/**
+ * Turn what the operator typed into a value of the port's type.
+ *
+ * The runtime checks a sent value against the port before it reaches the run,
+ * and it wants JSON: a number for `int`, a boolean for `bool`, null for a
+ * signal. Sending the raw text would fail every port that is not a string, with
+ * an error about a type the operator never chose.
+ *
+ * Returns `undefined` when the text cannot be read as the type, which is what
+ * the panel shows as a problem with that field rather than sending and having
+ * the run refuse the batch.
+ */
+export function parseInputValue(type: string, text: string): unknown | undefined {
+  const trimmed = text.trim();
+  switch (type) {
+    case "string":
+    case "path":
+    case "bytes":
+      // Not trimmed: whitespace can be part of what was meant.
+      return text;
+    case "signal":
+      return null;
+    case "bool":
+      if (trimmed === "true") return true;
+      if (trimmed === "false") return false;
+      return undefined;
+    case "int": {
+      if (!/^-?\d+$/.test(trimmed)) return undefined;
+      return Number(trimmed);
+    }
+    case "float": {
+      const value = Number(trimmed);
+      return Number.isFinite(value) ? value : undefined;
+    }
+    default:
+      // `list<int>`, `option<string>` and friends are given as JSON.
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        return undefined;
+      }
+  }
+}
+
 export type DiagramEvent = {
   protocol_version: number;
   sequence: number;
@@ -121,6 +165,7 @@ export type DiagramEvent = {
   kind:
     | "run_started"
     | "tag_advanced"
+    | "awaiting_input"
     | "reaction_started"
     | "reaction_completed"
     | "run_completed"

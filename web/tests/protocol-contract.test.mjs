@@ -149,9 +149,11 @@ test("a run drives to completion over the event stream", async () => {
       await fetch(`${fake.url}/v1/runs`, {
         method: "POST",
         headers: { "content-type": "application/json" },
+        // Seeded at admission, so this run never waits. Deploying without
+        // inputs and feeding afterwards is covered by the browser suite.
         body: JSON.stringify({
           program: "team ReviewFlow {} main ReviewFlow { flow = ReviewFlow() }",
-          inputs: {},
+          inputs: { "flow.request": "review the release plan" },
         }),
       })
     ).json();

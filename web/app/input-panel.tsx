@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useRef, useState } from "react";
 
-import type { DiagramPort } from "./lib/protocol";
+import { parseInputValue, type DiagramPort } from "./lib/protocol";
 
 /**
  * The ports the operator sets, and the one act of setting them.
@@ -30,7 +30,7 @@ export function InputPanel({
   focused: string | null;
   pending: boolean;
   onClose: () => void;
-  onSend: (values: Record<string, string>) => void;
+  onSend: (values: Record<string, unknown>) => void;
 }) {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const focusedRef = useRef<HTMLInputElement | null>(null);
@@ -51,19 +51,30 @@ export function InputPanel({
     return () => window.removeEventListener("keydown", dismiss);
   }, [onClose]);
 
+  /**
+   * What is typed, read as the type each port declares.
+   *
+   * The runtime checks a value against its port before it reaches the run, and
+   * wants JSON — a number for an `int`, not the characters `3`. Doing that here
+   * means a value that cannot be read is a field the operator can see is wrong,
+   * rather than a batch the run refuses.
+   */
+  const typed = ports.flatMap((port) => {
+    const text = draft[port.name] ?? "";
+    if (text.trim() === "") return [];
+    return [{ port, value: parseInputValue(port.type, text) }];
+  });
+  const bad = typed.filter((entry) => entry.value === undefined).map((entry) => entry.port.name);
+  const ready = typed.filter((entry) => entry.value !== undefined);
+
   function submit(event: FormEvent) {
     event.preventDefault();
     // Only what was typed. An untouched port stays unset, and the run keeps
     // waiting for it, which is what an open input means.
-    const values = Object.fromEntries(
-      Object.entries(draft).filter(([, value]) => value.trim() !== ""),
-    );
-    if (Object.keys(values).length === 0) return;
-    onSend(values);
+    if (ready.length === 0 || bad.length > 0) return;
+    onSend(Object.fromEntries(ready.map((entry) => [entry.port.name, entry.value])));
     setDraft({});
   }
-
-  const filled = Object.values(draft).filter((value) => value.trim() !== "").length;
 
   return (
     <aside className="input-panel" role="dialog" aria-label="Set input ports">
@@ -86,7 +97,11 @@ export function InputPanel({
         {ports.map((port) => (
           <label
             key={port.id}
-            className={["input-port", port.id === focused ? "focused" : ""]
+            className={[
+              "input-port",
+              port.id === focused ? "focused" : "",
+              bad.includes(port.name) ? "invalid" : "",
+            ]
               .filter(Boolean)
               .join(" ")}
           >
@@ -102,7 +117,11 @@ export function InputPanel({
               // has been set once reads as set rather than empty.
               placeholder={port.value === null ? port.type : String(port.value)}
               aria-label={`${port.name} (${port.type})`}
+              aria-invalid={bad.includes(port.name) || undefined}
             />
+            {bad.includes(port.name) ? (
+              <span className="input-port-problem">not a {port.type}</span>
+            ) : null}
           </label>
         ))}
         {ports.length === 0 ? (
@@ -110,8 +129,12 @@ export function InputPanel({
             This program has no open inputs. It starts on its own, or on a timer.
           </p>
         ) : null}
-        <button type="submit" className="primary-button" disabled={pending || filled === 0}>
-          {pending ? "Sending…" : `Send ${filled || ""}`.trim()}
+        <button
+          type="submit"
+          className="primary-button"
+          disabled={pending || ready.length === 0 || bad.length > 0}
+        >
+          {pending ? "Sending…" : `Send ${ready.length || ""}`.trim()}
         </button>
       </form>
     </aside>
