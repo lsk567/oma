@@ -570,6 +570,13 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
                 agent_proposal(&context, &read_body(content_length)?)
             }
         }
+        ("POST", "/v1/programs/check") => {
+            if content_length > MAX_BODY_BYTES {
+                (413, json!({"error": "program too large"}))
+            } else {
+                check_program(&read_body(content_length)?)
+            }
+        }
         ("GET", "/v1/runs") => {
             let runs = context.runs.lock().expect("serve runs poisoned");
             (200, json!({"runs": runs.values().collect::<Vec<_>>()}))
@@ -1115,6 +1122,74 @@ fn start_run(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
                 .and_then(|record| record.error.clone())
                 .unwrap_or_else(|| "run did not start".to_string());
             (500, json!({"error": message, "run_id": run_id}))
+        }
+    }
+}
+
+/// A program to compile, and what to call it while doing so.
+#[derive(Debug, Deserialize)]
+struct CheckRequest {
+    program: String,
+    /// Shown in errors, so a message names the file the operator is editing.
+    /// Must end in `.omar`, which is the compiler's own rule.
+    #[serde(default)]
+    filename: Option<String>,
+}
+
+/// Compile a program and say whether it holds together, without running it.
+///
+/// The editor asks this on every pause in typing. It is the same compiler and
+/// the same verifier a deploy would use — checking with anything less would
+/// mean a program that passes here and is refused a moment later.
+fn check_program(body: &[u8]) -> (u16, Value) {
+    let request: CheckRequest = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(error) => return (400, json!({"error": format!("invalid request: {error}")})),
+    };
+
+    let name = request.filename.as_deref().unwrap_or("program.omar");
+    // The compiler rejects any other extension, and doing that here names the
+    // problem as the filename rather than as a compile failure.
+    if !name.ends_with(".omar") || name.contains('/') || name.contains('\\') {
+        return (
+            200,
+            json!({"ok": false, "errors": [format!("'{name}' is not a program file name: it must be a plain name ending in .omar")]}),
+        );
+    }
+
+    // Its own directory per check, so the file can carry the operator's name
+    // without two checks colliding over it. Removed on the way out.
+    let directory = match crate::paths::private_temp_dir()
+        .map(|root| root.join(format!("omar-check-{}", Uuid::new_v4())))
+        .and_then(|directory| fs::create_dir_all(&directory).map(|_| directory))
+    {
+        Ok(directory) => directory,
+        Err(error) => return (500, json!({"error": format!("{error}")})),
+    };
+    let path = directory.join(name);
+    if let Err(error) = fs::write(&path, &request.program) {
+        let _ = fs::remove_dir_all(&directory);
+        return (500, json!({"error": format!("{error}")}));
+    }
+
+    // Compiling is half of it: `verify` is what catches a program that parses
+    // and still cannot run, which is most of what an editor should say early.
+    let outcome = topology::load_program(&path).and_then(|bytecode| topology::verify(&bytecode));
+    let _ = fs::remove_dir_all(&directory);
+    match outcome {
+        Ok(state) => (
+            200,
+            json!({
+                "ok": true,
+                "team": state.team,
+                "open_inputs": topology::open_inputs(&state),
+            }),
+        ),
+        Err(error) => {
+            // The compiler names the file it was given, which is a scratch path
+            // nobody asked about. Say the name the operator is looking at.
+            let message = format!("{error:#}").replace(&format!("{}/", directory.display()), "");
+            (200, json!({"ok": false, "errors": [message]}))
         }
     }
 }

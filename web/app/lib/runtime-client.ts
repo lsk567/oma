@@ -155,6 +155,39 @@ export async function checkServeHealth(
  * Hand a confirmed design to `omar serve`, which compiles it and starts the
  * run. The returned `diagram_address` is where that run's live topology lives.
  */
+/** What the compiler says about a program nobody has deployed. */
+export type ProgramCheck = {
+  ok: boolean;
+  team?: string;
+  open_inputs?: string[];
+  errors?: string[];
+};
+
+/**
+ * Compile a program without running it.
+ *
+ * The same compiler and verifier a deploy would use, so a program that passes
+ * here is not refused a moment later.
+ */
+export async function checkProgram(
+  serveUrl: string,
+  program: string,
+  filename: string,
+  signal?: AbortSignal,
+): Promise<ProgramCheck> {
+  const base = normalizeRuntimeUrl(serveUrl);
+  const response = await fetch(`${base}/v1/programs/check`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ program, filename }),
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+  return (await response.json()) as ProgramCheck;
+}
+
 export async function startRun(
   serveUrl: string,
   request: RunRequest,

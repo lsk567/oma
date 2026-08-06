@@ -59,6 +59,9 @@ export async function startFakeServe({
     if (request.method === "GET" && url.pathname === "/health") {
       return json(response, 200, { status: "ok", protocol_version: 1 });
     }
+    if (request.method === "POST" && url.pathname === "/v1/programs/check") {
+      return readBody(request).then((body) => checkProgram(body, response));
+    }
     if (request.method === "POST" && url.pathname === "/v1/runs") {
       return readBody(request).then((body) => admit(body, response));
     }
@@ -306,6 +309,48 @@ export async function startFakeServe({
 
   function latest() {
     return [...runs.values()].at(-1);
+  }
+
+  /**
+   * What the real daemon does with `POST /v1/programs/check`.
+   *
+   * The real one runs omarc; this recognises the same shapes the browser tests
+   * need — a name that is not a program file, and the marker the suite already
+   * uses to mean "omarc rejects this".
+   */
+  function checkProgram(body, response) {
+    let request;
+    try {
+      request = JSON.parse(body);
+    } catch {
+      return json(response, 400, { error: "invalid request: not JSON" });
+    }
+    const filename = request.filename ?? "program.omar";
+    if (!filename.endsWith(".omar") || filename.includes("/")) {
+      return json(response, 200, {
+        ok: false,
+        errors: [
+          `'${filename}' is not a program file name: it must be a plain name ending in .omar`,
+        ],
+      });
+    }
+    if (typeof request.program !== "string" || request.program.trim() === "") {
+      return json(response, 200, { ok: false, errors: [`${filename}: empty program`] });
+    }
+    // Not a compiler: two shapes it recognises, so a test can write source that
+    // reads like source instead of a marker string. Anything else is accepted,
+    // and the conformance suite is what checks the real compiler's verdicts.
+    const opens = (request.program.match(/{/g) ?? []).length;
+    const closes = (request.program.match(/}/g) ?? []).length;
+    if (request.program.includes(INVALID_MARKER) || opens !== closes) {
+      return json(response, 200, {
+        ok: false,
+        errors: [
+          `omarc failed: ${filename}: expected identifier, found some (Omar.Token.sym "{")`,
+        ],
+      });
+    }
+    return json(response, 200, { ok: true, team: "ReviewFlow", open_inputs: [] });
   }
 
   function admit(body, response) {

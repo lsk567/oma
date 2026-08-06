@@ -1149,6 +1149,90 @@ h2 {
   white-space: pre-wrap;
 }
 
+/* The editable source: a transparent textarea over the highlighted text.
+
+   Every metric that decides where a glyph lands has to match between the two,
+   or the caret drifts from the colours behind it. They share one font
+   shorthand, one padding, and one wrapping rule; the pair below is the place to
+   change any of them. */
+.source-editor {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+}
+
+.source-editor > .source-code,
+.source-input {
+  grid-area: 1 / 1;
+  margin: 0;
+  padding: 16px;
+  border: 0;
+  font: 10.5px/1.75 ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  tab-size: 2;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  overflow: auto;
+}
+
+.source-input {
+  resize: none;
+  background: transparent;
+  /* Transparent text over the highlighting, with a visible caret. */
+  color: transparent;
+  caret-color: #d8caff;
+  outline: none;
+}
+
+.source-input::selection {
+  background: var(--purple-soft);
+}
+
+.source-name {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 2px 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.source-name:hover {
+  border-color: var(--line);
+}
+
+.source-name:focus {
+  outline: none;
+  border-color: var(--purple);
+  background: var(--ink);
+}
+
+/* What the compiler said. It is the same compiler a deploy would use, so this
+   is not advice — it is the reason a deploy would be refused. */
+.source-errors {
+  flex: none;
+  max-height: 30%;
+  overflow-y: auto;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  background: rgba(194, 96, 122, 0.08);
+  color: #e7a9b8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.source-errors p {
+  margin: 0 0 6px;
+  overflow-wrap: anywhere;
+}
+
+.source-errors p:last-child {
+  margin-bottom: 0;
+}
+
 .event-strip {
   flex: 1;
   min-height: 0;

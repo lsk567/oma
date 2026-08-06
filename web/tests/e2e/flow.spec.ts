@@ -1126,6 +1126,59 @@ test("an edge into a reaction actually reaches it", async ({ page }) => {
   }
 });
 
+test("the program can be edited, and the compiler answers as you type", async ({
+  page,
+}) => {
+  // The source view is where a program is read; making it the place a program
+  // is corrected means the compiler has to say what is wrong before a deploy
+  // is refused for the same reason.
+  await useFakeServe(page);
+  await draftUntilProposed(page);
+  await page.getByRole("button", { name: "Show the source pane" }).click();
+
+  const editor = page.getByLabel("OMAR program");
+  await expect(editor).toBeVisible();
+  await expect(editor).toHaveValue(/team ReviewFlow\[/);
+
+  // A name is a name, and the compiler only accepts one kind.
+  const name = page.getByLabel("Program file name");
+  await expect(name).toHaveValue("ReviewFlow.omar");
+  await name.fill("ReviewFlow.txt");
+  await name.blur();
+  await expect(page.getByRole("alert")).toContainText("must be a plain name ending in .omar");
+
+  await name.fill("Release.omar");
+  await name.blur();
+  await expect(page.getByRole("alert")).toBeHidden();
+
+  // A program the compiler rejects says so where it is being written.
+  await editor.fill("team Broken {");
+  await expect(page.getByRole("alert")).toContainText("expected identifier");
+
+  // And correcting it clears the error rather than needing a deploy to find out.
+  await editor.fill("team Fixed[a : Codex] {}\nmain Fixed { f = Fixed() }");
+  await expect(page.getByRole("alert")).toBeHidden();
+});
+
+test("what is deployed is what the editor shows", async ({ page }) => {
+  await useFakeServe(page);
+  await draftUntilProposed(page);
+  await page.getByRole("button", { name: "Show the source pane" }).click();
+
+  const edited = "team Edited[a : Codex] {}\nmain Edited { e = Edited() }";
+  await page.getByLabel("OMAR program").fill(edited);
+  await expect(page.getByRole("alert")).toBeHidden();
+
+  const admitted = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" && new URL(request.url()).pathname === "/v1/runs",
+  );
+  await deploy(page);
+
+  // The design the assistant proposed is not what was on screen by the end.
+  expect(JSON.parse((await admitted).postData() ?? "{}").program).toBe(edited);
+});
+
 test("an open input opens a panel, and sending it starts the run", async ({ page }) => {
   // Deploying and deciding what to feed a program are separate acts. The run
   // comes up waiting, and this is the whole way out of that state.
