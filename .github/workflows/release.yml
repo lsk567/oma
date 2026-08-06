@@ -137,7 +137,16 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
-          git clone https://x-access-token:${GH_TOKEN}@github.com/lsk567/homebrew-omar.git
+          # The tap moved to the org. This still cloned the old path, and
+          # cloning follows the redirect without auth — which is why v0.4.0 got
+          # as far as committing and then failed to push against a token scoped
+          # to a path that no longer exists.
+          #
+          # The tap is public, so the clone needs no credential at all, and not
+          # giving it one keeps the token out of `.git/config` where it would
+          # otherwise sit for the rest of the job. It is supplied to the push,
+          # and to that alone.
+          git clone https://github.com/omar-os/homebrew-omar.git
           cd homebrew-omar
 
           python3 -c "
@@ -171,4 +180,4 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/omar.rb
           git commit -m "update omar to ${VERSION}"
-          git push
+          git push "https://x-access-token:${GH_TOKEN}@github.com/omar-os/homebrew-omar.git" HEAD:main
