@@ -59,8 +59,8 @@ export async function startFakeServe({
     if (request.method === "GET" && url.pathname === "/health") {
       return json(response, 200, { status: "ok", protocol_version: 1 });
     }
-    if (request.method === "POST" && url.pathname === "/v1/programs/check") {
-      return readBody(request).then((body) => checkProgram(body, response));
+    if (request.method === "POST" && url.pathname === "/v1/programs/project") {
+      return readBody(request).then((body) => projectProgram(body, response));
     }
     if (request.method === "POST" && url.pathname === "/v1/runs") {
       return readBody(request).then((body) => admit(body, response));
@@ -345,13 +345,13 @@ export async function startFakeServe({
   }
 
   /**
-   * What the real daemon does with `POST /v1/programs/check`.
+   * What the real daemon does with `POST /v1/programs/project`.
    *
    * The real one runs omarc; this recognises the same shapes the browser tests
    * need — a name that is not a program file, and the marker the suite already
    * uses to mean "omarc rejects this".
    */
-  function checkProgram(body, response) {
+  function projectProgram(body, response) {
     let request;
     try {
       request = JSON.parse(body);
@@ -383,7 +383,25 @@ export async function startFakeServe({
         ],
       });
     }
-    return json(response, 200, { ok: true, team: "ReviewFlow", open_inputs: [] });
+    // A projection the shape of the real one: one tag per reaction, in the
+    // order the captured topology has them. The real scheduling is the
+    // runtime's, and the conformance suite is what checks it.
+    const steps = golden.reactions.map((reaction, index) => ({
+      timestamp: 0,
+      microstep: index,
+      events: reaction.triggers.map((id) => id.replace(/^(port|timer)::/, "")),
+      reactions: [reaction.name],
+    }));
+    const present = request.present ?? [];
+    return json(response, 200, {
+      ok: true,
+      team: golden.team,
+      open_inputs: openInputsOf(golden).map((port) => port.name),
+      // Nothing set means nothing moves, which is the state the timeline has
+      // to be able to show.
+      steps: present.length > 0 ? steps : [],
+      truncated: false,
+    });
   }
 
   /** One pending invocation per reaction whose agent is on the `web` backend. */

@@ -1190,6 +1190,37 @@ test("an edge into a reaction actually reaches it", async ({ page }) => {
   }
 });
 
+test("the timeline projects a program before anything is deployed", async ({
+  page,
+}) => {
+  // The determinism claim, made checkable: what a program will do is decided
+  // by the program, so it can be shown before it has done it.
+  await useFakeServe(page);
+  await draftUntilProposed(page);
+
+  await page.getByRole("button", { name: "▲ Timeline" }).click();
+  const timeline = page.getByLabel("Logical timeline");
+  await expect(timeline).toBeVisible();
+
+  // Nothing has run, and the tags are there anyway.
+  await expect(timeline).toContainText("projected");
+  await expect(timeline.locator(".timeline-tag")).toHaveText(/^\d+:\d+$/);
+
+  // Stepping moves through tags, and the diagram marks what each one touches.
+  const scrubber = timeline.getByLabel("Logical tag");
+  await expect(scrubber).toHaveValue("0");
+  await expect(page.locator(".omar-reaction.at-tag").first()).toBeVisible();
+  await expect(page.locator(".off-tag").first()).toBeVisible();
+
+  await timeline.getByRole("button", { name: "Next tag" }).click();
+  await expect(scrubber).toHaveValue("1");
+  await timeline.getByRole("button", { name: "Previous tag" }).click();
+  await expect(scrubber).toHaveValue("0");
+
+  await timeline.getByRole("button", { name: "Hide" }).click();
+  await expect(timeline).toBeHidden();
+});
+
 test("the assistant's terminal opens from the wait, not from a menu", async ({
   page,
 }) => {

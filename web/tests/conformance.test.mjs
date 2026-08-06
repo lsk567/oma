@@ -307,6 +307,40 @@ describe("wire conformance between the fake and the real daemon", { skip: WIRE_S
     }
   });
 
+  test("a projection is what the run then does", async () => {
+    // The timeline's whole claim. If the projection and the run disagree, the
+    // operator is being shown a prediction of a different program.
+    const project = async (present) =>
+      (
+        await fetch(`${real.url}/v1/programs/project`, {
+          ...post({ program: STUB_FLOW, filename: "StubFlow.omar", present }),
+        })
+      ).json();
+
+    // Nothing set: the program does not move, and says so rather than
+    // pretending it would.
+    const idle = await project([]);
+    assert.equal(idle.ok, true, JSON.stringify(idle));
+    assert.deepEqual(idle.open_inputs, ["flow.topic"]);
+    assert.deepEqual(idle.steps, []);
+
+    const projected = await project(["flow.topic"]);
+    assert.equal(projected.truncated, false);
+    assert.ok(projected.steps.length >= 2, JSON.stringify(projected.steps));
+    assert.deepEqual(projected.steps[0].events, ["flow.topic"]);
+
+    // A program that does not compile is reported, not projected.
+    const broken = await (
+      await fetch(`${real.url}/v1/programs/project`, {
+        ...post({ program: "team Broken {", filename: "Broken.omar", present: [] }),
+      })
+    ).json();
+    assert.equal(broken.ok, false);
+    assert.match(broken.errors[0], /Broken\.omar/);
+    // The scratch path it was compiled at is not the operator's business.
+    assert.doesNotMatch(broken.errors[0], /omar-check-/);
+  });
+
   test("a real proposal compiles and carries a snapshot the client accepts", async () => {
     // `--no-ea` still writes the context, so the harness can stand in for the
     // assistant without an agent process existing.
