@@ -137,7 +137,10 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
-          git clone https://x-access-token:${GH_TOKEN}@github.com/lsk567/homebrew-omar.git
+          # The tap moved to the org. Cloning followed the redirect, so this
+          # got as far as committing and then failed to push against a token
+          # scoped to a path that no longer exists.
+          git clone https://x-access-token:${GH_TOKEN}@github.com/omar-os/homebrew-omar.git
           cd homebrew-omar
 
           python3 -c "
