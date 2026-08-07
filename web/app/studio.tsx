@@ -155,6 +155,22 @@ export function Studio({
     () => (snapshot ? openInputs(snapshot).map((port) => port.name) : []),
     [snapshot],
   );
+  /**
+   * The same list as a value rather than an identity.
+   *
+   * `present` is derived from the snapshot, and the projection sets the
+   * snapshot — so depending on the array itself means every projection asks
+   * for another one, forever. What matters is which ports are in it.
+   */
+  const presentKey = present.join("\u0000");
+  /**
+   * Which check is the current one.
+   *
+   * Aborting a request tells the network to stop; it does not decide whether a
+   * reply that already arrived is still wanted. A reply is applied when it is
+   * the newest one asked for, which is the actual question.
+   */
+  const checkTokenRef = useRef(0);
 
   /**
    * `present` is derived from the snapshot, and a projection sets the snapshot
@@ -480,6 +496,8 @@ export function Studio({
   // stale answer cannot land after a newer one.
   useEffect(() => {
     const abort = new AbortController();
+    const token = ++checkTokenRef.current;
+    const current = () => checkTokenRef.current === token;
     const timer = setTimeout(() => {
       // Nothing to check against, or nothing to check: clear rather than leave
       // an error standing for text that is gone.
@@ -498,34 +516,27 @@ export function Studio({
         abort.signal,
       )
         .then((result) => {
+          if (!current()) return;
           setSourceErrors(result.ok ? [] : (result.errors ?? []));
           setSteps(result.steps ?? []);
           setTruncated(result.truncated ?? false);
-          // The drawing follows the text. Only while nothing is running: a live
-          // run's diagram is a record of what is happening, not of what has
-          // been typed since.
-          if (result.preview && !run) setSnapshot(result.preview);
           // A recomputed projection replaces the tail, so a hand-held position
           // past its end would be pointing at nothing.
           setStepIndex((current) => Math.min(current, Math.max(0, (result.steps?.length ?? 1) - 1)));
         })
         .catch((cause) => {
-          if (abort.signal.aborted) return;
+          if (!current() || abort.signal.aborted) return;
           setSourceErrors([cause instanceof Error ? cause.message : String(cause)]);
         })
         .finally(() => {
-          if (!abort.signal.aborted) setChecking(false);
+          if (current()) setChecking(false);
         });
     }, 400);
     return () => {
       clearTimeout(timer);
       abort.abort();
     };
-    // `run` decides whether the drawing may be replaced, so a run appearing
-    // has to re-run this rather than leave a stale rule in a closure. The key
-    // rather than the array: this effect sets the snapshot `present` is
-    // derived from, so depending on its identity would ask forever.
-  }, [source, filename, serveUrl, canRun, presentKey, run]);
+  }, [source, filename, serveUrl, canRun, presentKey]);
 
   const isDeployed = run !== null;
 
