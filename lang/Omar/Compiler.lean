@@ -29,7 +29,7 @@ def durationScale (unit : String) : Except String Nat :=
   -- 'm' and 'ms' differ by one character and five orders of magnitude, and a
   -- delay that is 60000x wrong fails silently.
   | "m" => throw "'m' is ambiguous: write 'min' for minutes or 'ms' for milliseconds"
-  | other => throw s!"unknown duration unit '{other}'; use ns, us, ms, s, min, or h"
+  | other => throw s!"unknown duration unit '{other}'; use ns, us, ms, s, sec, min, h, or hr"
 
 private def isWordStart (c : Char) : Bool := c.isAlpha || c == '_'
 private def isWordRest (c : Char) : Bool := c.isAlphanum || c == '_'

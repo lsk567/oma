@@ -1001,7 +1001,9 @@ fn expired(invocation: &InvocationSpec, deadline: Duration) -> Result<BTreeMap<S
     match validate_contract(&invocation.contract, &BTreeMap::new()) {
         Ok(()) => Ok(BTreeMap::new()),
         Err(_) => bail!(
-            "'{}' did not answer within {:?}, and contract '{}' requires an effect",
+            "reaction '{}' invocation '{}': '{}' did not answer within {:?}, and contract '{}' requires an effect",
+            invocation.reaction_id,
+            invocation.id,
             invocation.agent,
             deadline,
             invocation.contract
@@ -2207,9 +2209,12 @@ mod tests {
             .unwrap_err()
             .to_string();
         // Names the contract, so an operator reads which promise went unkept
-        // rather than only that something timed out.
+        // rather than only that something timed out, and names the invocation
+        // so the line can be found in a log next to the rest of its run.
         assert!(error.contains("requires an effect"), "{error}");
         assert!(error.contains("memo"), "{error}");
+        assert!(error.contains("reaction.0"), "{error}");
+        assert!(error.contains(&spec.id), "{error}");
     }
 
     /// Answers nothing, which is what an expired deadline does to a contract
