@@ -124,8 +124,8 @@ tag = (timestamp, microstep)
 event = (tag, flow, port, value)
 ```
 
-Logical time is a nonnegative integer timestamp. External inputs begin at
-`(0, 0)`. Scheduling uses the following rules:
+Logical time is a nonnegative integer timestamp in nanoseconds. External inputs
+begin at `(0, 0)`. Scheduling uses the following rules:
 
 - An effect written to a port without a fixed delay at `(t, m)` is enqueued at
   `(t, m + 1)`.
@@ -152,6 +152,26 @@ At each tag, the runtime:
    calculated superdense tags.
 
 The runtime advances only after the global tag barrier closes.
+
+### 4.0 Pace
+
+A timestamp is nanoseconds since the run began, and by default the runtime
+holds the logical clock against the wall clock: a tag at timestamp `T` does not
+execute before `T` has elapsed. A delay is therefore a statement about *when*,
+not only about order.
+
+A tag whose moment has already passed — because a reaction took longer than the
+gap to the next one — executes immediately rather than being pushed further out.
+Being late is not a reason to be later. How late is a separate question, and one
+the language does not yet ask.
+
+Microsteps carry no time. Every tag at the same timestamp is due at the same
+moment, which is what makes zero-delay causality instantaneous rather than
+merely fast.
+
+`--fast` runs the same program as quickly as the work allows. Tags, ordering
+and outputs are identical; only the waiting is skipped. It is what a test wants
+and what a program's meaning must not depend on.
 
 ### 4.1 Invocation DAG
 

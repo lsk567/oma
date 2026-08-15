@@ -11,7 +11,10 @@ export const reviewWorkflow: DiagramSnapshot = {
   team: "ReviewFlow",
   sequence: 14,
   status: "running",
-  current_tag: { timestamp: 1, microstep: 0 },
+  // Nanoseconds, so the demo shows what a real run shows: two seconds in, a
+  // seventh of a second behind the schedule its delays promised.
+  current_tag: { timestamp: 2_000_000_000, microstep: 0 },
+  lag: 140_000_000,
   timers: [],
   instances: [{ id: "instance::flow", name: "flow", team: "ReviewFlow", parent: "" }],
   agents: [
