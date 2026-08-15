@@ -85,6 +85,7 @@ export const reviewWorkflow: DiagramSnapshot = {
       status: "completed",
       invocation_id: "inv-001",
       instance: "flow",
+      within: null,
     },
     {
       id: "reaction::flow.reaction.1",
@@ -97,6 +98,8 @@ export const reviewWorkflow: DiagramSnapshot = {
       status: "running",
       invocation_id: "inv-002",
       instance: "flow",
+      // A deadline the program set for itself, drawn as a stopwatch.
+      within: 300_000_000_000,
     },
     {
       id: "reaction::flow.reaction.2",
@@ -109,6 +112,7 @@ export const reviewWorkflow: DiagramSnapshot = {
       status: "idle",
       invocation_id: null,
       instance: "flow",
+      within: null,
     },
   ],
   edges: [

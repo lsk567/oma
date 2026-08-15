@@ -1,0 +1,54 @@
+// Exercises the `within` deadline keyword.
+//
+// Two reactions fire from the same timer tag:
+//   - `punctual` has a generous deadline it will meet, and a mandatory effect.
+//   - `tardy` has a deadline of 1ms that no agent can meet. Its contract is
+//     optional (missed?), so expiry completes the tag with no write rather
+//     than failing the run.
+//
+// `reporter` triggers on both, so it fires at that tag with the met value
+// present and the missed one expanding to <absent>. That difference is the
+// observable result of the test.
+team DeadlineProbe[punctual : Codex, tardy : Codex, reporter : Codex]
+{
+    // Period 0: fires once, at logical time 1ns, then the program finishes.
+    timer start(1ns, 0)
+
+    action met : string
+    action missed : string
+    output report : string
+
+    prompt punctual(start) -> met within(10min)
+    "
+        The timer fired at logical time $(start).
+        Your deadline is 10 minutes, far more than you need.
+        Set `met` to exactly: punctual
+    "
+
+    prompt tardy(start) -> missed? within(1ms)
+    "
+        The timer fired at logical time $(start).
+        This invocation has a deadline of 1ms, which has almost certainly
+        expired before you read this. If you somehow answer in time, set
+        `missed` to exactly: tardy. Otherwise the deadline passes and nothing
+        is written, which is the expected outcome.
+    "
+
+    prompt reporter(met, missed) -> report
+    "
+        Two reactions ran under `within` deadlines at the same tag.
+        The generous one reported: $(met)
+        The 1ms one reported: $(missed)
+
+        Set `report` to exactly one line of this form:
+        met=$(met) missed=$(missed)
+
+        A value of <absent> for the second one means its deadline expired and
+        its optional contract absorbed the expiry. That is a pass, not an
+        error.
+    "
+}
+
+main WithinTest {
+    probe = DeadlineProbe()
+}

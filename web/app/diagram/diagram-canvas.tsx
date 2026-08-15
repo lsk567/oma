@@ -57,6 +57,16 @@ type Box = { x: number; y: number; width: number; height: number };
 const REACTION_SIZE = { width: 154, height: 50 };
 /** Chevron text starts after the order badge and must clear the right notch. */
 const REACTION_TEXT_X = 46;
+/**
+ * The stopwatch a `within` deadline is drawn as, and the room it needs.
+ *
+ * A face plus a crown, so it reads as a stopwatch rather than the clock a timer
+ * already uses — one counts down against a reaction, the other fires on its
+ * own. It sits before the chevron's point with its interval beneath, and the
+ * node widens to hold both rather than crowding the name.
+ */
+const WITHIN_RADIUS = 7;
+const WITHIN_ROOM = 40;
 const REACTION_MAX_WIDTH = 340;
 const ACTION_SIZE = { width: 26, height: 26 };
 /** A timer's clock face. Larger than an action: it carries two hands. */
@@ -127,6 +137,8 @@ type ReactionView = {
   box: Box;
   /** The agent that runs it, which is whose terminal opens on double click. */
   agent: string;
+  /** Nanoseconds from `within`, drawn as a stopwatch. Null when unbounded. */
+  within: number | null;
 };
 
 type EdgeView = {
@@ -383,13 +395,16 @@ function textWidth(text: string, perChar: number): number {
   return text.length * perChar;
 }
 
-function reactionWidth(labels: ReactionLabels): number {
+function reactionWidth(labels: ReactionLabels, within: number | null): number {
   const widest = Math.max(
     textWidth(labels.name, 6.9),
     textWidth(labels.meta, 5.2),
   );
+  // A deadline is drawn between the text and the point, so the node has to be
+  // wider for it rather than the stopwatch sitting on top of the name.
+  const deadline = within === null ? 0 : WITHIN_ROOM;
   return clamp(
-    Math.ceil(REACTION_TEXT_X + widest + CHEVRON_NOTCH + 10),
+    Math.ceil(REACTION_TEXT_X + widest + deadline + CHEVRON_NOTCH + 10),
     REACTION_SIZE.width,
     REACTION_MAX_WIDTH,
   );
@@ -622,6 +637,7 @@ async function runElk(
             id: reaction.id,
             width: reactionWidth(
               labels.get(reaction.id) ?? { name: reaction.name, meta: "" },
+              reaction.within,
             ),
             height: REACTION_SIZE.height,
           })),
@@ -727,6 +743,7 @@ function buildLayout(
       status: reaction.status,
       box: nodeBoxes.get(reaction.id) ?? { x: 0, y: 0, ...REACTION_SIZE },
       agent: componentName(reaction.agent),
+      within: reaction.within,
     };
   });
 
@@ -1400,6 +1417,38 @@ export function DiagramCanvas({
                   >
                     {reaction.meta}
                   </text>
+                  {/* A deadline the program set for itself. A stopwatch rather
+                      than a clock: a timer fires on its own, this counts down
+                      against work already running. */}
+                  {reaction.within === null ? null : (
+                    <g
+                      className="omar-within"
+                      transform={`translate(${
+                        reaction.box.width - CHEVRON_NOTCH - WITHIN_ROOM / 2
+                      },${reaction.box.height / 2})`}
+                    >
+                      <title>{`must answer within ${formatDuration(reaction.within)}`}</title>
+                      {/* The crown, which is what tells it from a clock face. */}
+                      <line
+                        className="omar-within-crown"
+                        x1={0}
+                        y1={-WITHIN_RADIUS - 5}
+                        x2={0}
+                        y2={-WITHIN_RADIUS - 2}
+                      />
+                      <circle className="omar-within-face" cy={-4} r={WITHIN_RADIUS} />
+                      <line
+                        className="omar-within-hand"
+                        x1={0}
+                        y1={-4}
+                        x2={3.6}
+                        y2={-7.6}
+                      />
+                      <text className="omar-within-meta" y={14} textAnchor="middle">
+                        {formatDuration(reaction.within)}
+                      </text>
+                    </g>
+                  )}
                 </g>
               ))}
             </g>
