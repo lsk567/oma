@@ -88,6 +88,11 @@ pub struct DiagramReaction {
     pub status: String,
     pub invocation_id: Option<String>,
     pub instance: String,
+    /// Nanoseconds this reaction gave itself, or `None` for one bounded only by
+    /// the run. Carried so a client can draw the bound rather than leaving the
+    /// operator to read it out of the source.
+    #[serde(default)]
+    pub within: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,6 +210,7 @@ impl DiagramSnapshot {
                 status: "idle".to_string(),
                 invocation_id: None,
                 instance: reaction.instance.clone(),
+                within: reaction.within,
             })
             .collect();
         let mut edges = Vec::new();
@@ -768,6 +774,7 @@ mod tests {
                     effects: vec!["answer".to_string()],
                     contract: "answer".to_string(),
                     prompt: "Respond".to_string(),
+                    within: None,
                 },
             )]),
         }
@@ -833,6 +840,7 @@ mod tests {
                     effects: vec!["writer.draft".to_string()],
                     contract: "writer.draft".to_string(),
                     prompt: "Draft".to_string(),
+                    within: None,
                 },
             )]),
         }

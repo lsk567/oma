@@ -7,9 +7,29 @@ namespace Omar
 inductive Token where
   | word : String -> Token
   | nat : Nat -> Token
+  /-- A number with a unit attached, already reduced to nanoseconds. Lexed as
+      one token so `after 3ns` cannot be confused with `after 3` followed by a
+      declaration that happens to start with a word. -/
+  | duration : Nat -> Token
   | text : String -> Token
   | sym : String -> Token
   deriving Repr, BEq
+
+/-- Nanoseconds per unit. All time in the language is physical, so a bare
+    number says nothing about its magnitude: `3` could be three nanoseconds or
+    three hours, and only the unit tells them apart. -/
+def durationScale (unit : String) : Except String Nat :=
+  match unit with
+  | "ns" => pure 1
+  | "us" => pure 1000
+  | "ms" => pure 1000000
+  | "s" | "sec" => pure 1000000000
+  | "min" => pure 60000000000
+  | "h" | "hr" => pure 3600000000000
+  -- 'm' and 'ms' differ by one character and five orders of magnitude, and a
+  -- delay that is 60000x wrong fails silently.
+  | "m" => throw "'m' is ambiguous: write 'min' for minutes or 'ms' for milliseconds"
+  | other => throw s!"unknown duration unit '{other}'; use ns, us, ms, s, sec, min, h, or hr"
 
 private def isWordStart (c : Char) : Bool := c.isAlpha || c == '_'
 private def isWordRest (c : Char) : Bool := c.isAlphanum || c == '_'
@@ -59,7 +79,20 @@ private partial def lexChars : List Char -> Except String (List Token)
         let (suffix, tail) := takeWhile (·.isDigit) rest
         let value := String.ofList (c :: suffix)
         match value.toNat? with
-        | some value => do pure (Token.nat value :: (← lexChars tail))
+        | some value => do
+            -- A unit binds to the number it touches. Taken here rather than in
+            -- the parser because `3ns` and `3` followed by `ns` are the same
+            -- two tokens otherwise, and so are `3` and the `input` after it.
+            match tail with
+            | unitStart :: unitRest =>
+                if isWordStart unitStart then
+                  let (unitSuffix, tail) := takeWhile isWordRest unitRest
+                  let unit := String.ofList (unitStart :: unitSuffix)
+                  let scale ← durationScale unit
+                  pure (Token.duration (value * scale) :: (← lexChars tail))
+                else
+                  pure (Token.nat value :: (← lexChars tail))
+            | [] => pure (Token.nat value :: (← lexChars tail))
         | none => throw s!"invalid natural number '{value}'"
       else if "(),;:{}?|=<>[].".contains c then
         do pure (Token.sym c.toString :: (← lexChars rest))
@@ -114,6 +147,9 @@ structure Reaction where
   effects : Array String
   contract : String
   prompt : String
+  /-- How long one invocation may take, in nanoseconds. `none` leaves it to the
+      run-wide timeout. -/
+  within : Option Nat := none
   instance_ : String := ""
   deriving Repr
 
@@ -267,6 +303,7 @@ private def kindName : PortKind -> String
 private def tokenSource : Token -> String
   | .word value => value
   | .nat value => toString value
+  | .duration value => s!"{value}ns"
   | .sym value => value
   | .text _ => "<prompt>"
 
@@ -287,9 +324,23 @@ private def productionTargets (tokens : List Token) : Array String :=
     | _ :: rest => collect expectAtom acc rest
   collect true #[] tokens
 
-private partial def takeContract (acc : List Token) : List Token -> Except String (List Token × String × List Token)
+private def duration : Parser Nat
+  | Token.duration value :: rest => pure (value, rest)
+  | Token.nat value :: _ => throw s!"duration '{value}' needs a unit, e.g. '{value}s'"
+  | tokens => throw s!"expected a duration, found {reprStr tokens.head?}"
+
+/-- A logical delay: a duration, or a bare zero.
+    Zero is the same instant whatever unit it is written in, so it alone may go
+    without one. Every other delay must say what it means. -/
+private def delayValue : Parser Nat
+  | Token.nat 0 :: rest => pure (0, rest)
+  | tokens => duration tokens
+
+/-- Everything between `->` and either `within` or the prompt string. -/
+private partial def takeContract (acc : List Token) : List Token -> Except String (List Token × List Token)
   | [] => throw "expected prompt string after production contract"
-  | Token.text prompt :: rest => pure (acc.reverse, prompt, rest)
+  | tokens@(Token.text _ :: _) => pure (acc.reverse, tokens)
+  | tokens@(Token.word "within" :: _) => pure (acc.reverse, tokens)
   | token :: rest => takeContract (token :: acc) rest
 
 /-- `port`, or `instance.port` written as one dotted name. -/
@@ -327,7 +378,7 @@ private partial def parseArgs (acc : Array Literal) : Parser (Array Literal)
 
 private def parseActionDelay : Parser (Option Nat)
   | Token.sym "(" :: Token.word "delay" :: Token.sym "=" :: rest => do
-      let (delay, rest) ← natural rest
+      let (delay, rest) ← delayValue rest
       let (_, rest) ← expectSym ")" rest
       pure (some delay, rest)
   | tokens => pure (none, tokens)
@@ -370,9 +421,9 @@ private partial def parseDeclarations
   | Token.word "timer" :: rest => do
       let (name, rest) ← word rest
       let (_, rest) ← expectSym "(" rest
-      let (offset, rest) ← natural rest
+      let (offset, rest) ← delayValue rest
       let (_, rest) ← expectSym "," rest
-      let (period, rest) ← natural rest
+      let (period, rest) ← delayValue rest
       let (_, rest) ← expectSym ")" rest
       parseDeclarations reactionIndex ports (timers.push { name, offset, period }) connections reactions instances rest
   | Token.word name :: Token.sym "=" :: rest => do
@@ -386,12 +437,25 @@ private partial def parseDeclarations
       let (_, rest) ← expectSym "(" rest
       let (triggers, rest) ← parseDependencies #[] rest
       let (_, rest) ← expectSym "->" rest
-      let (contractTokens, prompt, rest) ← takeContract [] rest
+      let (contractTokens, rest) ← takeContract [] rest
+      -- `within(30s)` sits between the contract and the prompt because what
+      -- expiry does is read off the contract: silence completes the tag when
+      -- the contract permits no writes, and raises when it requires one.
+      let (within, rest) ← match rest with
+        | Token.word "within" :: tail => do
+            let (_, tail) ← expectSym "(" tail
+            let (value, tail) ← duration tail
+            let (_, tail) ← expectSym ")" tail
+            pure (some value, tail)
+        | _ => pure (none, rest)
+      let (prompt, rest) ← match rest with
+        | Token.text prompt :: tail => pure (prompt, tail)
+        | _ => throw "expected prompt string after production contract"
       let effects := productionTargets contractTokens
       let contract := String.intercalate " " (contractTokens.map tokenSource)
       let reaction := {
         id := s!"reaction.{reactionIndex}"
-        agent, triggers, effects, contract, prompt
+        agent, triggers, effects, contract, prompt, within
       }
       parseDeclarations (reactionIndex + 1) ports timers connections (reactions.push reaction) instances rest
   | Token.word first :: rest => do
@@ -405,7 +469,7 @@ private partial def parseDeclarations
       -- `after` is optional, matching main: a connection with no delay still
       -- lands on the next microstep.
       let (delay, rest) ← match rest with
-        | Token.word "after" :: tail => natural tail
+        | Token.word "after" :: tail => delayValue tail
         | _ => pure (0, rest)
       parseDeclarations reactionIndex ports timers (connections.push { source, target, delay }) reactions instances rest
   | token :: _ => throw s!"unexpected token in team body: {reprStr token}"
@@ -452,7 +516,7 @@ private partial def parseMainBody
       -- `after` is optional here. A connection with no delay still lands on
       -- the next microstep, so a feedback loop through instances progresses.
       let (delay, rest) ← match rest with
-        | Token.word "after" :: tail => natural tail
+        | Token.word "after" :: tail => delayValue tail
         | _ => pure (0, rest)
       let connection :=
         { sourceInstance, sourcePort, targetInstance, targetPort, delay : InstanceConnection }
@@ -745,7 +809,7 @@ def compile (program : Program) : String :=
       ("delay", toJson connection.delay)
     ]
   let reactions := program.reactions.map fun reaction =>
-    instruction "install_reaction" [
+    let fields := [
       ("instance", toJson reaction.instance_),
       ("id", toJson reaction.id),
       ("agent", toJson reaction.agent),
@@ -753,7 +817,10 @@ def compile (program : Program) : String :=
       ("effects", jsonStringArray reaction.effects),
       ("contract", toJson reaction.contract),
       ("prompt", toJson reaction.prompt)
-    ]
+    ] ++ match reaction.within with
+      | some within => [("within", toJson within)]
+      | none => []
+    instruction "install_reaction" fields
   let commit := instruction "commit_plan"
   let instructions :=
     #[begin] ++ instances ++ agents ++ ports ++ timers ++ connections ++ reactions ++ #[commit]

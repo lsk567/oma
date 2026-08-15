@@ -80,6 +80,10 @@ pub enum Instruction {
         prompt: String,
         #[serde(default)]
         instance: String,
+        /// Nanoseconds one invocation may take before it is given up on.
+        /// Absent leaves it to the run-wide timeout.
+        #[serde(default)]
+        within: Option<u64>,
     },
     CommitPlan,
 }
@@ -152,6 +156,9 @@ pub struct ReactionState {
     pub effects: Vec<String>,
     pub contract: String,
     pub prompt: String,
+    /// Nanoseconds one invocation may take. `None` uses the run-wide timeout.
+    #[serde(default)]
+    pub within: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -451,6 +458,7 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                 contract,
                 prompt,
                 instance,
+                within,
             } => {
                 let order = state.reactions.len();
                 check_instance(&state, "reaction", id, instance)?;
@@ -494,6 +502,7 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                             effects: effects.clone(),
                             contract: contract.clone(),
                             prompt: prompt.clone(),
+                            within: *within,
                         },
                     )
                     .is_some()
@@ -972,10 +981,34 @@ struct InvocationSpec {
     allowed_effects: BTreeMap<String, String>,
     contract: String,
     prompt: String,
+    /// What the program allows this invocation, overriding the run-wide
+    /// timeout. `None` means the program said nothing and the run's applies.
+    within: Option<Duration>,
 }
 
 trait ReactionExecutor: Sync {
     fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>>;
+}
+
+/// What an expired deadline means, which the effect contract decides.
+///
+/// A contract that writing nothing already satisfies is one the program said
+/// may stay silent, so the tag completes with no writes and whatever those
+/// ports feed simply does not fire. A contract that requires an effect has not
+/// been honoured and there is no value to invent, so the run stops rather than
+/// carrying on from a decision nobody made.
+fn expired(invocation: &InvocationSpec, deadline: Duration) -> Result<BTreeMap<String, Value>> {
+    match validate_contract(&invocation.contract, &BTreeMap::new()) {
+        Ok(()) => Ok(BTreeMap::new()),
+        Err(_) => bail!(
+            "reaction '{}' invocation '{}': '{}' did not answer within {:?}, and contract '{}' requires an effect",
+            invocation.reaction_id,
+            invocation.id,
+            invocation.agent,
+            deadline,
+            invocation.contract
+        ),
+    }
 }
 
 struct TmuxReactionExecutor {
@@ -1021,13 +1054,10 @@ impl ReactionExecutor for TmuxReactionExecutor {
             return Err(error);
         }
 
-        let result = match completion.recv_timeout(self.timeout) {
+        let deadline = invocation.within.unwrap_or(self.timeout);
+        let result = match completion.recv_timeout(deadline) {
             Ok(writes) => Ok(writes),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow::anyhow!(
-                "invocation '{}' on agent '{}' timed out",
-                invocation_id,
-                invocation.agent
-            )),
+            Err(mpsc::RecvTimeoutError::Timeout) => expired(&invocation, deadline),
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow::anyhow!(
                 "topology invocation service stopped unexpectedly"
             )),
@@ -1505,6 +1535,7 @@ fn invocation_spec(
         allowed_effects,
         contract: reaction.contract.clone(),
         prompt: reaction.prompt.clone(),
+        within: reaction.within.map(Duration::from_nanos),
     })
 }
 
@@ -1922,6 +1953,7 @@ mod tests {
                     effects: effects.into_iter().map(str::to_string).collect(),
                     contract: contract.into(),
                     prompt: "prompt".into(),
+                    within: None,
                 },
             );
         }
@@ -2146,6 +2178,122 @@ mod tests {
         .unwrap();
         let error = verify(&orphan).unwrap_err().to_string();
         assert!(error.contains("undeclared parent 'b'"), "{error}");
+    }
+
+    /// One reaction under a contract of the caller's choosing, with or without
+    /// a deadline the program set for itself.
+    fn deadline_spec(contract: &str, within: Option<u64>) -> InvocationSpec {
+        let within = match within {
+            Some(nanos) => format!(r#","within":{nanos}"#),
+            None => String::new(),
+        };
+        let bytecode: Bytecode = serde_json::from_str(&format!(
+            r#"{{
+              "version": 1,
+              "team": "Desk",
+              "instructions": [
+                {{"op":"begin_plan","team":"Desk"}},
+                {{"op":"spawn_agent","name":"clerk","backend":"Codex"}},
+                {{"op":"define_port","kind":"input","name":"topic","type":"string"}},
+                {{"op":"define_port","kind":"output","name":"memo","type":"string"}},
+                {{"op":"install_reaction","id":"reaction.0","agent":"clerk",
+                 "triggers":["topic"],"effects":["memo"],
+                 "contract":"{contract}","prompt":"p"{within}}},
+                {{"op":"commit_plan"}}
+              ]
+            }}"#
+        ))
+        .unwrap();
+        let state = verify(&bytecode).unwrap();
+        let (id, reaction) = state.reactions.get_key_value("reaction.0").unwrap();
+        invocation_spec(
+            &state,
+            (id, reaction),
+            &BTreeMap::from([("topic".to_string(), json!("x"))]),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_program_sets_its_own_deadline() {
+        assert_eq!(
+            deadline_spec("memo", Some(30_000_000_000)).within,
+            Some(Duration::from_secs(30))
+        );
+        // Saying nothing leaves the run-wide timeout in charge rather than
+        // inventing a deadline the program never asked for.
+        assert_eq!(deadline_spec("memo", None).within, None);
+    }
+
+    #[test]
+    fn silence_completes_the_tag_when_the_contract_permits_it() {
+        let spec = deadline_spec("memo ?", Some(1));
+        assert_eq!(
+            expired(&spec, Duration::from_secs(30)).unwrap(),
+            BTreeMap::new()
+        );
+    }
+
+    #[test]
+    fn silence_stops_the_run_when_the_contract_requires_an_effect() {
+        let spec = deadline_spec("memo", Some(1));
+        let error = expired(&spec, Duration::from_secs(30))
+            .unwrap_err()
+            .to_string();
+        // Names the contract, so an operator reads which promise went unkept
+        // rather than only that something timed out, and names the invocation
+        // so the line can be found in a log next to the rest of its run.
+        assert!(error.contains("requires an effect"), "{error}");
+        assert!(error.contains("memo"), "{error}");
+        assert!(error.contains("reaction.0"), "{error}");
+        assert!(error.contains(&spec.id), "{error}");
+    }
+
+    /// Answers nothing, which is what an expired deadline does to a contract
+    /// that permits silence.
+    struct SilentExecutor;
+
+    impl ReactionExecutor for SilentExecutor {
+        fn invoke(&self, _invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+            Ok(BTreeMap::new())
+        }
+    }
+
+    #[test]
+    fn a_silent_reaction_leaves_what_it_feeds_unfired() {
+        // Silence is absence, not a value: the port it would have written is
+        // not present, so the reaction reading it never runs and the run ends
+        // rather than stalling on a value that is never coming.
+        let bytecode: Bytecode = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Desk",
+              "instructions": [
+                {"op":"begin_plan","team":"Desk"},
+                {"op":"spawn_agent","name":"clerk","backend":"Codex"},
+                {"op":"spawn_agent","name":"editor","backend":"Codex"},
+                {"op":"define_port","kind":"input","name":"topic","type":"string"},
+                {"op":"define_port","kind":"action","name":"memo","type":"string"},
+                {"op":"define_port","kind":"output","name":"report","type":"string"},
+                {"op":"install_reaction","id":"reaction.0","agent":"clerk",
+                 "triggers":["topic"],"effects":["memo"],
+                 "contract":"memo ?","prompt":"p","within":1},
+                {"op":"install_reaction","id":"reaction.1","agent":"editor",
+                 "triggers":["memo"],"effects":["report"],
+                 "contract":"report","prompt":"p"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let state = verify(&bytecode).unwrap();
+        let outputs = run_event_loop(
+            &state,
+            BTreeMap::from([("topic".to_string(), json!("x"))]),
+            &SilentExecutor,
+        )
+        .unwrap();
+        assert!(outputs.is_empty(), "nothing downstream ran: {outputs:?}");
     }
 
     /// A connection carrying `delay` nanoseconds, so the run reaches its
