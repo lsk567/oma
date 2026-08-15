@@ -65,6 +65,11 @@ struct StartRunRequest {
     replace: bool,
     #[serde(default = "default_timeout_seconds")]
     timeout_seconds: u64,
+    /// Run the logical clock as fast as the work allows. Per run rather than
+    /// per daemon, so one client asking for a quick run does not change what
+    /// a delay means for everyone else's.
+    #[serde(default)]
+    fast: bool,
 }
 
 fn default_replace() -> bool {
@@ -1078,6 +1083,11 @@ fn spawn_run_thread(
     let run_id = run_id.to_string();
     let replace = request.replace;
     let timeout = Duration::from_secs(request.timeout_seconds);
+    let pace = if request.fast {
+        topology::Pace::Fast
+    } else {
+        topology::Pace::RealTime
+    };
     thread::spawn(move || {
         let diagram_address: SocketAddr = "127.0.0.1:0".parse().expect("loopback address");
         let outcome = topology::run_topology(
@@ -1091,6 +1101,7 @@ fn spawn_run_thread(
                 inputs: &inputs,
                 replace,
                 timeout,
+                pace,
                 diagram_address: Some(diagram_address),
                 diagram_ready: Some(ready_sender),
             },

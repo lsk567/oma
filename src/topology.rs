@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -1046,6 +1046,8 @@ pub struct TopologyRunConfig<'a> {
     pub inputs: &'a [String],
     pub replace: bool,
     pub timeout: Duration,
+    /// Whether the run holds its logical clock against the wall clock.
+    pub pace: Pace,
     pub diagram_address: Option<std::net::SocketAddr>,
     /// Receives the bound diagram address once the server is up. `omar serve`
     /// needs it while the run is still in flight; `omar run` prints it instead.
@@ -1104,7 +1106,7 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
         registry: invocation_server.registry.clone(),
         timeout: config.timeout,
     };
-    let outputs = match run_event_loop_observed(&state, inputs, &executor, observer) {
+    let outputs = match run_event_loop_observed(&state, inputs, &executor, observer, config.pace) {
         Ok(outputs) => outputs,
         Err(error) => {
             observer.run_failed(&error.to_string());
@@ -1291,13 +1293,25 @@ fn enqueue_event(
     Ok(())
 }
 
+/// How a run's logical clock is held against the wall clock.
+///
+/// Real time by default: a tag at logical timestamp T does not run before T has
+/// elapsed since the run began, which is what makes a delay a promise about
+/// when rather than only about order. `Fast` runs the same program as quickly
+/// as the work allows, which is what a test wants and what `--fast` asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pace {
+    RealTime,
+    Fast,
+}
+
 #[cfg(test)]
 fn run_event_loop<E: ReactionExecutor>(
     state: &VmState,
     inputs: BTreeMap<String, Value>,
     executor: &E,
 ) -> Result<BTreeMap<String, Value>> {
-    run_event_loop_observed(state, inputs, executor, &NoopTopologyObserver)
+    run_event_loop_observed(state, inputs, executor, &NoopTopologyObserver, Pace::Fast)
 }
 
 fn run_event_loop_observed<E: ReactionExecutor>(
@@ -1305,7 +1319,11 @@ fn run_event_loop_observed<E: ReactionExecutor>(
     inputs: BTreeMap<String, Value>,
     executor: &E,
     observer: &dyn TopologyObserver,
+    pace: Pace,
 ) -> Result<BTreeMap<String, Value>> {
+    // When the run's logical clock was started, which is what every tag's
+    // timestamp is measured from.
+    let origin = Instant::now();
     let mut queue = BTreeMap::from([(Tag::START, inputs)]);
     // Arm every timer for its first firing. A timer's value is the timestamp it
     // fired at, which is what makes `$(t)` in a prompt worth reading.
@@ -1322,6 +1340,17 @@ fn run_event_loop_observed<E: ReactionExecutor>(
     let mut steps = 0usize;
 
     while let Some((tag, events)) = queue.pop_first() {
+        if pace == Pace::RealTime {
+            // Microsteps carry no time, so only the timestamp is owed. A tag
+            // whose moment has already passed runs now rather than being
+            // pushed further out: being late is not a reason to be later, and
+            // how late is a question of its own.
+            if let Some(remaining) =
+                Duration::from_nanos(tag.timestamp).checked_sub(origin.elapsed())
+            {
+                thread::sleep(remaining);
+            }
+        }
         observer.tag_advanced(tag.timestamp, tag.microstep, &events);
         steps += 1;
         if steps > 1024 {
@@ -2114,6 +2143,119 @@ mod tests {
         .unwrap();
         let error = verify(&orphan).unwrap_err().to_string();
         assert!(error.contains("undeclared parent 'b'"), "{error}");
+    }
+
+    /// A connection carrying `delay` nanoseconds, so the run reaches its
+    /// output only at that logical timestamp — and under `Pace::RealTime` owes
+    /// that much wall-clock time before it gets there.
+    fn delayed_bytecode(delay: u64) -> Bytecode {
+        serde_json::from_str(&format!(
+            r#"{{
+              "version": 1,
+              "team": "Desk",
+              "instructions": [
+                {{"op":"begin_plan","team":"Desk"}},
+                {{"op":"spawn_agent","name":"clerk","backend":"Codex"}},
+                {{"op":"define_port","kind":"input","name":"topic","type":"string"}},
+                {{"op":"define_port","kind":"action","name":"staged","type":"string"}},
+                {{"op":"define_port","kind":"output","name":"memo","type":"string"}},
+                {{"op":"connect_ports","source":"staged","target":"memo","delay":{delay}}},
+                {{"op":"install_reaction","id":"reaction.0","agent":"clerk",
+                 "triggers":["topic"],"effects":["staged"],
+                 "contract":"staged","prompt":"p"}},
+                {{"op":"commit_plan"}}
+              ]
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    /// Writes its one effect and returns at once, so the only time the run
+    /// takes is the time the topology asked for.
+    struct PromptExecutor;
+
+    impl ReactionExecutor for PromptExecutor {
+        fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+            let writes = BTreeMap::from([("staged".to_string(), json!("done"))]);
+            validate_contract(&invocation.contract, &writes)?;
+            Ok(writes)
+        }
+    }
+
+    #[test]
+    fn real_time_owes_the_delay_a_program_asked_for() {
+        // 80ms is long enough that a sleep is unmistakable and short enough
+        // that the suite does not notice.
+        let state = verify(&delayed_bytecode(80_000_000)).unwrap();
+        let started = Instant::now();
+        let outputs = run_event_loop_observed(
+            &state,
+            BTreeMap::from([("topic".to_string(), json!("x"))]),
+            &PromptExecutor,
+            &NoopTopologyObserver,
+            Pace::RealTime,
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(outputs["memo"], json!("done"));
+        assert!(
+            elapsed >= Duration::from_millis(80),
+            "a delay is a wait, not only an ordering: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn fast_runs_the_same_program_without_the_wait() {
+        let state = verify(&delayed_bytecode(80_000_000)).unwrap();
+        let started = Instant::now();
+        let outputs = run_event_loop_observed(
+            &state,
+            BTreeMap::from([("topic".to_string(), json!("x"))]),
+            &PromptExecutor,
+            &NoopTopologyObserver,
+            Pace::Fast,
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        // Same outputs, same tags, no wall clock. Only the waiting is skipped.
+        assert_eq!(outputs["memo"], json!("done"));
+        assert!(
+            elapsed < Duration::from_millis(40),
+            "fast should not sleep: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_tag_already_late_is_not_made_later() {
+        // The reaction takes longer than the gap to the next tag, so that tag
+        // is due before it is reached — and must run at once rather than
+        // waiting out a schedule it has already missed.
+        let state = verify(&delayed_bytecode(40_000_000)).unwrap();
+        struct SlowExecutor;
+        impl ReactionExecutor for SlowExecutor {
+            fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+                thread::sleep(Duration::from_millis(120));
+                let writes = BTreeMap::from([("staged".to_string(), json!("done"))]);
+                validate_contract(&invocation.contract, &writes)?;
+                Ok(writes)
+            }
+        }
+        let started = Instant::now();
+        run_event_loop_observed(
+            &state,
+            BTreeMap::from([("topic".to_string(), json!("x"))]),
+            &SlowExecutor,
+            &NoopTopologyObserver,
+            Pace::RealTime,
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        // The reaction's own 120ms, and no extra sleep on top for a deadline
+        // that had already gone by.
+        assert!(
+            elapsed < Duration::from_millis(160),
+            "a missed tag should not be pushed further out: {elapsed:?}"
+        );
     }
 
     /// Records the tag every invocation arrived at, so a timer's schedule can
