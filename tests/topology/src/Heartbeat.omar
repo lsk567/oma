@@ -14,7 +14,7 @@
 
 team Pulse[monitor : ClaudeCode]
 {
-    timer tick(0, 10)
+    timer tick(0, 10ns)
     output reading : string
 
     prompt monitor(tick) -> reading

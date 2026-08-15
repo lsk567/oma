@@ -159,6 +159,12 @@ enum Commands {
         #[arg(long, default_value_t = 300)]
         timeout_seconds: u64,
 
+        /// Run the logical clock as fast as the work allows instead of holding
+        /// it against the wall clock. A delay stays an ordering; it stops being
+        /// a wait.
+        #[arg(long)]
+        fast: bool,
+
         /// Expose the live topology diagram API while the run is active
         #[arg(long)]
         diagram_server: bool,
@@ -439,6 +445,7 @@ async fn async_main() -> Result<()> {
             inputs,
             replace,
             timeout_seconds,
+            fast,
             diagram_server,
             diagram_address,
         }) => {
@@ -455,6 +462,11 @@ async fn async_main() -> Result<()> {
                     inputs: &inputs,
                     replace,
                     timeout: Duration::from_secs(timeout_seconds),
+                    pace: if fast {
+                        topology::Pace::Fast
+                    } else {
+                        topology::Pace::RealTime
+                    },
                     diagram_address: diagram_server.then_some(diagram_address),
                     diagram_ready: None,
                 },

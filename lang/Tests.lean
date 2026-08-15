@@ -163,7 +163,50 @@ def testWithin : IO Unit := do
   | .error message => throw (IO.userError s!"no deadline: {message}")
   IO.println "within tests passed"
 
+/-- A team with two ports and whatever declarations the caller writes between
+    them, for exercising delays without an agent or a reaction. -/
+def wireTeam (body : String) : String :=
+  "team Wire { input src : int output dst : int " ++ body ++ " }
+   main { w = Wire() }"
+
+/-- Every delay in the language is a duration, and only zero may go without a
+    unit. A bare number would say nothing about its magnitude. -/
+def testDelayUnits : IO Unit := do
+  for (body, nanos) in [("src -> dst after 0", 0), ("src -> dst after 3ns", 3),
+                        ("src -> dst after 2ms", 2000000),
+                        -- Zero with a unit is still zero, and still allowed.
+                        ("src -> dst after 0ms", 0)] do
+    match lex (wireTeam body) >>= parse "Wire" with
+    | .ok program =>
+        assertEqual s!"connection delay for '{body}'"
+          (program.connections.any (·.delay == nanos)) true
+    | .error message => throw (IO.userError s!"{body}: {message}")
+
+  match lex (wireTeam "src -> dst after 0 timer t(0, 10ns)") >>= parse "Wire" with
+  | .ok program => do
+      assertEqual "timer offset" (program.timers.any (·.offset == 0)) true
+      assertEqual "timer period" (program.timers.any (·.period == 10)) true
+  | .error message => throw (IO.userError s!"timer units: {message}")
+
+  -- A unit binds only to a number it touches. `0` here is followed by the word
+  -- `action`, which must stay a declaration rather than becoming a unit.
+  match lex (wireTeam "src -> dst after 0 action mid : int") >>= parse "Wire" with
+  | .ok program =>
+      assertEqual "a following declaration is not a unit"
+        (program.ports.any (·.name == "w.mid")) true
+  | .error message => throw (IO.userError s!"delay then declaration: {message}")
+  IO.println "delay unit tests passed"
+
 def rejectionCases : Array (String × String × String) := #[
+  -- Only zero may be unitless; every other delay says what it means.
+  ("connection delay without a unit",
+    wireTeam "src -> dst after 3", "needs a unit"),
+  ("timer offset without a unit",
+    wireTeam "src -> dst after 0 timer t(5, 0)", "needs a unit"),
+  ("timer period without a unit",
+    wireTeam "src -> dst after 0 timer t(0, 10)", "needs a unit"),
+  ("action delay without a unit",
+    wireTeam "action mid(delay=2) : int src -> dst after 0", "needs a unit"),
   -- 'm' and 'ms' differ by one character and five orders of magnitude.
   ("ambiguous duration unit", deadlineTeam "5m", "ambiguous"),
   -- A bare number is logical delay elsewhere in the language; a duration is
@@ -222,6 +265,7 @@ def main : IO UInt32 := do
     testBareTeamHeader
     testNamedMain
     testWithin
+    testDelayUnits
     IO.println "compiler rejection tests passed"
     pure 0
   catch error =>

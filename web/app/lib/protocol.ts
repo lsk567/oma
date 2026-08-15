@@ -4,9 +4,39 @@ export const DIAGRAM_PROTOCOL_VERSION = 1;
 export const SERVE_PROTOCOL_VERSION = 1;
 
 export type DiagramTag = {
+  /** Nanoseconds of logical time since the run began. */
   timestamp: number;
   microstep: number;
 };
+
+/** Largest unit that still divides a whole number of nanoseconds. */
+const DURATION_UNITS: [number, string][] = [
+  [3_600_000_000_000, "h"],
+  [60_000_000_000, "min"],
+  [1_000_000_000, "s"],
+  [1_000_000, "ms"],
+  [1_000, "us"],
+  [1, "ns"],
+];
+
+/**
+ * A span of nanoseconds, in the largest unit that divides it exactly.
+ *
+ * `30000000000` is a number nobody can read at a glance and everybody has to
+ * count the digits of. `30s` is the same fact. Exact division rather than
+ * rounding, because `1500ms` is true where `1.5s` invites a reader to wonder
+ * what was dropped — and a diagram that rounds a delay is lying about the
+ * program.
+ */
+export function formatDuration(nanos: number): string {
+  if (!Number.isFinite(nanos)) return "—";
+  if (nanos === 0) return "0";
+  if (nanos < 0) return `-${formatDuration(-nanos)}`;
+  const [scale, unit] =
+    DURATION_UNITS.find(([size]) => nanos % size === 0) ??
+    DURATION_UNITS[DURATION_UNITS.length - 1];
+  return `${nanos / scale}${unit}`;
+}
 
 export type DiagramAgent = {
   id: string;
@@ -85,6 +115,15 @@ export type DiagramSnapshot = {
   sequence: number;
   status: "ready" | "running" | "completed" | "failed";
   current_tag: DiagramTag | null;
+  /**
+   * Nanoseconds physical time had run past `current_tag` when it executed.
+   * Null before the first tag, and from a runtime that predates the field.
+   *
+   * Zero means the run is on or ahead of its schedule. It grows only when work
+   * outlasts the gap the program gave it, which is the question an operator
+   * actually has: is this keeping up?
+   */
+  lag: number | null;
   /** Containers to draw. Empty means the runtime predates instances, and the
       program is drawn as one box named after itself. */
   instances: DiagramInstance[];
@@ -224,6 +263,9 @@ export function assertDiagramSnapshot(value: unknown): DiagramSnapshot {
     instances: Array.isArray(snapshot.instances) ? snapshot.instances : [],
     // Likewise for timers: a runtime without them sends no field at all.
     timers: Array.isArray(snapshot.timers) ? snapshot.timers : [],
+    // A runtime that does not measure lag is not a runtime with no lag, so
+    // this stays null and the readout says so rather than claiming zero.
+    lag: typeof snapshot.lag === "number" ? snapshot.lag : null,
   } as DiagramSnapshot;
 }
 
@@ -269,9 +311,13 @@ export function applyDiagramEvent(
       // at this tag. Reading it from the event rather than refetching is what
       // keeps the clock moving after the run's server has gone.
       const fired = (event.payload?.ports ?? {}) as Record<string, unknown>;
+      const lag = (event.payload as { lag?: unknown }).lag;
       return {
         ...snapshot,
         current_tag: event.tag ?? snapshot.current_tag,
+        // Carried on the event as well as the snapshot, so the reading stays
+        // right after the run's server has gone and there is nothing to refetch.
+        lag: typeof lag === "number" ? lag : snapshot.lag,
         timers: snapshot.timers.map((timer) =>
           timer.name in fired ? { ...timer, last_tag: event.tag } : timer,
         ),

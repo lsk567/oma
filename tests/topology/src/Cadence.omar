@@ -68,10 +68,10 @@ team Desk[editor : ClaudeCode]
 
 team Chair(topic : string)[chair : ClaudeCode]
 {
-    timer open1(1, 0)
-    timer open2(10, 0)
-    timer open3(20, 0)
-    timer close(30, 0)
+    timer open1(1ns, 0)
+    timer open2(10ns, 0)
+    timer open3(20ns, 0)
+    timer close(30ns, 0)
 
     input digest : string
     output brief : string

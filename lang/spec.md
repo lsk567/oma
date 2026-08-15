@@ -20,16 +20,18 @@ program     = "team", identifier, "(", agents, ")",
 agents      = [ agent, { ",", agent } ] ;
 agent       = identifier, ":", identifier ;
 
-declaration = input | output | action | connection | prompt ;
+declaration = input | output | action | timer | connection | prompt ;
 input       = "input", identifier, ":", type ;
 output      = "output", identifier, ":", type ;
-action      = "action", identifier, [ "(", "delay", "=", natural, ")" ],
+action      = "action", identifier, [ "(", "delay", "=", delay, ")" ],
               [ ":", type ] ;
-connection  = identifier, "->", identifier, "after", natural ;
+timer       = "timer", identifier, "(", delay, ",", delay, ")" ;
+connection  = identifier, "->", identifier, "after", delay ;
 
 prompt      = "prompt", identifier, "(", triggers, ")",
               "->", effects, [ deadline ], prompt-string ;
 deadline    = "within", "(", duration, ")" ;
+delay       = duration | "0" ;
 duration    = natural, unit ;
 unit        = "ns" | "us" | "ms" | "s" | "sec" | "min" | "h" | "hr" ;
 triggers    = [ identifier, { ",", identifier } ] ;
@@ -54,10 +56,12 @@ delimits a block comment.
 - `output` is a typed externally observable result.
 - `action` is a typed internal port.
 - An action without a type is a signal carrying no value.
-- `action a(delay=2) : int` gives `a` a fixed logical delay of two timestamp
-  units.
-- `a -> b after 3` copies each value present on `a` to `b` with an additional
-  logical delay of three timestamp units.
+- `action a(delay=2ms) : int` gives `a` a fixed logical delay of two
+  milliseconds.
+- `a -> b after 3s` copies each value present on `a` to `b` with an additional
+  logical delay of three seconds.
+- `timer t(1s, 500ms)` fires at one second and every five hundred milliseconds
+  after that. A period of `0` fires once, at the offset.
 - `prompt agent(a, b)` declares a reaction on `agent` triggered when port `a`
   or port `b` is present. If both are present at the same tag, the reaction is
   invoked once with both values.
@@ -92,10 +96,7 @@ target types must match. Values must match their port types.
 `within(30s)` bounds how long one invocation may take, measured from when that
 invocation starts. Without it the run-wide timeout applies.
 
-A duration is wall-clock and must carry a unit. `after 3` is a logical delay
-measured in tags; written as bare numbers the two would read alike and mean
-nothing alike. `m` is rejected as ambiguous: `min` is minutes, `ms` is
-milliseconds.
+See §2.4: a deadline is a duration like any other, and carries a unit.
 
 What expiry does is read off the effect contract, so a deadline needs no
 second clause saying what to fall back to:
@@ -105,6 +106,27 @@ second clause saying what to fall back to:
   absent, so whatever they feed does not fire.
 - a contract requiring an effect — `a`, `(a | b)` — has not been honoured.
   There is no value to invent, so the run fails.
+
+### 2.4 Durations
+
+Every span of time in the language is a duration: `after`, a timer's offset and
+period, an action's `delay`, and `within`. All are stored as nanoseconds.
+
+A duration must carry a unit — `ns`, `us`, `ms`, `s` (or `sec`), `min`, `h` (or
+`hr`). A bare number says nothing about its magnitude, and `3` meaning three
+nanoseconds rather than three hours is not something a reader should have to
+know from elsewhere.
+
+`m` is rejected as ambiguous: `min` is minutes, `ms` is milliseconds, and the
+two differ by one character and five orders of magnitude.
+
+Zero is the one exception. `after 0` is the same instant in every unit, so it
+needs none — though `0ms` is also accepted and means the same thing.
+
+A unit binds to the number it touches. `after 3ns` is one duration; `after 3`
+followed by a declaration beginning with a word is a delay and then that
+declaration, and `3 ns` with a space between is an error rather than a
+duration.
 
 ## 3. Compiled topology
 
@@ -146,8 +168,8 @@ tag = (timestamp, microstep)
 event = (tag, flow, port, value)
 ```
 
-Logical time is a nonnegative integer timestamp. External inputs begin at
-`(0, 0)`. Scheduling uses the following rules:
+Logical time is a nonnegative integer timestamp in nanoseconds. External inputs
+begin at `(0, 0)`. Scheduling uses the following rules:
 
 - An effect written to a port without a fixed delay at `(t, m)` is enqueued at
   `(t, m + 1)`.
@@ -174,6 +196,26 @@ At each tag, the runtime:
    calculated superdense tags.
 
 The runtime advances only after the global tag barrier closes.
+
+### 4.0 Pace
+
+A timestamp is nanoseconds since the run began, and by default the runtime
+holds the logical clock against the wall clock: a tag at timestamp `T` does not
+execute before `T` has elapsed. A delay is therefore a statement about *when*,
+not only about order.
+
+A tag whose moment has already passed — because a reaction took longer than the
+gap to the next one — executes immediately rather than being pushed further out.
+Being late is not a reason to be later. How late is a separate question, and one
+the language does not yet ask.
+
+Microsteps carry no time. Every tag at the same timestamp is due at the same
+moment, which is what makes zero-delay causality instantaneous rather than
+merely fast.
+
+`--fast` runs the same program as quickly as the work allows. Tags, ordering
+and outputs are identical; only the waiting is skipped. It is what a test wants
+and what a program's meaning must not depend on.
 
 ### 4.1 Invocation DAG
 

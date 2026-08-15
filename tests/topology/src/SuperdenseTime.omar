@@ -8,12 +8,12 @@ team SuperdenseTime[producer : Codex,
     output connected_result : int
 
     action immediate : int
-    action fixed(delay=2) : int
-    action connected(delay=1) : int
+    action fixed(delay=2ns) : int
+    action connected(delay=1ns) : int
 
     // `immediate` arrives at (0, 1). The connection delay of 3 and connected's
     // fixed delay of 1 are additive, so `connected` arrives at (4, 0).
-    immediate -> connected after 3
+    immediate -> connected after 3ns
 
     prompt producer(start) -> immediate, fixed
     "
