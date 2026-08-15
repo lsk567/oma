@@ -390,9 +390,14 @@ export async function startFakeServe({
     publish(entry, "run_started", {});
 
     for (const [index, reaction] of entry.snapshot.reactions.entries()) {
-      const tag = { timestamp: index + 1, microstep: 0 };
+      // Nanoseconds, as the runtime sends them: a tag a second apart, each one
+      // a fixed 250ms behind its logical time so the readout has something to
+      // show that is neither zero nor a round second.
+      const tag = { timestamp: (index + 1) * 1_000_000_000, microstep: 0 };
+      const lag = 250_000_000;
       entry.snapshot.current_tag = tag;
-      publish(entry, "tag_advanced", {}, tag);
+      entry.snapshot.lag = lag;
+      publish(entry, "tag_advanced", { lag }, tag);
       await wait();
 
       reaction.status = "running";

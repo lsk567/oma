@@ -16,6 +16,7 @@ import {
 import { reviewProgram, reviewWorkflow } from "./lib/fixtures";
 import {
   applyDiagramEvent,
+  formatDuration,
   isRunFinished,
   type ChatMessage,
   type DiagramEvent,
@@ -322,9 +323,14 @@ export function Studio({
     setError("");
   }
 
+  // A tag is a time and a microstep, so the time reads as one: `30s:0`, not
+  // thirty thousand million and a colon.
   const tag = snapshot?.current_tag
-    ? `${snapshot.current_tag.timestamp}:${snapshot.current_tag.microstep}`
+    ? `${formatDuration(snapshot.current_tag.timestamp)}:${snapshot.current_tag.microstep}`
     : "—";
+  // How far behind its own schedule the run is. A sequence number counted
+  // messages, which told an operator nothing they wanted to know.
+  const lag = typeof snapshot?.lag === "number" ? formatDuration(snapshot.lag) : "—";
   const canRun = daemon.state === "live";
   const isDeployed = run !== null;
 
@@ -572,7 +578,7 @@ export function Studio({
             <div className="run-stats">
               <span><small>STATUS</small>{snapshot?.status}</span>
               <span><small>TAG</small>{tag}</span>
-              <span><small>SEQ</small>{snapshot?.sequence}</span>
+              <span><small>LAG</small>{lag}</span>
             </div>
           </div>
           <DiagramCanvas
