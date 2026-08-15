@@ -128,6 +128,29 @@ test("the diagram reflects live reaction state from the run", async ({ page }) =
   await expect(page.locator(".omar-action.filled")).toHaveCount(2);
 });
 
+test("the run header reports how far behind it is, in readable units", async ({
+  page,
+}) => {
+  await useFakeServe(page);
+  await draftUntilProposed(page);
+  await deploy(page);
+  await expect(page.locator(".connection")).toContainText("finished", {
+    timeout: 30_000,
+  });
+
+  const stats = page.locator(".run-stats");
+  // Nanoseconds are what the wire carries and what nobody can read: the third
+  // tag is at 3000000000, and 250000000 behind it.
+  await expect(stats).toContainText("3s:0");
+  await expect(stats).toContainText("250ms");
+  await expect(stats).not.toContainText("3000000000");
+  await expect(stats).not.toContainText("250000000");
+  // A sequence number counted published messages, which answered a question
+  // nobody was asking.
+  await expect(stats).not.toContainText("SEQ");
+  await expect(stats).toContainText("LAG");
+});
+
 test("Enter sends, modified Enter writes a new line", async ({ page }) => {
   await useFakeServe(page);
   const composer = page.getByLabel("Describe a workflow");
@@ -1240,7 +1263,7 @@ test("containers do not overlap each other", async ({ page }) => {
 });
 
 test("a timer is drawn as a clock, not as a port", async ({ page }) => {
-  // Captured from a real run: `timer t(0, 10)` firing on its own, with no
+  // Captured from a real run: `timer t(0, 10ns)` firing on its own, with no
   // input to the program at all.
   await fake.close();
   fake = (await startFakeServe({
@@ -1259,7 +1282,9 @@ test("a timer is drawn as a clock, not as a port", async ({ page }) => {
   await expect(timer).toHaveCount(1);
   await expect(timer.locator(".omar-timer-face")).toBeVisible();
   await expect(timer.locator(".omar-timer-label")).toHaveText("t");
-  await expect(timer.locator(".omar-timer-meta")).toHaveText("0, every 10");
+  // Its schedule in the units it was written in, not the nanoseconds the wire
+  // carries.
+  await expect(timer.locator(".omar-timer-meta")).toHaveText("0, every 10ns");
 
   // And not as a port. A timer drawn as one would be an inlet nothing feeds.
   await expect(page.locator(".omar-port-group")).toHaveCount(1);

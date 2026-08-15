@@ -112,6 +112,11 @@ pub struct DiagramSnapshot {
     pub sequence: u64,
     pub status: String,
     pub current_tag: Option<DiagramTag>,
+    /// Nanoseconds physical time had run past `current_tag` when it executed.
+    /// `None` before the first tag. A sequence number says how much has been
+    /// published; this says whether the run is keeping its promises.
+    #[serde(default)]
+    pub lag: Option<u64>,
     /// The containers to draw. Empty for a program compiled before instances
     /// were carried through, which is how a client tells the difference.
     pub instances: Vec<DiagramInstance>,
@@ -238,6 +243,7 @@ impl DiagramSnapshot {
             sequence: 0,
             status: "ready".to_string(),
             current_tag: None,
+            lag: None,
             instances,
             agents,
             ports,
@@ -260,7 +266,18 @@ pub struct DiagramEvent {
 
 pub trait TopologyObserver: Send + Sync {
     fn run_started(&self) {}
-    fn tag_advanced(&self, _timestamp: u64, _microstep: u64, _ports: &BTreeMap<String, Value>) {}
+    /// `lag` is how far physical time had run past this tag's logical time
+    /// when it executed, in nanoseconds. Zero means the run is on or ahead of
+    /// its schedule; it only grows when work takes longer than the gap it was
+    /// given.
+    fn tag_advanced(
+        &self,
+        _timestamp: u64,
+        _microstep: u64,
+        _lag: u64,
+        _ports: &BTreeMap<String, Value>,
+    ) {
+    }
     fn reaction_started(
         &self,
         _timestamp: u64,
@@ -341,7 +358,13 @@ impl TopologyObserver for DiagramPublisher {
         self.publish_status("run_started", "running", json!({}));
     }
 
-    fn tag_advanced(&self, timestamp: u64, microstep: u64, ports: &BTreeMap<String, Value>) {
+    fn tag_advanced(
+        &self,
+        timestamp: u64,
+        microstep: u64,
+        lag: u64,
+        ports: &BTreeMap<String, Value>,
+    ) {
         let tag = DiagramTag {
             timestamp,
             microstep,
@@ -349,9 +372,10 @@ impl TopologyObserver for DiagramPublisher {
         self.publish_with(
             "tag_advanced",
             Some(tag),
-            json!({ "ports": ports }),
+            json!({ "ports": ports, "lag": lag }),
             |snapshot| {
                 snapshot.current_tag = Some(tag);
+                snapshot.lag = Some(lag);
                 for (name, value) in ports {
                     if let Some(port) = snapshot.ports.iter_mut().find(|port| port.name == *name) {
                         port.value = Some(value.clone());
@@ -864,7 +888,7 @@ mod tests {
             subscribers: Arc::new(Mutex::new(Vec::new())),
             sequence: Arc::new(AtomicU64::new(0)),
         };
-        publisher.tag_advanced(30, 0, &BTreeMap::from([("beat".into(), json!(30))]));
+        publisher.tag_advanced(30, 0, 0, &BTreeMap::from([("beat".into(), json!(30))]));
         let fired = publisher.snapshot.read().expect("snapshot").clone();
         assert_eq!(
             fired.timers[0].last_tag,

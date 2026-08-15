@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { DiagramSnapshot } from "../lib/protocol";
+import { formatDuration, type DiagramSnapshot } from "../lib/protocol";
 
 /**
  * Lingua Franca renders reactors as labelled containers whose ports sit on the
@@ -1344,8 +1344,8 @@ export function DiagramCanvas({
                     </text>
                     <text className="omar-timer-meta" y={radius + 22} textAnchor="middle">
                       {timer.period > 0
-                        ? `${timer.offset}, every ${timer.period}`
-                        : `once at ${timer.offset}`}
+                        ? `${formatDuration(timer.offset)}, every ${formatDuration(timer.period)}`
+                        : `once at ${formatDuration(timer.offset)}`}
                     </text>
                   </g>
                 );

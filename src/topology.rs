@@ -1340,18 +1340,21 @@ fn run_event_loop_observed<E: ReactionExecutor>(
     let mut steps = 0usize;
 
     while let Some((tag, events)) = queue.pop_first() {
+        let due = Duration::from_nanos(tag.timestamp);
         if pace == Pace::RealTime {
             // Microsteps carry no time, so only the timestamp is owed. A tag
             // whose moment has already passed runs now rather than being
-            // pushed further out: being late is not a reason to be later, and
-            // how late is a question of its own.
-            if let Some(remaining) =
-                Duration::from_nanos(tag.timestamp).checked_sub(origin.elapsed())
-            {
+            // pushed further out: being late is not a reason to be later.
+            if let Some(remaining) = due.checked_sub(origin.elapsed()) {
                 thread::sleep(remaining);
             }
         }
-        observer.tag_advanced(tag.timestamp, tag.microstep, &events);
+        // How far past its logical time this tag actually ran. Zero while the
+        // run is on or ahead of schedule, and growing only when the work
+        // outlasts the gap it was given -- which is the one number that says
+        // whether a program is keeping the promise its delays make.
+        let lag = origin.elapsed().saturating_sub(due).as_nanos() as u64;
+        observer.tag_advanced(tag.timestamp, tag.microstep, lag, &events);
         steps += 1;
         if steps > 1024 {
             // A periodic timer re-arms forever by design, so for those this is
@@ -2231,6 +2234,91 @@ mod tests {
             elapsed < TEST_DELAY / 2,
             "fast should not sleep: {elapsed:?}"
         );
+    }
+
+    /// Records the lag reported at every tag.
+    struct LagRecorder {
+        lags: Mutex<Vec<u64>>,
+    }
+
+    impl TopologyObserver for LagRecorder {
+        fn tag_advanced(
+            &self,
+            _timestamp: u64,
+            _microstep: u64,
+            lag: u64,
+            _ports: &BTreeMap<String, Value>,
+        ) {
+            self.lags.lock().unwrap().push(lag);
+        }
+    }
+
+    #[test]
+    fn lag_is_how_far_past_its_logical_time_a_tag_ran() {
+        // A reaction that outlasts the gap to the next tag puts the run behind
+        // by the difference, and that is the whole of what lag reports.
+        const REACTION: Duration = Duration::from_millis(400);
+        let state = verify(&delayed_bytecode(TEST_DELAY.as_nanos() as u64)).unwrap();
+        struct SlowExecutor;
+        impl ReactionExecutor for SlowExecutor {
+            fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+                thread::sleep(REACTION);
+                let writes = BTreeMap::from([("staged".to_string(), json!("done"))]);
+                validate_contract(&invocation.contract, &writes)?;
+                Ok(writes)
+            }
+        }
+        let observer = LagRecorder {
+            lags: Mutex::new(Vec::new()),
+        };
+        run_event_loop_observed(
+            &state,
+            BTreeMap::from([("topic".to_string(), json!("x"))]),
+            &SlowExecutor,
+            &observer,
+            Pace::RealTime,
+        )
+        .unwrap();
+
+        let lags = observer.lags.lock().unwrap().clone();
+        // Tag 0 runs immediately, so nothing is owed yet.
+        assert!(
+            lags[0] < Duration::from_millis(50).as_nanos() as u64,
+            "the first tag is not late: {lags:?}"
+        );
+        // The tag after the reaction was due at TEST_DELAY and reached at
+        // REACTION, so it is behind by the difference.
+        let behind = (REACTION - TEST_DELAY).as_nanos() as u64;
+        let last = *lags.last().expect("a tag ran");
+        assert!(
+            last >= behind,
+            "the run is at least {behind}ns behind: {lags:?}"
+        );
+        assert!(
+            last < behind + TEST_DELAY.as_nanos() as u64,
+            "and not a whole delay more than that: {lags:?}"
+        );
+    }
+
+    #[test]
+    fn fast_reports_a_run_that_is_ahead_of_its_schedule_as_unlagged() {
+        // Nothing waits, so every tag is reached before its logical time and
+        // the run is never behind. Saturating rather than signed: "ahead by
+        // 300ms" is not a number an operator has a use for.
+        let state = verify(&delayed_bytecode(TEST_DELAY.as_nanos() as u64)).unwrap();
+        let observer = LagRecorder {
+            lags: Mutex::new(Vec::new()),
+        };
+        run_event_loop_observed(
+            &state,
+            BTreeMap::from([("topic".to_string(), json!("x"))]),
+            &PromptExecutor,
+            &observer,
+            Pace::Fast,
+        )
+        .unwrap();
+        let lags = observer.lags.lock().unwrap().clone();
+        assert_eq!(*lags.last().expect("a tag ran"), 0, "{lags:?}");
     }
 
     #[test]
