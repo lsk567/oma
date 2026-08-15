@@ -7,7 +7,7 @@
 // re-arms forever and has no place in a test that must finish.
 team Beacon(label : string)[agent : Codex]
 {
-    timer t(5, 0)
+    timer t(5ns, 0)
     output note : string
 
     prompt agent(t) -> note
