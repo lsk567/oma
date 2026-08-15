@@ -300,7 +300,8 @@ run_case Nested Nested run.summary --input run.brief='hierarchy'
 run_case Timer Timer beacon.note
 # Four one-shot timers opening three rounds and a deadline, on Claude Code.
 run_case Cadence Cadence chair.report
-# Two deadlines at one tag: one generous and met, one of 1ms that cannot be.
+# Two deadlines at one tag on Claude Code: one generous and met, one of 1ms
+# that cannot be.
 # The 1ms contract is optional, so its expiry completes the tag rather than
 # failing the run, and `report` shows <absent> where that write would have been.
 # `main` names the program, so the completion marker is WithinTest.

@@ -9,7 +9,7 @@
 // `reporter` triggers on both, so it fires at that tag with the met value
 // present and the missed one expanding to <absent>. That difference is the
 // observable result of the test.
-team DeadlineProbe[punctual : Codex, tardy : Codex, reporter : Codex]
+team DeadlineProbe[punctual : ClaudeCode, tardy : ClaudeCode, reporter : ClaudeCode]
 {
     // Period 0: fires once, at logical time 1ns, then the program finishes.
     timer start(1ns, 0)
