@@ -524,8 +524,28 @@ struct InvocationRecord {
     reaction: String,
     contract: String,
     allowed_effects: BTreeMap<String, String>,
+    /// What the reaction was triggered by, and the instruction as the agent
+    /// would read it. An agent in a pane is handed both in its prompt; a human
+    /// has no pane, so the record is where a panel reads them from.
+    trigger_values: BTreeMap<String, Value>,
+    prompt: String,
     writes: BTreeMap<String, Value>,
     completed: bool,
+}
+
+/// One invocation waiting to be answered, as a panel needs to draw it.
+///
+/// Only what the invocation already scopes: the values fed in, and the ports
+/// this reaction may write with their types. Nothing else in the run is
+/// reachable from here, because nothing else was wired to it.
+#[derive(Debug, Serialize, Deserialize)]
+struct PendingInvocation {
+    invocation_id: String,
+    reaction: String,
+    contract: String,
+    prompt: String,
+    trigger_values: BTreeMap<String, Value>,
+    allowed_effects: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -545,6 +565,10 @@ struct CompleteArgs {
 enum InvocationCommand {
     SetPort(SetPortArgs),
     Complete(CompleteArgs),
+    /// What this agent owes right now. An agent in a pane is told; a human has
+    /// to be able to ask, because a panel can be opened at any time and a
+    /// reload must not lose the invocation.
+    Pending,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -646,6 +670,25 @@ impl InvocationRegistry {
                     .writes
                     .insert(args.port.clone(), args.value);
                 Ok(json!({"status":"buffered","port":args.port}))
+            }
+            InvocationCommand::Pending => {
+                let pending: Vec<PendingInvocation> = entries
+                    .values()
+                    .filter(|entry| {
+                        !entry.record.completed
+                            && entry.record.team == team
+                            && entry.record.agent == agent
+                    })
+                    .map(|entry| PendingInvocation {
+                        invocation_id: entry.record.id.clone(),
+                        reaction: entry.record.reaction.clone(),
+                        contract: entry.record.contract.clone(),
+                        prompt: entry.record.prompt.clone(),
+                        trigger_values: entry.record.trigger_values.clone(),
+                        allowed_effects: entry.record.allowed_effects.clone(),
+                    })
+                    .collect();
+                Ok(json!({ "pending": pending }))
             }
             InvocationCommand::Complete(args) => {
                 let invocation = entries
@@ -815,6 +858,14 @@ pub(crate) fn mcp_complete(context: &TopologyMcpContext, arguments: Value) -> Re
         context,
         InvocationCommand::Complete(serde_json::from_value(arguments)?),
     )
+}
+
+/// What this agent owes right now, for a panel to draw.
+///
+/// Scoped to the asking agent, so what comes back is what that agent's
+/// reactions were wired to see and allowed to set, and nothing else in the run.
+pub(crate) fn pending_invocations(context: &TopologyMcpContext) -> Result<Value> {
+    send_invocation_command(context, InvocationCommand::Pending)
 }
 
 fn validate_invocation_owner(team: &str, agent: &str, invocation: &InvocationRecord) -> Result<()> {
@@ -1009,16 +1060,21 @@ fn expired(invocation: &InvocationSpec, deadline: Duration) -> Result<BTreeMap<S
     }
 }
 
-struct TmuxReactionExecutor {
+struct AgentReactionExecutor {
     client: TmuxClient,
     team: String,
     registry: InvocationRegistry,
     timeout: Duration,
+    /// Agents on the `human` backend. Nothing was spawned for them, so there
+    /// is no pane to deliver a prompt to — the registration is the work item,
+    /// and a person picks it up from there.
+    humans: BTreeSet<String>,
 }
 
-impl ReactionExecutor for TmuxReactionExecutor {
+impl ReactionExecutor for AgentReactionExecutor {
     fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
         let invocation_id = invocation.id.clone();
+        let rendered = render_prompt(&invocation.prompt, &invocation.trigger_values)?;
         let record = InvocationRecord {
             id: invocation_id.clone(),
             team: self.team.clone(),
@@ -1026,30 +1082,37 @@ impl ReactionExecutor for TmuxReactionExecutor {
             reaction: invocation.reaction_id.clone(),
             contract: invocation.contract.clone(),
             allowed_effects: invocation.allowed_effects.clone(),
+            trigger_values: invocation.trigger_values.clone(),
+            prompt: rendered.clone(),
             writes: BTreeMap::new(),
             completed: false,
         };
         let completion = self.registry.register(record)?;
 
-        let rendered = render_prompt(&invocation.prompt, &invocation.trigger_values)?;
-        let message = format!(
-            "OMAR INVOCATION\ninvocation_id: {}\ntriggers: {}\neffects: {}\ncontract: {}\n\n{}\n\nUse omar_set_port for each effect you choose, then call omar_complete exactly once. For a signal effect, set its value to null. Do not address another agent directly.",
-            invocation.id,
-            serde_json::to_string(&invocation.trigger_values)?,
-            serde_json::to_string(&invocation.allowed_effects)?,
-            invocation.contract,
-            rendered
-        );
-        let session = self.client.session_for(&invocation.agent);
-        if let Err(error) = self
-            .client
-            .deliver_prompt_until(&session, &message, &DeliveryOptions::default(), &|| {
-                self.registry.answered(&invocation_id)
-            })
-            .with_context(|| format!("failed to deliver {}", invocation.reaction_id))
-        {
-            self.registry.remove(&invocation_id);
-            return Err(error);
+        // A human agent has no pane to deliver to: nothing was spawned for it,
+        // and the registration above is the work item a panel asks for. What
+        // follows is the same either way — a person answering is a slow agent,
+        // and the registry does not care which kind it is waiting on.
+        if !self.humans.contains(&invocation.agent) {
+            let message = format!(
+                "OMAR INVOCATION\ninvocation_id: {}\ntriggers: {}\neffects: {}\ncontract: {}\n\n{}\n\nUse omar_set_port for each effect you choose, then call omar_complete exactly once. For a signal effect, set its value to null. Do not address another agent directly.",
+                invocation.id,
+                serde_json::to_string(&invocation.trigger_values)?,
+                serde_json::to_string(&invocation.allowed_effects)?,
+                invocation.contract,
+                rendered
+            );
+            let session = self.client.session_for(&invocation.agent);
+            if let Err(error) = self
+                .client
+                .deliver_prompt_until(&session, &message, &DeliveryOptions::default(), &|| {
+                    self.registry.answered(&invocation_id)
+                })
+                .with_context(|| format!("failed to deliver {}", invocation.reaction_id))
+            {
+                self.registry.remove(&invocation_id);
+                return Err(error);
+            }
         }
 
         let deadline = invocation.within.unwrap_or(self.timeout);
@@ -1126,11 +1189,17 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
             return Err(error);
         }
     };
-    let executor = TmuxReactionExecutor {
+    let executor = AgentReactionExecutor {
         client,
         team: state.team.clone(),
         registry: invocation_server.registry.clone(),
         timeout: config.timeout,
+        humans: state
+            .agents
+            .iter()
+            .filter(|(_, agent)| is_human_backend(&agent.backend))
+            .map(|(name, _)| name.clone())
+            .collect(),
     };
     let outputs = match run_event_loop_observed(&state, inputs, &executor, observer) {
         Ok(outputs) => outputs,
@@ -1157,6 +1226,12 @@ fn spawn_topology_agents(
 ) -> Result<()> {
     let protocol = "You are an OMAR topology agent. Only act on OMAR INVOCATION messages. You cannot message other agents. For each invocation, use only omar_set_port to set allowed effects and omar_complete to finish. Port writes are buffered and repeated writes use last-writer-wins semantics.";
     for (name, agent) in &state.agents {
+        // A person is not spawned. There is no command to resolve, no pane to
+        // put it in, and no readiness to wait for — the agent exists as a name
+        // in the topology and an inbox in the registry.
+        if is_human_backend(&agent.backend) {
+            continue;
+        }
         let session = client.session_for(name);
         if client.has_session(&session)? {
             if !config.replace {
@@ -1197,6 +1272,9 @@ fn spawn_topology_agents(
     }
 
     for (name, agent) in &state.agents {
+        if is_human_backend(&agent.backend) {
+            continue;
+        }
         let markers = crate::tmux::backend_readiness_markers(canonical_backend(&agent.backend));
         if !markers.is_empty()
             && !client.wait_for_markers(
@@ -1663,9 +1741,19 @@ fn require_identifier(kind: &str, value: &str) -> Result<()> {
     }
 }
 
+/// Whether a backend is answered by a person rather than a process.
+///
+/// Nothing is spawned for one, so it has no pane, no readiness marker and no
+/// command to resolve — the difference has to be known before any of that is
+/// attempted.
+fn is_human_backend(backend: &str) -> bool {
+    canonical_backend(backend) == "human"
+}
+
 fn canonical_backend(backend: &str) -> &str {
     match backend.to_ascii_lowercase().as_str() {
         "claude" | "claudecode" => "claude",
+        "human" => "human",
         "codex" => "codex",
         "opencode" => "opencode",
         "cursor" => "cursor",
@@ -2259,6 +2347,122 @@ mod tests {
         assert!(outputs.is_empty(), "nothing downstream ran: {outputs:?}");
     }
 
+    #[test]
+    fn a_person_is_a_backend_however_it_is_spelled() {
+        assert!(is_human_backend("Human"));
+        assert!(is_human_backend("human"));
+        assert!(!is_human_backend("ClaudeCode"));
+        assert!(!is_human_backend("Stub"));
+    }
+
+    #[test]
+    fn a_human_agent_is_answered_through_the_registry() {
+        // Nothing is spawned for a person, so the registration is the whole of
+        // the work item: a panel asks what it owes, answers it, and the tag
+        // moves on exactly as it would for an agent in a pane.
+        let server = InvocationServer::start().unwrap();
+        let bytecode: Bytecode = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Desk",
+              "instructions": [
+                {"op":"begin_plan","team":"Desk"},
+                {"op":"spawn_agent","name":"panel","backend":"Human"},
+                {"op":"define_port","kind":"input","name":"topic","type":"string"},
+                {"op":"define_port","kind":"output","name":"verdict","type":"string"},
+                {"op":"install_reaction","id":"reaction.0","agent":"panel",
+                 "triggers":["topic"],"effects":["verdict"],
+                 "contract":"verdict","prompt":"Decide on $(topic)"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let state = verify(&bytecode).unwrap();
+        let executor = AgentReactionExecutor {
+            client: TmuxClient::new("omar-test"),
+            team: state.team.clone(),
+            registry: server.registry.clone(),
+            timeout: Duration::from_secs(10),
+            humans: BTreeSet::from(["panel".to_string()]),
+        };
+        let context = TopologyMcpContext {
+            team: state.team.clone(),
+            agent: "panel".into(),
+            endpoint: server.endpoint.clone(),
+            token: server.token.clone(),
+        };
+
+        let person = thread::spawn(move || {
+            for _ in 0..200 {
+                let waiting = pending_invocations(&context).unwrap();
+                if let Some(item) = waiting["pending"].as_array().unwrap().first() {
+                    let id = item["invocation_id"].as_str().unwrap().to_string();
+                    mcp_set_port(
+                        &context,
+                        json!({"invocation_id": id, "port": "verdict", "value": "ship"}),
+                    )
+                    .unwrap();
+                    mcp_complete(&context, json!({"invocation_id": id})).unwrap();
+                    return item.clone();
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            panic!("no invocation was ever offered to the panel");
+        });
+
+        let outputs = run_event_loop(
+            &state,
+            BTreeMap::from([("topic".to_string(), json!("x"))]),
+            &executor,
+        )
+        .unwrap();
+        let offered = person.join().unwrap();
+
+        assert_eq!(outputs["verdict"], json!("ship"));
+        // The prompt reaches a person already interpolated, so the panel shows
+        // the instruction an agent would have read rather than the template.
+        assert_eq!(offered["prompt"], json!("Decide on x"));
+        // What it may set and what it may see, and nothing else in the run.
+        assert_eq!(offered["allowed_effects"], json!({"verdict": "string"}));
+        assert_eq!(offered["trigger_values"], json!({"topic": "x"}));
+    }
+
+    #[test]
+    fn one_agents_pending_work_is_not_anothers() {
+        let server = InvocationServer::start().unwrap();
+        server
+            .registry
+            .register(InvocationRecord {
+                id: "invocation-3".into(),
+                team: "Desk".into(),
+                agent: "panel".into(),
+                reaction: "reaction.0".into(),
+                contract: "verdict".into(),
+                allowed_effects: BTreeMap::from([("verdict".into(), "string".into())]),
+                trigger_values: BTreeMap::new(),
+                prompt: "decide".into(),
+                writes: BTreeMap::new(),
+                completed: false,
+            })
+            .unwrap();
+
+        let mine = server
+            .registry
+            .execute("Desk", "panel", InvocationCommand::Pending)
+            .unwrap();
+        assert_eq!(mine["pending"].as_array().unwrap().len(), 1);
+
+        // Asking as someone else returns nothing rather than someone else's
+        // work: an invocation is addressed to one agent.
+        let theirs = server
+            .registry
+            .execute("Desk", "clerk", InvocationCommand::Pending)
+            .unwrap();
+        assert!(theirs["pending"].as_array().unwrap().is_empty());
+        server.registry.remove("invocation-3");
+    }
+
     /// Records the tag every invocation arrived at, so a timer's schedule can
     /// be read off the run rather than inferred from its outputs.
     struct TimerExecutor {
@@ -2548,6 +2752,8 @@ mod tests {
             reaction: "reaction.0".into(),
             contract: "opinion".into(),
             allowed_effects: BTreeMap::from([("opinion".into(), "string".into())]),
+            trigger_values: BTreeMap::new(),
+            prompt: "p".into(),
             writes: BTreeMap::new(),
             completed: false,
         };
@@ -2583,6 +2789,8 @@ mod tests {
             reaction: "reaction.0".into(),
             contract: "opinion".into(),
             allowed_effects: BTreeMap::from([("opinion".into(), "string".into())]),
+            trigger_values: BTreeMap::new(),
+            prompt: "p".into(),
             writes: BTreeMap::new(),
             completed: false,
         };

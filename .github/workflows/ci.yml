@@ -143,7 +143,7 @@ jobs:
 
           # `[name : Backend, other : Backend]` on a team. A port's type is
           # lowercase (`inp : string`), so naming the backends keeps ports out.
-          BACKENDS = "ClaudeCode|Claude|Codex|Cursor|OpenCode|Agy|Stub"
+          BACKENDS = "ClaudeCode|Claude|Codex|Cursor|OpenCode|Agy|Stub|Human"
           declaration = re.compile(rf"\b(\w+)\s*:\s*({BACKENDS})\b")
 
           def declared_backends(name):

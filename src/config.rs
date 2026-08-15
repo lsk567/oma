@@ -182,8 +182,10 @@ pub fn resolve_backend(name: &str) -> Result<String, String> {
         // Answers invocations without a model, so a run can be exercised end to
         // end in a test. Resolved to this binary in `build_agent_command`.
         "stub" => Ok("omar stub-agent".to_string()),
+        // `human` never reaches here — nothing is spawned for it, so there is
+        // no command to resolve. It is named so a typo is told what it meant.
         other => Err(format!(
-            "Unknown backend '{}'. Supported: claude, codex, cursor, opencode, agy, stub",
+            "Unknown backend '{}'. Supported: claude, codex, cursor, opencode, agy, stub, human",
             other
         )),
     }

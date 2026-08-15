@@ -633,6 +633,7 @@ impl OmarMcpServer {
             match call.name.as_str() {
                 "omar_set_port" => crate::topology::mcp_set_port(topology, call.arguments),
                 "omar_complete" => crate::topology::mcp_complete(topology, call.arguments),
+                "omar_pending" => crate::topology::pending_invocations(topology),
                 other => Err(anyhow!(
                     "Tool '{}' is unavailable to topology agent '{}'",
                     other,
@@ -2484,6 +2485,15 @@ fn topology_tool_definitions() -> Vec<Value> {
                 "additionalProperties":false
             }),
         ),
+        tool(
+            "omar_pending",
+            "List the OMAR invocations addressed to this agent and not yet completed, with the prompt, the trigger values, and the effect ports each one may set. Ask when an invocation message was missed rather than guessing what is owed.",
+            json!({
+                "type":"object",
+                "properties":{},
+                "additionalProperties":false
+            }),
+        ),
     ]
 }
 
@@ -2589,7 +2599,7 @@ mod tests {
             }),
             ..test_context()
         });
-        assert_eq!(workflow, ["omar_set_port", "omar_complete"]);
+        assert_eq!(workflow, ["omar_set_port", "omar_complete", "omar_pending"]);
     }
 
     #[test]
@@ -2655,7 +2665,7 @@ mod tests {
             .into_iter()
             .map(|tool| tool["name"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names, ["omar_set_port", "omar_complete"]);
+        assert_eq!(names, ["omar_set_port", "omar_complete", "omar_pending"]);
     }
 
     #[test]
