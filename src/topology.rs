@@ -1046,7 +1046,7 @@ pub struct TopologyRunConfig<'a> {
     pub inputs: &'a [String],
     pub replace: bool,
     pub timeout: Duration,
-    /// Whether the run holds its logical clock against the wall clock.
+    /// How the run's logical clock is paced against the wall clock.
     pub pace: Pace,
     pub diagram_address: Option<std::net::SocketAddr>,
     /// Receives the bound diagram address once the server is up. `omar serve`
@@ -2182,11 +2182,16 @@ mod tests {
         }
     }
 
+    /// The delay these tests are built around.
+    ///
+    /// Large enough that the gap between sleeping and not sleeping dwarfs any
+    /// scheduling jitter a loaded CI host adds, which is what keeps a
+    /// wall-clock assertion from being a coin flip.
+    const TEST_DELAY: Duration = Duration::from_millis(300);
+
     #[test]
     fn real_time_owes_the_delay_a_program_asked_for() {
-        // 80ms is long enough that a sleep is unmistakable and short enough
-        // that the suite does not notice.
-        let state = verify(&delayed_bytecode(80_000_000)).unwrap();
+        let state = verify(&delayed_bytecode(TEST_DELAY.as_nanos() as u64)).unwrap();
         let started = Instant::now();
         let outputs = run_event_loop_observed(
             &state,
@@ -2199,14 +2204,14 @@ mod tests {
         let elapsed = started.elapsed();
         assert_eq!(outputs["memo"], json!("done"));
         assert!(
-            elapsed >= Duration::from_millis(80),
+            elapsed >= TEST_DELAY,
             "a delay is a wait, not only an ordering: {elapsed:?}"
         );
     }
 
     #[test]
     fn fast_runs_the_same_program_without_the_wait() {
-        let state = verify(&delayed_bytecode(80_000_000)).unwrap();
+        let state = verify(&delayed_bytecode(TEST_DELAY.as_nanos() as u64)).unwrap();
         let started = Instant::now();
         let outputs = run_event_loop_observed(
             &state,
@@ -2219,22 +2224,26 @@ mod tests {
         let elapsed = started.elapsed();
         // Same outputs, same tags, no wall clock. Only the waiting is skipped.
         assert_eq!(outputs["memo"], json!("done"));
+        // Half the delay: a run that slept would take all of it, and one that
+        // did not has nothing to do, so the slack is for the host rather than
+        // for the behaviour under test.
         assert!(
-            elapsed < Duration::from_millis(40),
+            elapsed < TEST_DELAY / 2,
             "fast should not sleep: {elapsed:?}"
         );
     }
 
     #[test]
     fn a_tag_already_late_is_not_made_later() {
-        // The reaction takes longer than the gap to the next tag, so that tag
-        // is due before it is reached — and must run at once rather than
-        // waiting out a schedule it has already missed.
-        let state = verify(&delayed_bytecode(40_000_000)).unwrap();
+        // The reaction outlasts the gap to the next tag, so that tag is due
+        // before it is reached — and must run at once rather than waiting out
+        // a schedule it has already missed.
+        const REACTION: Duration = Duration::from_millis(400);
+        let state = verify(&delayed_bytecode(TEST_DELAY.as_nanos() as u64)).unwrap();
         struct SlowExecutor;
         impl ReactionExecutor for SlowExecutor {
             fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
-                thread::sleep(Duration::from_millis(120));
+                thread::sleep(REACTION);
                 let writes = BTreeMap::from([("staged".to_string(), json!("done"))]);
                 validate_contract(&invocation.contract, &writes)?;
                 Ok(writes)
@@ -2250,10 +2259,11 @@ mod tests {
         )
         .unwrap();
         let elapsed = started.elapsed();
-        // The reaction's own 120ms, and no extra sleep on top for a deadline
-        // that had already gone by.
+        // Correct is the reaction alone; pushing the missed tag out would add
+        // the whole delay on top. The bound sits halfway between the two, so
+        // neither a slow host nor the bug can be mistaken for the other.
         assert!(
-            elapsed < Duration::from_millis(160),
+            elapsed < REACTION + TEST_DELAY / 2,
             "a missed tag should not be pushed further out: {elapsed:?}"
         );
     }
