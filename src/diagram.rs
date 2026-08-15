@@ -744,6 +744,7 @@ mod tests {
                     effects: vec!["answer".to_string()],
                     contract: "answer".to_string(),
                     prompt: "Respond".to_string(),
+                    within: None,
                 },
             )]),
         }
@@ -809,6 +810,7 @@ mod tests {
                     effects: vec!["writer.draft".to_string()],
                     contract: "writer.draft".to_string(),
                     prompt: "Draft".to_string(),
+                    within: None,
                 },
             )]),
         }

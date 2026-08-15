@@ -15,7 +15,10 @@ team OrderedWrites[first : Codex,
         Set `shared` to `first: $(request)`.
     "
 
-    prompt optional(request) -> shared?
+    // Its contract permits silence, so an expired deadline completes the tag
+    // with no write rather than failing the run. Bounded well above what an
+    // agent takes, so the run exercises the field without racing it.
+    prompt optional(request) -> shared? within(10min)
     "
         Exercise an optional effect: do not set `shared`; just complete this
         invocation. The earlier value must remain buffered for this tag.

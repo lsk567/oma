@@ -114,6 +114,9 @@ structure Reaction where
   effects : Array String
   contract : String
   prompt : String
+  /-- How long one invocation may take, in nanoseconds. `none` leaves it to the
+      run-wide timeout. -/
+  within : Option Nat := none
   instance_ : String := ""
   deriving Repr
 
@@ -287,9 +290,33 @@ private def productionTargets (tokens : List Token) : Array String :=
     | _ :: rest => collect expectAtom acc rest
   collect true #[] tokens
 
-private partial def takeContract (acc : List Token) : List Token -> Except String (List Token × String × List Token)
+/-- Nanoseconds. A duration is wall-clock; `after 3` is logical delay measured
+    in tags. Written as bare numbers the two would read identically, so a
+    duration must carry its unit. -/
+private def durationScale (unit : String) : Except String Nat :=
+  match unit with
+  | "ns" => pure 1
+  | "us" => pure 1000
+  | "ms" => pure 1000000
+  | "s" | "sec" => pure 1000000000
+  | "min" => pure 60000000000
+  | "h" | "hr" => pure 3600000000000
+  -- 'm' and 'ms' differ by one character and five orders of magnitude, and a
+  -- deadline that is 60000x wrong fails silently.
+  | "m" => throw "'m' is ambiguous: write 'min' for minutes or 'ms' for milliseconds"
+  | other => throw s!"unknown duration unit '{other}'; use ns, us, ms, s, min, or h"
+
+private def duration : Parser Nat
+  | Token.nat value :: Token.word unit :: rest => do
+      pure (value * (← durationScale unit), rest)
+  | Token.nat value :: _ => throw s!"duration '{value}' needs a unit, e.g. '{value}s'"
+  | tokens => throw s!"expected a duration, found {reprStr tokens.head?}"
+
+/-- Everything between `->` and either `within` or the prompt string. -/
+private partial def takeContract (acc : List Token) : List Token -> Except String (List Token × List Token)
   | [] => throw "expected prompt string after production contract"
-  | Token.text prompt :: rest => pure (acc.reverse, prompt, rest)
+  | tokens@(Token.text _ :: _) => pure (acc.reverse, tokens)
+  | tokens@(Token.word "within" :: _) => pure (acc.reverse, tokens)
   | token :: rest => takeContract (token :: acc) rest
 
 /-- `port`, or `instance.port` written as one dotted name. -/
@@ -386,12 +413,25 @@ private partial def parseDeclarations
       let (_, rest) ← expectSym "(" rest
       let (triggers, rest) ← parseDependencies #[] rest
       let (_, rest) ← expectSym "->" rest
-      let (contractTokens, prompt, rest) ← takeContract [] rest
+      let (contractTokens, rest) ← takeContract [] rest
+      -- `within(30s)` sits between the contract and the prompt because what
+      -- expiry does is read off the contract: silence completes the tag when
+      -- the contract permits no writes, and raises when it requires one.
+      let (within, rest) ← match rest with
+        | Token.word "within" :: tail => do
+            let (_, tail) ← expectSym "(" tail
+            let (value, tail) ← duration tail
+            let (_, tail) ← expectSym ")" tail
+            pure (some value, tail)
+        | _ => pure (none, rest)
+      let (prompt, rest) ← match rest with
+        | Token.text prompt :: tail => pure (prompt, tail)
+        | _ => throw "expected prompt string after production contract"
       let effects := productionTargets contractTokens
       let contract := String.intercalate " " (contractTokens.map tokenSource)
       let reaction := {
         id := s!"reaction.{reactionIndex}"
-        agent, triggers, effects, contract, prompt
+        agent, triggers, effects, contract, prompt, within
       }
       parseDeclarations (reactionIndex + 1) ports timers connections (reactions.push reaction) instances rest
   | Token.word first :: rest => do
@@ -745,7 +785,7 @@ def compile (program : Program) : String :=
       ("delay", toJson connection.delay)
     ]
   let reactions := program.reactions.map fun reaction =>
-    instruction "install_reaction" [
+    let fields := [
       ("instance", toJson reaction.instance_),
       ("id", toJson reaction.id),
       ("agent", toJson reaction.agent),
@@ -753,7 +793,10 @@ def compile (program : Program) : String :=
       ("effects", jsonStringArray reaction.effects),
       ("contract", toJson reaction.contract),
       ("prompt", toJson reaction.prompt)
-    ]
+    ] ++ match reaction.within with
+      | some within => [("within", toJson within)]
+      | none => []
+    instruction "install_reaction" fields
   let commit := instruction "commit_plan"
   let instructions :=
     #[begin] ++ instances ++ agents ++ ports ++ timers ++ connections ++ reactions ++ #[commit]

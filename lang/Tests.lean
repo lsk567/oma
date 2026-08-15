@@ -133,7 +133,43 @@ def nodeTeam : String :=
      prompt agent(token) -> out \"node $(idx) got $(token)\"
    }"
 
+/-- One reaction carrying whatever deadline the caller writes. -/
+def deadlineTeam (deadline : String) : String :=
+  "team Desk[a : Codex] {
+     input req : string
+     output res : string
+     prompt a(req) -> res? within(" ++ deadline ++ ") \"do it\"
+   }
+   main { d = Desk() }"
+
+/-- A deadline is nanoseconds, and it is not part of the contract the runtime
+    checks writes against — `within` sits between the two on the page. -/
+def testWithin : IO Unit := do
+  for (written, nanos) in [("30s", 30000000000), ("100ms", 100000000),
+                           ("2min", 120000000000), ("1hr", 3600000000000)] do
+    match lex (deadlineTeam written) >>= parse "Desk" with
+    | .ok program => do
+        assertEqual s!"within {written}"
+          (program.reactions.any (·.within == some nanos)) true
+        assertEqual s!"contract unpolluted by {written}"
+          (program.reactions.any (·.contract == "d.res ?")) true
+    | .error message => throw (IO.userError s!"within {written}: {message}")
+  -- No deadline is not a zero deadline: the run-wide timeout still applies.
+  let plain := "team Desk[a : Codex] { input req : string output res : string
+                prompt a(req) -> res \"go\" } main { d = Desk() }"
+  match lex plain >>= parse "Desk" with
+  | .ok program =>
+      assertEqual "no deadline" (program.reactions.all (·.within == none)) true
+  | .error message => throw (IO.userError s!"no deadline: {message}")
+  IO.println "within tests passed"
+
 def rejectionCases : Array (String × String × String) := #[
+  -- 'm' and 'ms' differ by one character and five orders of magnitude.
+  ("ambiguous duration unit", deadlineTeam "5m", "ambiguous"),
+  -- A bare number is logical delay elsewhere in the language; a duration is
+  -- wall-clock, and the two must not read alike.
+  ("duration without a unit", deadlineTeam "30", "needs a unit"),
+  ("unknown duration unit", deadlineTeam "5weeks", "unknown duration unit"),
   ("unknown team",
     nodeTeam ++ " main { a = Missing(1) }", "unknown team 'Missing'"),
   ("argument count",
@@ -185,6 +221,7 @@ def main : IO UInt32 := do
       testRejection label source expected
     testBareTeamHeader
     testNamedMain
+    testWithin
     IO.println "compiler rejection tests passed"
     pure 0
   catch error =>

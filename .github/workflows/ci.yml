@@ -196,7 +196,11 @@ jobs:
                   if instruction["op"] == "connect_ports":
                       assert keys == connection_order, (path, keys)
                   if instruction["op"] == "install_reaction":
-                      assert keys == reaction_order, (path, keys)
+                      # `within` is a deadline the reaction set for itself, and
+                      # is absent when it set none.
+                      assert keys in (
+                          reaction_order, reaction_order + ["within"]
+                      ), (path, keys)
                   # A program picks its own backends; what CI pins is that the
                   # bytecode spawns the one its source asked for. Instantiating
                   # qualifies an agent by its instance path, so the declaration
