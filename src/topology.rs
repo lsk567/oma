@@ -868,6 +868,71 @@ pub(crate) fn pending_invocations(context: &TopologyMcpContext) -> Result<Value>
     send_invocation_command(context, InvocationCommand::Pending)
 }
 
+fn panel_context(access: &PanelAccess, team: &str, agent: &str) -> TopologyMcpContext {
+    TopologyMcpContext {
+        team: team.to_string(),
+        agent: agent.to_string(),
+        endpoint: access.endpoint.clone(),
+        token: access.token.clone(),
+    }
+}
+
+/// Everything the run's web agents are waiting on, each tagged with whose it is.
+///
+/// Asked per agent because an invocation is addressed to one, which is also
+/// what keeps a panel from being handed work that belongs to a pane.
+pub fn panel_pending(access: &PanelAccess, team: &str) -> Result<Vec<Value>> {
+    let mut waiting = Vec::new();
+    for agent in &access.agents {
+        let answer = pending_invocations(&panel_context(access, team, agent))?;
+        let Some(items) = answer.get("pending").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            let mut item = item.clone();
+            if let Some(object) = item.as_object_mut() {
+                object.insert("agent".to_string(), json!(agent));
+            }
+            waiting.push(item);
+        }
+    }
+    Ok(waiting)
+}
+
+/// Answer one invocation: every value, then complete.
+///
+/// The whole batch lands as one completion, so a reaction reading several of
+/// these ports sees them together — the same reason the runtime drains a tag's
+/// writes at once rather than per reaction. A rejected value fails here, before
+/// anything is completed, so a bad field cannot leave a half-answered
+/// invocation behind.
+pub fn panel_submit(
+    access: &PanelAccess,
+    team: &str,
+    agent: &str,
+    invocation_id: &str,
+    values: &BTreeMap<String, Value>,
+) -> Result<()> {
+    let context = panel_context(access, team, agent);
+    for (port, value) in values {
+        send_invocation_command(
+            &context,
+            InvocationCommand::SetPort(SetPortArgs {
+                invocation_id: invocation_id.to_string(),
+                port: port.clone(),
+                value: value.clone(),
+            }),
+        )?;
+    }
+    send_invocation_command(
+        &context,
+        InvocationCommand::Complete(CompleteArgs {
+            invocation_id: invocation_id.to_string(),
+        }),
+    )?;
+    Ok(())
+}
+
 fn validate_invocation_owner(team: &str, agent: &str, invocation: &InvocationRecord) -> Result<()> {
     if invocation.team != team || invocation.agent != agent {
         bail!("invocation does not belong to this topology agent");
@@ -1067,10 +1132,10 @@ struct AgentReactionExecutor {
     team: String,
     registry: InvocationRegistry,
     timeout: Duration,
-    /// Agents on the `human` backend. Nothing was spawned for them, so there
-    /// is no pane to deliver a prompt to — the registration is the work item,
-    /// and a person picks it up from there.
-    humans: BTreeSet<String>,
+    /// Agents on the `web` backend. Nothing was spawned for them, so there is
+    /// no pane to deliver a prompt to — the registration is the work item, and
+    /// a web client picks it up from there.
+    web: BTreeSet<String>,
 }
 
 impl ReactionExecutor for AgentReactionExecutor {
@@ -1091,11 +1156,11 @@ impl ReactionExecutor for AgentReactionExecutor {
         };
         let completion = self.registry.register(record)?;
 
-        // A human agent has no pane to deliver to: nothing was spawned for it,
+        // A web agent has no pane to deliver to: nothing was spawned for it,
         // and the registration above is the work item a panel asks for. What
-        // follows is the same either way — a person answering is a slow agent,
+        // follows is the same either way — a client answering is a slow agent,
         // and the registry does not care which kind it is waiting on.
-        if !self.humans.contains(&invocation.agent) {
+        if !self.web.contains(&invocation.agent) {
             let message = format!(
                 "OMAR INVOCATION\ninvocation_id: {}\ntriggers: {}\neffects: {}\ncontract: {}\n\n{}\n\nUse omar_set_port for each effect you choose, then call omar_complete exactly once. For a signal effect, set its value to null. Do not address another agent directly.",
                 invocation.id,
@@ -1145,6 +1210,27 @@ pub struct TopologyRunConfig<'a> {
     /// Receives the bound diagram address once the server is up. `omar serve`
     /// needs it while the run is still in flight; `omar run` prints it instead.
     pub diagram_ready: Option<mpsc::Sender<std::net::SocketAddr>>,
+    /// Receives the invocation service's address and token once it is up.
+    ///
+    /// A `web` agent has nothing spawned for it, so nothing is ever handed the
+    /// credentials a pane's MCP sidecar gets from its context file. Without
+    /// this the daemon cannot answer on a client's behalf, and a web-backed
+    /// reaction would always sit until its deadline.
+    pub panel_ready: Option<mpsc::Sender<PanelAccess>>,
+}
+
+/// Where a run's invocations are answered, and the secret that authorises it.
+///
+/// Loopback-only and per run, like the service it points at. Held by the daemon
+/// rather than handed to a browser: it authorises writing any effect of any
+/// invocation in the run, which is not a capability a page should carry.
+#[derive(Debug, Clone)]
+pub struct PanelAccess {
+    pub endpoint: String,
+    pub token: String,
+    /// The `web` agents in this run. Everything else answers through its own
+    /// pane, and a panel has no business offering to answer for them.
+    pub agents: BTreeSet<String>,
 }
 
 pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Result<()> {
@@ -1193,17 +1279,29 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
             return Err(error);
         }
     };
+    let web: BTreeSet<String> = state
+        .agents
+        .iter()
+        .filter(|(_, agent)| is_web_backend(&agent.backend))
+        .map(|(name, _)| name.clone())
+        .collect();
+    // Only when the program has one. A run with nothing web-backed gives the
+    // daemon no panel to offer, rather than an empty one.
+    if !web.is_empty() {
+        if let Some(sender) = &config.panel_ready {
+            let _ = sender.send(PanelAccess {
+                endpoint: invocation_server.endpoint.clone(),
+                token: invocation_server.token.clone(),
+                agents: web.clone(),
+            });
+        }
+    }
     let executor = AgentReactionExecutor {
         client,
         team: state.team.clone(),
         registry: invocation_server.registry.clone(),
         timeout: config.timeout,
-        humans: state
-            .agents
-            .iter()
-            .filter(|(_, agent)| is_human_backend(&agent.backend))
-            .map(|(name, _)| name.clone())
-            .collect(),
+        web,
     };
     let outputs = match run_event_loop_observed(&state, inputs, &executor, observer, config.pace) {
         Ok(outputs) => outputs,
@@ -1230,10 +1328,10 @@ fn spawn_topology_agents(
 ) -> Result<()> {
     let protocol = "You are an OMAR topology agent. Only act on OMAR INVOCATION messages. You cannot message other agents. For each invocation, use only omar_set_port to set allowed effects and omar_complete to finish. Port writes are buffered and repeated writes use last-writer-wins semantics.";
     for (name, agent) in &state.agents {
-        // A person is not spawned. There is no command to resolve, no pane to
-        // put it in, and no readiness to wait for — the agent exists as a name
-        // in the topology and an inbox in the registry.
-        if is_human_backend(&agent.backend) {
+        // A web agent is not spawned. There is no command to resolve, no pane
+        // to put it in, and no readiness to wait for — the agent exists as a
+        // name in the topology and an inbox in the registry.
+        if is_web_backend(&agent.backend) {
             continue;
         }
         let session = client.session_for(name);
@@ -1276,7 +1374,7 @@ fn spawn_topology_agents(
     }
 
     for (name, agent) in &state.agents {
-        if is_human_backend(&agent.backend) {
+        if is_web_backend(&agent.backend) {
             continue;
         }
         let markers = crate::tmux::backend_readiness_markers(canonical_backend(&agent.backend));
@@ -1775,19 +1873,20 @@ fn require_identifier(kind: &str, value: &str) -> Result<()> {
     }
 }
 
-/// Whether a backend is answered by a person rather than a process.
+/// Whether a backend is answered by a web client rather than a spawned process.
 ///
 /// Nothing is spawned for one, so it has no pane, no readiness marker and no
 /// command to resolve — the difference has to be known before any of that is
-/// attempted.
-fn is_human_backend(backend: &str) -> bool {
-    canonical_backend(backend) == "human"
+/// attempted. It names what answers the reaction, not how the bytes get there:
+/// the transport is the panel's business, not the program's.
+fn is_web_backend(backend: &str) -> bool {
+    canonical_backend(backend) == "web"
 }
 
 fn canonical_backend(backend: &str) -> &str {
     match backend.to_ascii_lowercase().as_str() {
         "claude" | "claudecode" => "claude",
-        "human" => "human",
+        "web" => "web",
         "codex" => "codex",
         "opencode" => "opencode",
         "cursor" => "cursor",
@@ -2385,17 +2484,17 @@ mod tests {
     }
 
     #[test]
-    fn a_person_is_a_backend_however_it_is_spelled() {
-        assert!(is_human_backend("Human"));
-        assert!(is_human_backend("human"));
-        assert!(!is_human_backend("ClaudeCode"));
-        assert!(!is_human_backend("Stub"));
+    fn a_client_is_a_backend_however_it_is_spelled() {
+        assert!(is_web_backend("Web"));
+        assert!(is_web_backend("web"));
+        assert!(!is_web_backend("ClaudeCode"));
+        assert!(!is_web_backend("Stub"));
     }
 
     #[test]
-    fn a_human_agent_is_answered_through_the_registry() {
-        // Nothing is spawned for a person, so the registration is the whole of
-        // the work item: a panel asks what it owes, answers it, and the tag
+    fn a_web_agent_is_answered_through_the_registry() {
+        // Nothing is spawned for a web agent, so the registration is the whole
+        // of the work item: a panel asks what it owes, answers it, and the tag
         // moves on exactly as it would for an agent in a pane.
         let server = InvocationServer::start().unwrap();
         let bytecode: Bytecode = serde_json::from_str(
@@ -2404,7 +2503,7 @@ mod tests {
               "team": "Desk",
               "instructions": [
                 {"op":"begin_plan","team":"Desk"},
-                {"op":"spawn_agent","name":"panel","backend":"Human"},
+                {"op":"spawn_agent","name":"panel","backend":"Web"},
                 {"op":"define_port","kind":"input","name":"topic","type":"string"},
                 {"op":"define_port","kind":"output","name":"verdict","type":"string"},
                 {"op":"install_reaction","id":"reaction.0","agent":"panel",
@@ -2421,7 +2520,7 @@ mod tests {
             team: state.team.clone(),
             registry: server.registry.clone(),
             timeout: Duration::from_secs(10),
-            humans: BTreeSet::from(["panel".to_string()]),
+            web: BTreeSet::from(["panel".to_string()]),
         };
         let context = TopologyMcpContext {
             team: state.team.clone(),

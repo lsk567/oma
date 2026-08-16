@@ -67,6 +67,47 @@ export async function startFakeServe({
         runs: [...runs.values()].map((entry) => entry.record),
       });
     }
+    // Before the run-record route, which matches any suffix — the same order
+    // the daemon's own arms are in, and for the same reason.
+    if (url.pathname.startsWith("/v1/runs/") && url.pathname.endsWith("/panel")) {
+      const id = url.pathname.slice("/v1/runs/".length, -"/panel".length);
+      const entry = runs.get(id);
+      if (!entry) return json(response, 404, { error: "unknown run" });
+      if (request.method === "GET") {
+        return json(response, 200, {
+          run_id: id,
+          team: entry.snapshot.team,
+          pending: entry.pending ?? [],
+        });
+      }
+      if (request.method === "POST") {
+        return readBody(request).then((body) => {
+          const answer = JSON.parse(body);
+          const owed = (entry.pending ?? []).find(
+            (item) => item.invocation_id === answer.invocation_id,
+          );
+          if (!owed) return json(response, 400, { error: "unknown invocation" });
+          // The runtime refuses a port outside the invocation's effects, so
+          // the fake has to as well or the client's contract goes untested.
+          for (const port of Object.keys(answer.values)) {
+            if (!(port in owed.allowed_effects)) {
+              return json(response, 400, {
+                error: `port '${port}' is not an effect of this invocation`,
+              });
+            }
+          }
+          entry.pending = (entry.pending ?? []).filter(
+            (item) => item.invocation_id !== answer.invocation_id,
+          );
+          entry.answered = { ...answer };
+          return json(response, 202, {
+            run_id: id,
+            invocation_id: answer.invocation_id,
+            sent: Object.keys(answer.values),
+          });
+        });
+      }
+    }
     if (request.method === "GET" && url.pathname.startsWith("/v1/runs/")) {
       const entry = runs.get(url.pathname.slice("/v1/runs/".length));
       return entry
@@ -300,6 +341,31 @@ export async function startFakeServe({
     return [...runs.values()].at(-1);
   }
 
+  /** One pending invocation per reaction whose agent is on the `web` backend. */
+  function webPending(snapshot) {
+    const web = new Set(
+      snapshot.agents
+        .filter((agent) => agent.backend.toLowerCase() === "web")
+        .map((agent) => agent.id),
+    );
+    const port = (id) => snapshot.ports.find((p) => p.id === id);
+    return snapshot.reactions
+      .filter((reaction) => web.has(reaction.agent))
+      .map((reaction) => ({
+        invocation_id: `inv-${reaction.id}`,
+        agent: reaction.agent,
+        reaction: reaction.id,
+        contract: reaction.contract,
+        prompt: `Answer for ${reaction.name}.`,
+        trigger_values: Object.fromEntries(
+          reaction.triggers.map((id) => [port(id)?.name ?? id, "upstream"]),
+        ),
+        allowed_effects: Object.fromEntries(
+          reaction.effects.map((id) => [port(id)?.name ?? id, port(id)?.type ?? "string"]),
+        ),
+      }));
+  }
+
   function admit(body, response) {
     let request;
     try {
@@ -341,6 +407,12 @@ export async function startFakeServe({
       subscribers: new Set(),
       sequence: 0,
       driving: false,
+      // What the run's web agents owe. The real daemon builds this from live
+      // invocations; here it is seeded for the reaction whose agent the
+      // captured topology puts on the `Web` backend, so a client has something
+      // to answer.
+      pending: webPending(snapshot),
+      answered: null,
     };
     runs.set(runId, entry);
     json(response, 201, entry.record);
@@ -404,6 +476,14 @@ export async function startFakeServe({
       reaction.invocation_id = `inv-${index}`;
       publish(entry, "reaction_started", { reaction: reaction.id }, tag);
       await wait();
+
+      // A web-backed reaction parks until a client answers it, which is the
+      // whole point of the backend. Driving straight past would let the run
+      // finish while a panel still showed work outstanding — and would make a
+      // test of "answer it and the run moves" test nothing.
+      while ((entry.pending ?? []).some((item) => item.reaction === reaction.id)) {
+        await wait();
+      }
 
       reaction.status = "completed";
       for (const port of entry.snapshot.ports) {

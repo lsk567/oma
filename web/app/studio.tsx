@@ -6,6 +6,7 @@ import { AgentTerminal } from "./agent-terminal";
 import { BackendMenu } from "./backend-menu";
 import { DiagramCanvas } from "./diagram/diagram-canvas";
 import { OmarSource } from "./omar-source";
+import { PortPanel } from "./port-panel";
 import { Resizer } from "./resizer";
 import { Waiting } from "./waiting";
 import {
@@ -21,14 +22,17 @@ import {
   type ChatMessage,
   type DiagramEvent,
   type DiagramSnapshot,
+  type PendingInvocation,
   type ProposedDesign,
   type RunRecord,
 } from "./lib/protocol";
 import {
+  answerPanel,
   ASSISTANT,
   checkServeHealth,
   diagramUrlFor,
   fetchDiagram,
+  fetchPanel,
   fetchRun,
   startRun,
   subscribeToDiagram,
@@ -86,7 +90,10 @@ export function Studio({
   const [source, setSource] = useState(isDemo ? reviewProgram : "");
   // Chat gets the whole width until there is a design to look at. The operator
   // can flip back and forth once there is.
-  const [tab, setTab] = useState<"source" | "events">("source");
+  const [tab, setTab] = useState<"source" | "events" | "ports">("source");
+  /** What the run's web agents are waiting to be given. */
+  const [pending, setPending] = useState<PendingInvocation[]>([]);
+  const [answering, setAnswering] = useState(false);
   const [builderWidth, setBuilderWidth] = useState(DEFAULT_BUILDER);
   const [inspectorWidth, setInspectorWidth] = useState(DEFAULT_INSPECTOR);
   // The first design splits the window down the middle. After that the widths
@@ -214,6 +221,41 @@ export function Studio({
     }
   }
 
+  /** What the run's web agents are waiting on, as of now. */
+  const loadPanel = useCallback(
+    async (runId: string) => {
+      try {
+        setPending(await fetchPanel(serveUrl, runId));
+      } catch {
+        // A panel that cannot be read is not a run that has failed. The next
+        // event asks again.
+      }
+    },
+    [serveUrl],
+  );
+
+  /** Answer one invocation, as one completion. */
+  async function answer(
+    invocation: PendingInvocation,
+    values: Record<string, unknown>,
+  ) {
+    if (!run) return;
+    setAnswering(true);
+    setError("");
+    try {
+      await answerPanel(serveUrl, run.run_id, {
+        invocation_id: invocation.invocation_id,
+        agent: invocation.agent,
+        values,
+      });
+      await loadPanel(run.run_id);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAnswering(false);
+    }
+  }
+
   /** Watch a live run until it reaches a terminal status. */
   const observe = useCallback(
     (record: RunRecord) => {
@@ -258,8 +300,18 @@ export function Studio({
             current ? applyDiagramEvent(current, event) : current,
           );
           void refresh().catch(() => {});
+          // A reaction starting is how a client learns a web agent is waiting:
+          // the event carries an id, so the detail is fetched rather than
+          // pushed. Completion is when to look again -- an answered invocation
+          // leaves the queue the same way.
+          if (event.kind === "reaction_started" || event.kind === "reaction_completed") {
+            void loadPanel(record.run_id);
+          }
           if (event.kind === "run_completed") {
             setPhase("finished");
+            // The run's invocation service goes with it, so nothing is owed
+            // any more whatever the last fetch saw.
+            setPending([]);
             void settle();
           }
           if (event.kind === "run_failed") {
@@ -274,7 +326,7 @@ export function Studio({
         () => void settle(),
       );
     },
-    [serveUrl],
+    [serveUrl, loadPanel],
   );
 
   async function confirmDesign() {
@@ -628,9 +680,29 @@ export function Studio({
                 Events
               </button>
             ) : null}
+            {/* Like events, only once something is running: before a deploy
+                every value is null and nothing can be set, so the tab would
+                offer a list of dashes. */}
+            {isDeployed ? (
+            <button
+              role="tab"
+              aria-selected={tab === "ports"}
+              className={tab === "ports" ? "active" : ""}
+              onClick={() => setTab("ports")}
+            >
+              {pending.length > 0 ? `Ports (${pending.length})` : "Ports"}
+            </button>
+            ) : null}
           </div>
 
-          {tab === "source" ? (
+          {tab === "ports" ? (
+            <PortPanel
+              snapshot={snapshot}
+              pending={pending}
+              sending={answering}
+              onAnswer={(invocation, values) => void answer(invocation, values)}
+            />
+          ) : tab === "source" ? (
             <>
               <div className="source-title">
                 <span>{`${snapshot.team}.omar`}</span>

@@ -140,6 +140,74 @@ export type DiagramSnapshot = {
   edges: DiagramEdge[];
 };
 
+/** One invocation a `Web` agent is waiting on, as the daemon reports it. */
+export type PendingInvocation = {
+  invocation_id: string;
+  agent: string;
+  reaction: string;
+  contract: string;
+  /** Already interpolated, so this is the instruction an agent would read. */
+  prompt: string;
+  trigger_values: Record<string, unknown>;
+  /** Port name to declared type. Exactly what this invocation may write. */
+  allowed_effects: Record<string, string>;
+};
+
+/**
+ * Turn what an operator typed into a value of the port's type.
+ *
+ * The runtime checks a value against its port before it reaches the run, and it
+ * wants JSON: a number for `int`, a boolean for `bool`, null for a signal.
+ * Sending the raw text would fail every port that is not a string, with an
+ * error about a type the operator never chose.
+ *
+ * Returns `undefined` when the text cannot be read as the type, which the panel
+ * shows as a problem with that field rather than sending and being refused.
+ */
+export function parseInputValue(type: string, text: string): unknown | undefined {
+  const trimmed = text.trim();
+  switch (type) {
+    case "string":
+    case "path":
+    case "bytes":
+      // Not trimmed: whitespace can be part of what was meant.
+      return text;
+    case "signal":
+      return null;
+    case "bool":
+      if (trimmed === "true") return true;
+      if (trimmed === "false") return false;
+      return undefined;
+    case "int":
+      return /^-?\d+$/.test(trimmed) ? Number(trimmed) : undefined;
+    case "float": {
+      const value = Number(trimmed);
+      return trimmed !== "" && Number.isFinite(value) ? value : undefined;
+    }
+    default:
+      // `list<int>`, `option<string>` and friends are given as JSON.
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        return undefined;
+      }
+  }
+}
+
+/**
+ * The agents a client answers for: those the program put on the `web` backend.
+ *
+ * Read off the snapshot rather than asked for, so a client knows a panel exists
+ * from the same drawing everyone else sees.
+ */
+export function webAgents(snapshot: DiagramSnapshot): Set<string> {
+  return new Set(
+    snapshot.agents
+      .filter((agent) => agent.backend.toLowerCase() === "web")
+      .map((agent) => agent.id),
+  );
+}
+
 export type DiagramEvent = {
   protocol_version: number;
   sequence: number;

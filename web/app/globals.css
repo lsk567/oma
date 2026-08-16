@@ -1172,6 +1172,116 @@ h2 {
   white-space: pre-wrap;
 }
 
+/* Ports: what the run has said, and what it is waiting to be told. */
+.port-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+}
+
+/* An invocation owed comes first: it is the only part with a deadline. */
+.port-waiting {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid #6b56a4;
+  border-radius: 8px;
+  background: #1a1720;
+}
+
+.port-waiting-head h3 {
+  margin: 2px 0 0;
+  color: #d8d4e0;
+  font-size: 13px;
+}
+
+.port-waiting-prompt {
+  margin: 0;
+  color: #a5a0ae;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.port-waiting-contract {
+  margin: 0;
+  color: #77727e;
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.port-field {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 8px;
+  align-items: baseline;
+}
+
+.port-field-name {
+  color: #d8d4e0;
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.port-field-type {
+  color: #77727e;
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.port-field input {
+  grid-column: 1 / -1;
+  padding: 6px 8px;
+  border: 1px solid #322e3a;
+  border-radius: 5px;
+  background: #131118;
+  color: #e6e2ee;
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.port-field.invalid input {
+  border-color: #c0392b;
+}
+
+.port-field-problem {
+  grid-column: 1 / -1;
+  color: #c0392b;
+  font-size: 10px;
+}
+
+.port-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid #211f25;
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.port-row-name {
+  color: #a5a0ae;
+}
+
+.port-row-type,
+.port-row-tag {
+  color: #57535f;
+  text-align: right;
+}
+
+/* A port carrying a value reads differently from one still empty, which is the
+   whole of what "monitoring" means at a glance. */
+.port-row-value {
+  color: #57535f;
+}
+
+.port-row.filled .port-row-name {
+  color: #e6e2ee;
+}
+
+.port-row.filled .port-row-value {
+  color: #8fd18a;
+}
+
 .event-strip {
   flex: 1;
   min-height: 0;

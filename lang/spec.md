@@ -275,16 +275,20 @@ When every invocation at the tag has completed, final snapshots are committed
 in DAG order and routed through the subscription index. Agents send and forget;
 the runtime performs all downstream delivery.
 
-### 4.3 The `human` backend
+### 4.3 The `web` backend
 
-An agent declared `[panel : Human]` is answered by a person rather than a
-process. Nothing is spawned for it: no command is resolved, no pane is opened,
-and no readiness is waited on. The agent exists as a name in the topology and an
-inbox in the invocation registry.
+An agent declared `[panel : Web]` is answered by a web client rather than a
+spawned process. Nothing is started for it: no command is resolved, no pane is
+opened, and no readiness is waited on. The agent exists as a name in the
+topology and an inbox in the invocation registry.
+
+The name says what answers the reaction, not how the bytes get there. `Codex`
+and `ClaudeCode` do not encode their transport either; a `Web` agent's panel may
+reach it however it likes, and changing that must not mean editing the program.
 
 Everything after that is unchanged. Its reactions are invoked when their
 triggers are present, their prompts are interpolated the same way, and their
-writes are checked against the same effect contract. A person answering is a
+writes are checked against the same effect contract. A client answering is a
 slow agent, and the runtime does not distinguish them:
 
 - it sees exactly its reaction's trigger values, because that is what any

@@ -182,6 +182,51 @@ test("a reaction's deadline is drawn as a stopwatch on its chevron", async ({
   expect(markedBox.width).toBeGreaterThan(plainBox.width);
 });
 
+test("a web agent's ports are read and set from the ports tab", async ({
+  page,
+}) => {
+  // Its own topology: one reaction on the `Web` backend. Kept apart from the
+  // shared capture because a web agent parks until it is answered, and every
+  // other test here drives a run to completion.
+  await fake.close();
+  fake = (await startFakeServe({
+    stepMs: 30,
+    port: FAKE_SERVE_PORT,
+    snapshot: "diagram-web.v1.json",
+  })) as FakeServe;
+  await useFakeServe(page);
+  await draftUntilProposed(page);
+  await deploy(page);
+
+  // The inspector starts collapsed behind its handle, and a collapsed pane is
+  // out of the accessibility tree — so open it before asking for a tab by role.
+  await page.getByRole("button", { name: "Show the source pane" }).click();
+
+  // The count on the tab is how an operator learns something is owed without
+  // having the tab open.
+  const tab = page.getByRole("tab", { name: /^Ports/ });
+  await expect(tab).toContainText("Ports (1)", { timeout: 30_000 });
+  await tab.click();
+
+  // Reading: every port, with the value the run has given it so far.
+  await expect(page.locator(".port-row")).not.toHaveCount(0);
+  await expect(page.locator(".port-row.filled")).not.toHaveCount(0);
+
+  // Setting: only what this invocation is allowed to write, with its type.
+  const waiting = page.locator(".port-waiting");
+  await expect(waiting).toHaveCount(1);
+  await expect(waiting).toContainText("flow.reviewer");
+  await expect(waiting.locator(".port-field-name")).toHaveText("flow.critique");
+  await expect(waiting.locator(".port-field-type")).toHaveText("string");
+
+  await waiting.getByLabel("flow.critique (string)").fill("looks fine");
+  await waiting.getByRole("button", { name: /^Send/ }).click();
+
+  // Answered, so it leaves the queue and the tab stops counting it.
+  await expect(page.locator(".port-waiting")).toHaveCount(0);
+  await expect(tab).toHaveText("Ports");
+});
+
 test("Enter sends, modified Enter writes a new line", async ({ page }) => {
   await useFakeServe(page);
   const composer = page.getByLabel("Describe a workflow");
@@ -380,8 +425,12 @@ test("deploying is armed, reversible, and only then shows events", async ({
   await deploy(page);
   expect(admissions).toBe(1);
 
-  // Deployed: events exist, and the view moves to them.
-  await expect(page.locator(".tabs button")).toHaveText(["Source", "Events"]);
+  // Deployed: events and ports exist, and the view moves to the events.
+  await expect(page.locator(".tabs button")).toHaveText([
+    "Source",
+    "Events",
+    "Ports",
+  ]);
   await expect(page.locator(".tabs button.active")).toHaveText("Events");
   await expect(page.locator(".event-strip")).toContainText("run started");
 });
