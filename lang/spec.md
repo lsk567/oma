@@ -239,6 +239,7 @@ two scoped MCP tools:
 ```text
 omar_set_port(invocation_id, port, value)
 omar_complete(invocation_id)
+omar_pending()
 ```
 
 The invocation's trigger map contains only the declared triggers present at
@@ -265,9 +266,41 @@ If ordered invocations write the same port, the later declared invocation wins
 when it actually writes that port. A mandatory effect is guaranteed to replace
 the earlier value; an optional effect replaces it only when present.
 
+`omar_pending` lists the invocations addressed to the asking agent that are not
+yet complete, each with its prompt, trigger values and permitted effects. It is
+scoped to that agent, so it discloses nothing the agent's own reactions were not
+already wired to see.
+
 When every invocation at the tag has completed, final snapshots are committed
 in DAG order and routed through the subscription index. Agents send and forget;
 the runtime performs all downstream delivery.
+
+### 4.3 The `web` backend
+
+An agent declared `[panel : Web]` is answered by a web client rather than a
+spawned process. Nothing is started for it: no command is resolved, no pane is
+opened, and no readiness is waited on. The agent exists as a name in the
+topology and an inbox in the invocation registry.
+
+The name says what answers the reaction, not how the bytes get there. `Codex`
+and `ClaudeCode` do not encode their transport either; a `Web` agent's panel may
+reach it however it likes, and changing that must not mean editing the program.
+
+Everything after that is unchanged. Its reactions are invoked when their
+triggers are present, their prompts are interpolated the same way, and their
+writes are checked against the same effect contract. A client answering is a
+slow agent, and the runtime does not distinguish them:
+
+- it sees exactly its reaction's trigger values, because that is what any
+  invocation carries;
+- it may write exactly its reaction's effects, because `omar_set_port` refuses
+  anything else;
+- it is bound by `within` like any other reaction, and an expired deadline is
+  read off the contract as in §2.3.
+
+An operator's decision is therefore recorded dataflow rather than a side effect
+on the run: it flows through the same completion path as a model's, so a run
+with a person in it can be replayed by supplying the recorded writes.
 
 ## 5. Topology lifecycle
 

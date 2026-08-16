@@ -910,6 +910,20 @@ h2 {
   stroke-linejoin: round;
 }
 
+/* A web-backed reaction is the one thing on the canvas a person can answer, so
+   it is the one thing drawn as reachable. Sky blue rather than the purple the
+   diagram uses for selection and firing: this is a property of the component,
+   not a thing that just happened to it. */
+.omar-reaction.web .omar-reaction-body {
+  stroke: #38bdf8;
+  stroke-width: 1.8;
+}
+
+.omar-reaction.web .omar-reaction-badge {
+  fill: #38bdf8;
+}
+
+
 .omar-reaction-badge {
   fill: #ffffff;
   stroke: #b3b1b8;
@@ -1170,6 +1184,266 @@ h2 {
   font: 10.5px/1.75 ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
   tab-size: 2;
   white-space: pre-wrap;
+}
+
+/* The editable source: a transparent textarea over the highlighted text.
+
+   Every metric that decides where a glyph lands has to match between the two,
+   or the caret drifts from the colours behind it. They share one font
+   shorthand, one padding, and one wrapping rule; the pair below is the place to
+   change any of them. */
+.source-editor {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+}
+
+.source-editor > .source-code,
+.source-input {
+  grid-area: 1 / 1;
+  margin: 0;
+  padding: 16px;
+  border: 0;
+  font: 10.5px/1.75 ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+  tab-size: 2;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  overflow: auto;
+}
+
+.source-input {
+  resize: none;
+  background: transparent;
+  /* Transparent text over the highlighting, with a visible caret. */
+  color: transparent;
+  caret-color: #d8caff;
+  outline: none;
+}
+
+.source-input::selection {
+  background: var(--purple-soft);
+}
+
+.source-name {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 2px 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.source-name:hover {
+  border-color: var(--line);
+}
+
+.source-name:focus {
+  outline: none;
+  border-color: var(--purple);
+  background: var(--ink);
+}
+
+/* What the compiler said. It is the same compiler a deploy would use, so this
+   is not advice — it is the reason a deploy would be refused. */
+.source-errors {
+  flex: none;
+  max-height: 30%;
+  overflow-y: auto;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  background: rgba(194, 96, 122, 0.08);
+  color: #e7a9b8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.source-errors p {
+  margin: 0 0 6px;
+  overflow-wrap: anywhere;
+}
+
+.source-errors p:last-child {
+  margin-bottom: 0;
+}
+
+/* One web component's panel, opened from the diagram rather than docked. A
+   program may declare several web agents with different interfaces, so this is
+   scoped to one and says whose it is. Not full-window like a terminal: the
+   diagram behind it is the context for what is being answered. */
+.port-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: rgba(6, 6, 9, 0.72);
+}
+
+.port-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 92vw);
+  max-height: 84vh;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+.port-panel-head {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.port-panel-head h2 {
+  margin: 3px 0 0;
+  font-size: 15px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.port-panel-close {
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 10px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.port-panel-close:hover {
+  color: var(--text);
+  border-color: var(--purple);
+}
+
+.port-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 18px 18px;
+}
+
+.port-panel-idle {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.port-list + .port-list {
+  margin-top: 14px;
+}
+
+/* An invocation owed comes first: it is the only part with a deadline. */
+.port-waiting {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid #6b56a4;
+  border-radius: 8px;
+  background: #1a1720;
+}
+
+.port-waiting-head h3 {
+  margin: 2px 0 0;
+  color: #d8d4e0;
+  font-size: 13px;
+}
+
+.port-waiting-prompt {
+  margin: 0;
+  color: #a5a0ae;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.port-waiting-contract {
+  margin: 0;
+  color: #77727e;
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.port-field {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 8px;
+  align-items: baseline;
+}
+
+.port-field-name {
+  color: #d8d4e0;
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.port-field-type {
+  color: #77727e;
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.port-field input {
+  grid-column: 1 / -1;
+  padding: 6px 8px;
+  border: 1px solid #322e3a;
+  border-radius: 5px;
+  background: #131118;
+  color: #e6e2ee;
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.port-field.invalid input {
+  border-color: #c0392b;
+}
+
+.port-field-problem {
+  grid-column: 1 / -1;
+  color: #c0392b;
+  font-size: 10px;
+}
+
+.port-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid #211f25;
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.port-row-name {
+  color: #a5a0ae;
+}
+
+.port-row-type,
+.port-row-tag {
+  color: #57535f;
+  text-align: right;
+}
+
+/* A port carrying a value reads differently from one still empty, which is the
+   whole of what "monitoring" means at a glance. */
+.port-row-value {
+  color: #57535f;
+}
+
+.port-row.filled .port-row-name {
+  color: #e6e2ee;
+}
+
+.port-row.filled .port-row-value {
+  color: #8fd18a;
 }
 
 .event-strip {

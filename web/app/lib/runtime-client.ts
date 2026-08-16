@@ -5,6 +5,7 @@ import {
   type ChatMessage,
   type DiagramEvent,
   type DiagramSnapshot,
+  type PendingInvocation,
   SERVE_PROTOCOL_VERSION,
   type RunRecord,
   type RunRequest,
@@ -171,6 +172,89 @@ export async function startRun(
     throw new Error(await readError(response));
   }
   return assertRunRecord(await response.json());
+}
+
+/** What the compiler says about a program nobody has deployed. */
+export type ProgramCheck = {
+  ok: boolean;
+  team?: string;
+  /** A diagnostic: a program that closes its loop reports none. */
+  open_inputs?: string[];
+  errors?: string[];
+};
+
+/**
+ * Compile a program without running it.
+ *
+ * The same compiler and verifier a deploy would use, so a program that passes
+ * here is not refused a moment later.
+ */
+export async function checkProgram(
+  serveUrl: string,
+  program: string,
+  filename: string,
+  signal?: AbortSignal,
+): Promise<ProgramCheck> {
+  const base = normalizeRuntimeUrl(serveUrl);
+  const response = await fetch(`${base}/v1/programs/check`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ program, filename }),
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+  return (await response.json()) as ProgramCheck;
+}
+
+/**
+ * What the run's web agents are waiting on.
+ *
+ * The client learns *that* something is waiting from the diagram's
+ * `reaction_started`; this is where it learns what. 404 means the program has
+ * no `Web` agent, or the run is over — neither is an error worth showing, so
+ * callers read an empty list.
+ */
+export async function fetchPanel(
+  serveUrl: string,
+  runId: string,
+  signal?: AbortSignal,
+): Promise<PendingInvocation[]> {
+  const base = normalizeRuntimeUrl(serveUrl);
+  const response = await fetch(
+    `${base}/v1/runs/${encodeURIComponent(runId)}/panel`,
+    { signal },
+  );
+  if (response.status === 404) return [];
+  if (!response.ok) throw new Error(await readError(response));
+  const body = (await response.json()) as { pending?: unknown };
+  return Array.isArray(body.pending) ? (body.pending as PendingInvocation[]) : [];
+}
+
+/**
+ * Answer one invocation. Every value lands as one completion, so a reaction
+ * reading several of these ports sees them together rather than firing once
+ * per value — which is why the panel has a Send button rather than committing
+ * a field at a time.
+ */
+export async function answerPanel(
+  serveUrl: string,
+  runId: string,
+  answer: { invocation_id: string; agent: string; values: Record<string, unknown> },
+  signal?: AbortSignal,
+): Promise<void> {
+  const base = normalizeRuntimeUrl(serveUrl);
+  const response = await fetch(
+    `${base}/v1/runs/${encodeURIComponent(runId)}/panel`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(answer),
+      signal,
+    },
+  );
+  if (!response.ok) throw new Error(await readError(response));
 }
 
 export async function fetchRun(

@@ -5,7 +5,8 @@ import { ChatMessage as ChatMessageView } from "./chat-message";
 import { AgentTerminal } from "./agent-terminal";
 import { BackendMenu } from "./backend-menu";
 import { DiagramCanvas } from "./diagram/diagram-canvas";
-import { OmarSource } from "./omar-source";
+import { OmarEditor } from "./omar-source";
+import { PortPanel } from "./port-panel";
 import { Resizer } from "./resizer";
 import { Waiting } from "./waiting";
 import {
@@ -21,14 +22,18 @@ import {
   type ChatMessage,
   type DiagramEvent,
   type DiagramSnapshot,
+  type PendingInvocation,
   type ProposedDesign,
   type RunRecord,
 } from "./lib/protocol";
 import {
+  answerPanel,
   ASSISTANT,
+  checkProgram,
   checkServeHealth,
   diagramUrlFor,
   fetchDiagram,
+  fetchPanel,
   fetchRun,
   startRun,
   subscribeToDiagram,
@@ -84,9 +89,20 @@ export function Studio({
     isDemo ? reviewWorkflow : null,
   );
   const [source, setSource] = useState(isDemo ? reviewProgram : "");
+  /** What the program is called. Named for the team it declares until the
+      operator says otherwise. */
+  const [filename, setFilename] = useState(
+    isDemo ? `${reviewWorkflow.team}.omar` : "program.omar",
+  );
+  /** What the compiler said about the source as it stands. */
+  const [sourceErrors, setSourceErrors] = useState<string[]>([]);
+  const [checking, setChecking] = useState(false);
   // Chat gets the whole width until there is a design to look at. The operator
   // can flip back and forth once there is.
   const [tab, setTab] = useState<"source" | "events">("source");
+  /** What the run's web agents are waiting to be given. */
+  const [pending, setPending] = useState<PendingInvocation[]>([]);
+  const [answering, setAnswering] = useState(false);
   const [builderWidth, setBuilderWidth] = useState(DEFAULT_BUILDER);
   const [inspectorWidth, setInspectorWidth] = useState(DEFAULT_INSPECTOR);
   // The first design splits the window down the middle. After that the widths
@@ -111,6 +127,10 @@ export function Studio({
   const [selection, setSelection] = useState<string[]>([]);
   /** The agent whose terminal is open, if any. */
   const [terminalAgent, setTerminalAgent] = useState<string | null>(null);
+  /** The web agent whose port panel is open. A program may declare several,
+      each with its own ports and prompts, so this names one rather than
+      merging them into a shared view. */
+  const [panelAgent, setPanelAgent] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [events, setEvents] = useState<DiagramEvent[]>([]);
   const disconnectRef = useRef<null | (() => void)>(null);
@@ -166,6 +186,8 @@ export function Studio({
         setConfirming(false);
         setDesign(message.design);
         setSource(message.design.program);
+        setSourceErrors([]);
+        setFilename(`${message.design.preview.team}.omar`);
         // Show the proposed topology, not whatever was on screen before.
         setSnapshot(message.design.preview);
         if (!arrangedRef.current) {
@@ -214,6 +236,41 @@ export function Studio({
     }
   }
 
+  /** What the run's web agents are waiting on, as of now. */
+  const loadPanel = useCallback(
+    async (runId: string) => {
+      try {
+        setPending(await fetchPanel(serveUrl, runId));
+      } catch {
+        // A panel that cannot be read is not a run that has failed. The next
+        // event asks again.
+      }
+    },
+    [serveUrl],
+  );
+
+  /** Answer one invocation, as one completion. */
+  async function answer(
+    invocation: PendingInvocation,
+    values: Record<string, unknown>,
+  ) {
+    if (!run) return;
+    setAnswering(true);
+    setError("");
+    try {
+      await answerPanel(serveUrl, run.run_id, {
+        invocation_id: invocation.invocation_id,
+        agent: invocation.agent,
+        values,
+      });
+      await loadPanel(run.run_id);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setAnswering(false);
+    }
+  }
+
   /** Watch a live run until it reaches a terminal status. */
   const observe = useCallback(
     (record: RunRecord) => {
@@ -258,8 +315,18 @@ export function Studio({
             current ? applyDiagramEvent(current, event) : current,
           );
           void refresh().catch(() => {});
+          // A reaction starting is how a client learns a web agent is waiting:
+          // the event carries an id, so the detail is fetched rather than
+          // pushed. Completion is when to look again -- an answered invocation
+          // leaves the queue the same way.
+          if (event.kind === "reaction_started" || event.kind === "reaction_completed") {
+            void loadPanel(record.run_id);
+          }
           if (event.kind === "run_completed") {
             setPhase("finished");
+            // The run's invocation service goes with it, so nothing is owed
+            // any more whatever the last fetch saw.
+            setPending([]);
             void settle();
           }
           if (event.kind === "run_failed") {
@@ -274,7 +341,7 @@ export function Studio({
         () => void settle(),
       );
     },
-    [serveUrl],
+    [serveUrl, loadPanel],
   );
 
   async function confirmDesign() {
@@ -283,8 +350,10 @@ export function Studio({
     setPhase("spawning");
     setError("");
     try {
+      // The source, not the design: the operator may have edited it, and what
+      // they are looking at is what they are deploying.
       const record = await startRun(serveUrl, {
-        program: design.program,
+        program: source,
         inputs: design.inputs,
       });
       setSnapshot((current) => (current ? { ...current, team: record.team } : current));
@@ -318,6 +387,8 @@ export function Studio({
     // leaving the topology on screen implies a design is still in play.
     setSnapshot(isDemo ? reviewWorkflow : null);
     setSource(isDemo ? reviewProgram : "");
+    setFilename(isDemo ? `${reviewWorkflow.team}.omar` : "program.omar");
+    setSourceErrors([]);
     arrangedRef.current = isDemo;
     setPhase("idle");
     setError("");
@@ -332,6 +403,35 @@ export function Studio({
   // messages, which told an operator nothing they wanted to know.
   const lag = typeof snapshot?.lag === "number" ? formatDuration(snapshot.lag) : "—";
   const canRun = daemon.state === "live";
+  // The compiler answers on every pause in typing. Debounced because a check
+  // compiles a real program on disk, and aborted on the next keystroke so a
+  // stale answer cannot land after a newer one.
+  useEffect(() => {
+    const abort = new AbortController();
+    const timer = setTimeout(() => {
+      // Nothing to check against, or nothing to check: clear rather than leave
+      // an error standing for text that is gone.
+      if (!canRun || source.trim() === "") {
+        setSourceErrors([]);
+        return;
+      }
+      setChecking(true);
+      checkProgram(serveUrl, source, filename, abort.signal)
+        .then((result) => setSourceErrors(result.ok ? [] : (result.errors ?? [])))
+        .catch((cause) => {
+          if (abort.signal.aborted) return;
+          setSourceErrors([cause instanceof Error ? cause.message : String(cause)]);
+        })
+        .finally(() => {
+          if (!abort.signal.aborted) setChecking(false);
+        });
+    }, 400);
+    return () => {
+      clearTimeout(timer);
+      abort.abort();
+    };
+  }, [source, filename, serveUrl, canRun]);
+
   const isDeployed = run !== null;
 
   // Widths are clamped against the workspace so the diagram always keeps a
@@ -588,6 +688,9 @@ export function Studio({
             // Agents outlive the run that spawned them, so a finished run can
             // still be opened; before a run there is nothing behind the node.
             onOpenTerminal={canRun && run ? setTerminalAgent : undefined}
+            // A web agent has no pane; double-clicking it opens the panel it is
+            // answered through instead, which is the only thing there is.
+            onOpenPanel={run ? setPanelAgent : undefined}
           />
         </section>
         ) : null}
@@ -631,13 +734,15 @@ export function Studio({
           </div>
 
           {tab === "source" ? (
-            <>
-              <div className="source-title">
-                <span>{`${snapshot.team}.omar`}</span>
-                <span>{run ? run.status : "draft"}</span>
-              </div>
-              <OmarSource source={source} />
-            </>
+            <OmarEditor
+              source={source}
+              filename={filename}
+              status={run ? run.status : "draft"}
+              errors={sourceErrors}
+              checking={checking}
+              onSourceChange={setSource}
+              onFilenameChange={setFilename}
+            />
           ) : (
             <div className="event-strip" role="tabpanel">
               {events.length ? (
@@ -655,6 +760,17 @@ export function Studio({
         </aside>
         ) : null}
       </section>
+
+      {panelAgent && snapshot ? (
+        <PortPanel
+          agent={panelAgent}
+          snapshot={snapshot}
+          pending={pending.filter((item) => item.agent === panelAgent)}
+          sending={answering}
+          onAnswer={(invocation, values) => void answer(invocation, values)}
+          onClose={() => setPanelAgent(null)}
+        />
+      ) : null}
 
       {terminalAgent ? (
         <AgentTerminal

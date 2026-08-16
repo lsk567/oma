@@ -1,0 +1,165 @@
+{
+  "protocol_version": 1,
+  "team": "ReviewFlow",
+  "sequence": 0,
+  "status": "ready",
+  "current_tag": null,
+  "instances": [
+    {
+      "id": "instance::flow",
+      "name": "flow",
+      "team": "ReviewFlow"
+    }
+  ],
+  "agents": [
+    {
+      "id": "agent::flow.planner",
+      "name": "flow.planner",
+      "backend": "Codex",
+      "instance": "flow"
+    },
+    {
+      "id": "agent::flow.reviewer",
+      "name": "flow.reviewer",
+      "backend": "Web",
+      "instance": "flow"
+    }
+  ],
+  "ports": [
+    {
+      "id": "port::flow.critique",
+      "name": "flow.critique",
+      "kind": "action",
+      "type": "string",
+      "delay": null,
+      "value": null,
+      "last_tag": null,
+      "instance": "flow"
+    },
+    {
+      "id": "port::flow.plan",
+      "name": "flow.plan",
+      "kind": "action",
+      "type": "string",
+      "delay": null,
+      "value": null,
+      "last_tag": null,
+      "instance": "flow"
+    },
+    {
+      "id": "port::flow.request",
+      "name": "flow.request",
+      "kind": "input",
+      "type": "string",
+      "delay": null,
+      "value": null,
+      "last_tag": null,
+      "instance": "flow"
+    },
+    {
+      "id": "port::flow.result",
+      "name": "flow.result",
+      "kind": "output",
+      "type": "string",
+      "delay": null,
+      "value": null,
+      "last_tag": null,
+      "instance": "flow"
+    }
+  ],
+  "reactions": [
+    {
+      "id": "reaction::flow.reaction.0",
+      "name": "reaction.0",
+      "agent": "agent::flow.planner",
+      "order": 0,
+      "triggers": [
+        "port::flow.request"
+      ],
+      "effects": [
+        "port::flow.plan"
+      ],
+      "contract": "plan",
+      "status": "idle",
+      "invocation_id": null,
+      "instance": "flow"
+    },
+    {
+      "id": "reaction::flow.reaction.1",
+      "name": "reaction.1",
+      "agent": "agent::flow.reviewer",
+      "order": 1,
+      "triggers": [
+        "port::flow.plan"
+      ],
+      "effects": [
+        "port::flow.critique"
+      ],
+      "contract": "critique",
+      "status": "idle",
+      "invocation_id": null,
+      "instance": "flow",
+      "within": 300000000000
+    },
+    {
+      "id": "reaction::flow.reaction.2",
+      "name": "reaction.2",
+      "agent": "agent::flow.planner",
+      "order": 2,
+      "triggers": [
+        "port::flow.critique"
+      ],
+      "effects": [
+        "port::flow.result"
+      ],
+      "contract": "result",
+      "status": "idle",
+      "invocation_id": null,
+      "instance": "flow"
+    }
+  ],
+  "edges": [
+    {
+      "id": "trigger::flow.request::flow.reaction.0",
+      "kind": "trigger",
+      "source": "port::flow.request",
+      "target": "reaction::flow.reaction.0",
+      "delay": 0
+    },
+    {
+      "id": "effect::reaction.0::plan",
+      "kind": "effect",
+      "source": "reaction::flow.reaction.0",
+      "target": "port::flow.plan",
+      "delay": 0
+    },
+    {
+      "id": "trigger::flow.plan::flow.reaction.1",
+      "kind": "trigger",
+      "source": "port::flow.plan",
+      "target": "reaction::flow.reaction.1",
+      "delay": 0
+    },
+    {
+      "id": "effect::reaction.1::critique",
+      "kind": "effect",
+      "source": "reaction::flow.reaction.1",
+      "target": "port::flow.critique",
+      "delay": 0
+    },
+    {
+      "id": "trigger::flow.critique::flow.reaction.2",
+      "kind": "trigger",
+      "source": "port::flow.critique",
+      "target": "reaction::flow.reaction.2",
+      "delay": 0
+    },
+    {
+      "id": "effect::reaction.2::result",
+      "kind": "effect",
+      "source": "reaction::flow.reaction.2",
+      "target": "port::flow.result",
+      "delay": 0
+    }
+  ]
+}

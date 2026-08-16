@@ -469,6 +469,9 @@ async fn async_main() -> Result<()> {
                     },
                     diagram_address: diagram_server.then_some(diagram_address),
                     diagram_ready: None,
+                    // `omar run` has no HTTP surface to hang a panel on, so a
+                    // web-backed reaction in a CLI run waits out its deadline.
+                    panel_ready: None,
                 },
             )
         }

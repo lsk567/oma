@@ -524,8 +524,28 @@ struct InvocationRecord {
     reaction: String,
     contract: String,
     allowed_effects: BTreeMap<String, String>,
+    /// What the reaction was triggered by, and the instruction as the agent
+    /// would read it. An agent in a pane is handed both in its prompt; a human
+    /// has no pane, so the record is where a panel reads them from.
+    trigger_values: BTreeMap<String, Value>,
+    prompt: String,
     writes: BTreeMap<String, Value>,
     completed: bool,
+}
+
+/// One invocation waiting to be answered, as a panel needs to draw it.
+///
+/// Only what the invocation already scopes: the values fed in, and the ports
+/// this reaction may write with their types. Nothing else in the run is
+/// reachable from here, because nothing else was wired to it.
+#[derive(Debug, Serialize, Deserialize)]
+struct PendingInvocation {
+    invocation_id: String,
+    reaction: String,
+    contract: String,
+    prompt: String,
+    trigger_values: BTreeMap<String, Value>,
+    allowed_effects: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -545,6 +565,10 @@ struct CompleteArgs {
 enum InvocationCommand {
     SetPort(SetPortArgs),
     Complete(CompleteArgs),
+    /// What this agent owes right now. An agent in a pane is told; a human has
+    /// to be able to ask, because a panel can be opened at any time and a
+    /// reload must not lose the invocation.
+    Pending,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -646,6 +670,25 @@ impl InvocationRegistry {
                     .writes
                     .insert(args.port.clone(), args.value);
                 Ok(json!({"status":"buffered","port":args.port}))
+            }
+            InvocationCommand::Pending => {
+                let pending: Vec<PendingInvocation> = entries
+                    .values()
+                    .filter(|entry| {
+                        !entry.record.completed
+                            && entry.record.team == team
+                            && entry.record.agent == agent
+                    })
+                    .map(|entry| PendingInvocation {
+                        invocation_id: entry.record.id.clone(),
+                        reaction: entry.record.reaction.clone(),
+                        contract: entry.record.contract.clone(),
+                        prompt: entry.record.prompt.clone(),
+                        trigger_values: entry.record.trigger_values.clone(),
+                        allowed_effects: entry.record.allowed_effects.clone(),
+                    })
+                    .collect();
+                Ok(json!({ "pending": pending }))
             }
             InvocationCommand::Complete(args) => {
                 let invocation = entries
@@ -815,6 +858,79 @@ pub(crate) fn mcp_complete(context: &TopologyMcpContext, arguments: Value) -> Re
         context,
         InvocationCommand::Complete(serde_json::from_value(arguments)?),
     )
+}
+
+/// What this agent owes right now, for a panel to draw.
+///
+/// Scoped to the asking agent, so what comes back is what that agent's
+/// reactions were wired to see and allowed to set, and nothing else in the run.
+pub(crate) fn pending_invocations(context: &TopologyMcpContext) -> Result<Value> {
+    send_invocation_command(context, InvocationCommand::Pending)
+}
+
+fn panel_context(access: &PanelAccess, team: &str, agent: &str) -> TopologyMcpContext {
+    TopologyMcpContext {
+        team: team.to_string(),
+        agent: agent.to_string(),
+        endpoint: access.endpoint.clone(),
+        token: access.token.clone(),
+    }
+}
+
+/// Everything the run's web agents are waiting on, each tagged with whose it is.
+///
+/// Asked per agent because an invocation is addressed to one, which is also
+/// what keeps a panel from being handed work that belongs to a pane.
+pub fn panel_pending(access: &PanelAccess, team: &str) -> Result<Vec<Value>> {
+    let mut waiting = Vec::new();
+    for agent in &access.agents {
+        let answer = pending_invocations(&panel_context(access, team, agent))?;
+        let Some(items) = answer.get("pending").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            let mut item = item.clone();
+            if let Some(object) = item.as_object_mut() {
+                object.insert("agent".to_string(), json!(agent));
+            }
+            waiting.push(item);
+        }
+    }
+    Ok(waiting)
+}
+
+/// Answer one invocation: every value, then complete.
+///
+/// The whole batch lands as one completion, so a reaction reading several of
+/// these ports sees them together — the same reason the runtime drains a tag's
+/// writes at once rather than per reaction. A rejected value fails here, before
+/// anything is completed, so a bad field cannot leave a half-answered
+/// invocation behind.
+pub fn panel_submit(
+    access: &PanelAccess,
+    team: &str,
+    agent: &str,
+    invocation_id: &str,
+    values: &BTreeMap<String, Value>,
+) -> Result<()> {
+    let context = panel_context(access, team, agent);
+    for (port, value) in values {
+        send_invocation_command(
+            &context,
+            InvocationCommand::SetPort(SetPortArgs {
+                invocation_id: invocation_id.to_string(),
+                port: port.clone(),
+                value: value.clone(),
+            }),
+        )?;
+    }
+    send_invocation_command(
+        &context,
+        InvocationCommand::Complete(CompleteArgs {
+            invocation_id: invocation_id.to_string(),
+        }),
+    )?;
+    Ok(())
 }
 
 fn validate_invocation_owner(team: &str, agent: &str, invocation: &InvocationRecord) -> Result<()> {
@@ -1011,16 +1127,21 @@ fn expired(invocation: &InvocationSpec, deadline: Duration) -> Result<BTreeMap<S
     }
 }
 
-struct TmuxReactionExecutor {
+struct AgentReactionExecutor {
     client: TmuxClient,
     team: String,
     registry: InvocationRegistry,
     timeout: Duration,
+    /// Agents on the `web` backend. Nothing was spawned for them, so there is
+    /// no pane to deliver a prompt to — the registration is the work item, and
+    /// a web client picks it up from there.
+    web: BTreeSet<String>,
 }
 
-impl ReactionExecutor for TmuxReactionExecutor {
+impl ReactionExecutor for AgentReactionExecutor {
     fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
         let invocation_id = invocation.id.clone();
+        let rendered = render_prompt(&invocation.prompt, &invocation.trigger_values)?;
         let record = InvocationRecord {
             id: invocation_id.clone(),
             team: self.team.clone(),
@@ -1028,30 +1149,37 @@ impl ReactionExecutor for TmuxReactionExecutor {
             reaction: invocation.reaction_id.clone(),
             contract: invocation.contract.clone(),
             allowed_effects: invocation.allowed_effects.clone(),
+            trigger_values: invocation.trigger_values.clone(),
+            prompt: rendered.clone(),
             writes: BTreeMap::new(),
             completed: false,
         };
         let completion = self.registry.register(record)?;
 
-        let rendered = render_prompt(&invocation.prompt, &invocation.trigger_values)?;
-        let message = format!(
-            "OMAR INVOCATION\ninvocation_id: {}\ntriggers: {}\neffects: {}\ncontract: {}\n\n{}\n\nUse omar_set_port for each effect you choose, then call omar_complete exactly once. For a signal effect, set its value to null. Do not address another agent directly.",
-            invocation.id,
-            serde_json::to_string(&invocation.trigger_values)?,
-            serde_json::to_string(&invocation.allowed_effects)?,
-            invocation.contract,
-            rendered
-        );
-        let session = self.client.session_for(&invocation.agent);
-        if let Err(error) = self
-            .client
-            .deliver_prompt_until(&session, &message, &DeliveryOptions::default(), &|| {
-                self.registry.answered(&invocation_id)
-            })
-            .with_context(|| format!("failed to deliver {}", invocation.reaction_id))
-        {
-            self.registry.remove(&invocation_id);
-            return Err(error);
+        // A web agent has no pane to deliver to: nothing was spawned for it,
+        // and the registration above is the work item a panel asks for. What
+        // follows is the same either way — a client answering is a slow agent,
+        // and the registry does not care which kind it is waiting on.
+        if !self.web.contains(&invocation.agent) {
+            let message = format!(
+                "OMAR INVOCATION\ninvocation_id: {}\ntriggers: {}\neffects: {}\ncontract: {}\n\n{}\n\nUse omar_set_port for each effect you choose, then call omar_complete exactly once. For a signal effect, set its value to null. Do not address another agent directly.",
+                invocation.id,
+                serde_json::to_string(&invocation.trigger_values)?,
+                serde_json::to_string(&invocation.allowed_effects)?,
+                invocation.contract,
+                rendered
+            );
+            let session = self.client.session_for(&invocation.agent);
+            if let Err(error) = self
+                .client
+                .deliver_prompt_until(&session, &message, &DeliveryOptions::default(), &|| {
+                    self.registry.answered(&invocation_id)
+                })
+                .with_context(|| format!("failed to deliver {}", invocation.reaction_id))
+            {
+                self.registry.remove(&invocation_id);
+                return Err(error);
+            }
         }
 
         let deadline = invocation.within.unwrap_or(self.timeout);
@@ -1082,6 +1210,27 @@ pub struct TopologyRunConfig<'a> {
     /// Receives the bound diagram address once the server is up. `omar serve`
     /// needs it while the run is still in flight; `omar run` prints it instead.
     pub diagram_ready: Option<mpsc::Sender<std::net::SocketAddr>>,
+    /// Receives the invocation service's address and token once it is up.
+    ///
+    /// A `web` agent has nothing spawned for it, so nothing is ever handed the
+    /// credentials a pane's MCP sidecar gets from its context file. Without
+    /// this the daemon cannot answer on a client's behalf, and a web-backed
+    /// reaction would always sit until its deadline.
+    pub panel_ready: Option<mpsc::Sender<PanelAccess>>,
+}
+
+/// Where a run's invocations are answered, and the secret that authorises it.
+///
+/// Loopback-only and per run, like the service it points at. Held by the daemon
+/// rather than handed to a browser: it authorises writing any effect of any
+/// invocation in the run, which is not a capability a page should carry.
+#[derive(Debug, Clone)]
+pub struct PanelAccess {
+    pub endpoint: String,
+    pub token: String,
+    /// The `web` agents in this run. Everything else answers through its own
+    /// pane, and a panel has no business offering to answer for them.
+    pub agents: BTreeSet<String>,
 }
 
 pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Result<()> {
@@ -1130,11 +1279,29 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
             return Err(error);
         }
     };
-    let executor = TmuxReactionExecutor {
+    let web: BTreeSet<String> = state
+        .agents
+        .iter()
+        .filter(|(_, agent)| is_web_backend(&agent.backend))
+        .map(|(name, _)| name.clone())
+        .collect();
+    // Only when the program has one. A run with nothing web-backed gives the
+    // daemon no panel to offer, rather than an empty one.
+    if !web.is_empty() {
+        if let Some(sender) = &config.panel_ready {
+            let _ = sender.send(PanelAccess {
+                endpoint: invocation_server.endpoint.clone(),
+                token: invocation_server.token.clone(),
+                agents: web.clone(),
+            });
+        }
+    }
+    let executor = AgentReactionExecutor {
         client,
         team: state.team.clone(),
         registry: invocation_server.registry.clone(),
         timeout: config.timeout,
+        web,
     };
     let outputs = match run_event_loop_observed(&state, inputs, &executor, observer, config.pace) {
         Ok(outputs) => outputs,
@@ -1161,6 +1328,12 @@ fn spawn_topology_agents(
 ) -> Result<()> {
     let protocol = "You are an OMAR topology agent. Only act on OMAR INVOCATION messages. You cannot message other agents. For each invocation, use only omar_set_port to set allowed effects and omar_complete to finish. Port writes are buffered and repeated writes use last-writer-wins semantics.";
     for (name, agent) in &state.agents {
+        // A web agent is not spawned. There is no command to resolve, no pane
+        // to put it in, and no readiness to wait for — the agent exists as a
+        // name in the topology and an inbox in the registry.
+        if is_web_backend(&agent.backend) {
+            continue;
+        }
         let session = client.session_for(name);
         if client.has_session(&session)? {
             if !config.replace {
@@ -1201,6 +1374,9 @@ fn spawn_topology_agents(
     }
 
     for (name, agent) in &state.agents {
+        if is_web_backend(&agent.backend) {
+            continue;
+        }
         let markers = crate::tmux::backend_readiness_markers(canonical_backend(&agent.backend));
         if !markers.is_empty()
             && !client.wait_for_markers(
@@ -1214,6 +1390,27 @@ fn spawn_topology_agents(
         }
     }
     Ok(())
+}
+
+/// Input ports nothing inside the topology writes to.
+///
+/// Reported by `/v1/programs/check` as a diagnostic, not as something to set: a
+/// program that closes its loop has none, and one that has some has a port
+/// nothing will ever drive. Naming them while the operator is still editing is
+/// cheaper than discovering it from a run that sits still.
+pub fn open_inputs(state: &VmState) -> Vec<String> {
+    state
+        .ports
+        .iter()
+        .filter(|(name, port)| {
+            port.kind == PortKind::Input
+                && !state
+                    .connections
+                    .iter()
+                    .any(|connection| connection.target == **name)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 pub fn parse_inputs(state: &VmState, raw_inputs: &[String]) -> Result<BTreeMap<String, Value>> {
@@ -1367,8 +1564,15 @@ fn run_event_loop_observed<E: ReactionExecutor>(
             .insert(name.clone(), json!(timer.offset));
     }
     let mut outputs = BTreeMap::new();
-    let mut steps = 0usize;
 
+    // No bound on how many tags a run may pass through. A graph cycle is not a
+    // causality loop here: every zero-delay hop advances the microstep, so a
+    // loop is a walk through superdense time rather than a knot to be untied.
+    // What used to be a runaway guard mostly cut long-lived programs short —
+    // and silently reported success when it did.
+    //
+    // The real limits are the two `checked_add`s in `Tag::advance`, which end a
+    // run that exhausts u64 rather than wrapping it into the past.
     while let Some((tag, events)) = queue.pop_first() {
         let due = Duration::from_nanos(tag.timestamp);
         if pace == Pace::RealTime {
@@ -1385,16 +1589,6 @@ fn run_event_loop_observed<E: ReactionExecutor>(
         // whether a program is keeping the promise its delays make.
         let lag = origin.elapsed().saturating_sub(due).as_nanos() as u64;
         observer.tag_advanced(tag.timestamp, tag.microstep, lag, &events);
-        steps += 1;
-        if steps > 1024 {
-            // A periodic timer re-arms forever by design, so for those this is
-            // the end of the run rather than a fault: stop with what the
-            // program has produced so far.
-            if state.timers.values().any(|timer| timer.period > 0) {
-                return Ok(outputs);
-            }
-            bail!("topology exceeded 1024 logical tags");
-        }
         for (name, timer) in &state.timers {
             if timer.period > 0 && events.contains_key(name) {
                 let next = tag
@@ -1697,9 +1891,20 @@ fn require_identifier(kind: &str, value: &str) -> Result<()> {
     }
 }
 
+/// Whether a backend is answered by a web client rather than a spawned process.
+///
+/// Nothing is spawned for one, so it has no pane, no readiness marker and no
+/// command to resolve — the difference has to be known before any of that is
+/// attempted. It names what answers the reaction, not how the bytes get there:
+/// the transport is the panel's business, not the program's.
+fn is_web_backend(backend: &str) -> bool {
+    canonical_backend(backend) == "web"
+}
+
 fn canonical_backend(backend: &str) -> &str {
     match backend.to_ascii_lowercase().as_str() {
         "claude" | "claudecode" => "claude",
+        "web" => "web",
         "codex" => "codex",
         "opencode" => "opencode",
         "cursor" => "cursor",
@@ -2296,6 +2501,122 @@ mod tests {
         assert!(outputs.is_empty(), "nothing downstream ran: {outputs:?}");
     }
 
+    #[test]
+    fn a_client_is_a_backend_however_it_is_spelled() {
+        assert!(is_web_backend("Web"));
+        assert!(is_web_backend("web"));
+        assert!(!is_web_backend("ClaudeCode"));
+        assert!(!is_web_backend("Stub"));
+    }
+
+    #[test]
+    fn a_web_agent_is_answered_through_the_registry() {
+        // Nothing is spawned for a web agent, so the registration is the whole
+        // of the work item: a panel asks what it owes, answers it, and the tag
+        // moves on exactly as it would for an agent in a pane.
+        let server = InvocationServer::start().unwrap();
+        let bytecode: Bytecode = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Desk",
+              "instructions": [
+                {"op":"begin_plan","team":"Desk"},
+                {"op":"spawn_agent","name":"panel","backend":"Web"},
+                {"op":"define_port","kind":"input","name":"topic","type":"string"},
+                {"op":"define_port","kind":"output","name":"verdict","type":"string"},
+                {"op":"install_reaction","id":"reaction.0","agent":"panel",
+                 "triggers":["topic"],"effects":["verdict"],
+                 "contract":"verdict","prompt":"Decide on $(topic)"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let state = verify(&bytecode).unwrap();
+        let executor = AgentReactionExecutor {
+            client: TmuxClient::new("omar-test"),
+            team: state.team.clone(),
+            registry: server.registry.clone(),
+            timeout: Duration::from_secs(10),
+            web: BTreeSet::from(["panel".to_string()]),
+        };
+        let context = TopologyMcpContext {
+            team: state.team.clone(),
+            agent: "panel".into(),
+            endpoint: server.endpoint.clone(),
+            token: server.token.clone(),
+        };
+
+        let person = thread::spawn(move || {
+            for _ in 0..200 {
+                let waiting = pending_invocations(&context).unwrap();
+                if let Some(item) = waiting["pending"].as_array().unwrap().first() {
+                    let id = item["invocation_id"].as_str().unwrap().to_string();
+                    mcp_set_port(
+                        &context,
+                        json!({"invocation_id": id, "port": "verdict", "value": "ship"}),
+                    )
+                    .unwrap();
+                    mcp_complete(&context, json!({"invocation_id": id})).unwrap();
+                    return item.clone();
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            panic!("no invocation was ever offered to the panel");
+        });
+
+        let outputs = run_event_loop(
+            &state,
+            BTreeMap::from([("topic".to_string(), json!("x"))]),
+            &executor,
+        )
+        .unwrap();
+        let offered = person.join().unwrap();
+
+        assert_eq!(outputs["verdict"], json!("ship"));
+        // The prompt reaches a person already interpolated, so the panel shows
+        // the instruction an agent would have read rather than the template.
+        assert_eq!(offered["prompt"], json!("Decide on x"));
+        // What it may set and what it may see, and nothing else in the run.
+        assert_eq!(offered["allowed_effects"], json!({"verdict": "string"}));
+        assert_eq!(offered["trigger_values"], json!({"topic": "x"}));
+    }
+
+    #[test]
+    fn one_agents_pending_work_is_not_anothers() {
+        let server = InvocationServer::start().unwrap();
+        server
+            .registry
+            .register(InvocationRecord {
+                id: "invocation-3".into(),
+                team: "Desk".into(),
+                agent: "panel".into(),
+                reaction: "reaction.0".into(),
+                contract: "verdict".into(),
+                allowed_effects: BTreeMap::from([("verdict".into(), "string".into())]),
+                trigger_values: BTreeMap::new(),
+                prompt: "decide".into(),
+                writes: BTreeMap::new(),
+                completed: false,
+            })
+            .unwrap();
+
+        let mine = server
+            .registry
+            .execute("Desk", "panel", InvocationCommand::Pending)
+            .unwrap();
+        assert_eq!(mine["pending"].as_array().unwrap().len(), 1);
+
+        // Asking as someone else returns nothing rather than someone else's
+        // work: an invocation is addressed to one agent.
+        let theirs = server
+            .registry
+            .execute("Desk", "clerk", InvocationCommand::Pending)
+            .unwrap();
+        assert!(theirs["pending"].as_array().unwrap().is_empty());
+        server.registry.remove("invocation-3");
+    }
+
     /// A connection carrying `delay` nanoseconds, so the run reaches its
     /// output only at that logical timestamp — and under `Pace::RealTime` owes
     /// that much wall-clock time before it gets there.
@@ -2508,6 +2829,12 @@ mod tests {
     /// be read off the run rather than inferred from its outputs.
     struct TimerExecutor {
         fired: Mutex<Vec<u64>>,
+        /// Firings after which this executor stops the run.
+        ///
+        /// A periodic timer has no end of its own, so something has to say
+        /// when. It used to be the tag cap, which stopped every run at 1024
+        /// whether or not that was the program's intent.
+        stop_after: usize,
     }
 
     impl ReactionExecutor for TimerExecutor {
@@ -2518,7 +2845,14 @@ mod tests {
                 .next()
                 .and_then(Value::as_u64)
                 .expect("a timer carries the time it fired at");
-            self.fired.lock().unwrap().push(at);
+            let count = {
+                let mut fired = self.fired.lock().unwrap();
+                fired.push(at);
+                fired.len()
+            };
+            if self.stop_after > 0 && count >= self.stop_after {
+                bail!("enough");
+            }
             let writes = BTreeMap::from([("note".into(), json!("tick"))]);
             validate_contract(&invocation.contract, &writes)?;
             Ok(writes)
@@ -2544,10 +2878,104 @@ mod tests {
     }
 
     #[test]
+    fn exhausting_a_tag_field_ends_the_run_rather_than_wrapping_it() {
+        // With no cap on tags, these two are the only limits left. Wrapping
+        // either would put an event in the run's own past, where the queue
+        // would hand it back before things that already happened.
+        let last_microstep = Tag {
+            timestamp: 7,
+            microstep: u64::MAX,
+        };
+        let error = last_microstep.advance(0).unwrap_err().to_string();
+        assert!(error.contains("microstep overflow"), "{error}");
+
+        let last_timestamp = Tag {
+            timestamp: u64::MAX,
+            microstep: 0,
+        };
+        let error = last_timestamp.advance(1).unwrap_err().to_string();
+        assert!(error.contains("timestamp overflow"), "{error}");
+
+        // And one short of each still advances, so the guard is at the edge
+        // rather than a step inside it.
+        assert_eq!(
+            Tag {
+                timestamp: 7,
+                microstep: u64::MAX - 1,
+            }
+            .advance(0)
+            .unwrap(),
+            Tag {
+                timestamp: 7,
+                microstep: u64::MAX,
+            }
+        );
+    }
+
+    #[test]
+    fn a_zero_delay_loop_runs_past_where_the_tag_cap_used_to_be() {
+        // A graph cycle is not a causality loop: every zero-delay hop advances
+        // the microstep, so this is a walk through superdense time. It used to
+        // be cut off at 1024 tags with an error; now it ends when the work
+        // says so.
+        let bytecode: Bytecode = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Loop",
+              "instructions": [
+                {"op":"begin_plan","team":"Loop"},
+                {"op":"spawn_agent","name":"counter","backend":"Codex"},
+                {"op":"define_port","kind":"input","name":"start","type":"int"},
+                {"op":"define_port","kind":"action","name":"next","type":"int"},
+                {"op":"define_port","kind":"output","name":"result","type":"int"},
+                {"op":"install_reaction","id":"reaction.0","agent":"counter",
+                 "triggers":["start","next"],"effects":["next","result"],
+                 "contract":"( next | result )","prompt":"p"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let state = verify(&bytecode).unwrap();
+
+        /// Feeds itself until it has gone well past the old bound, then exits
+        /// through the other alternative of its contract.
+        struct Spinner {
+            seen: Mutex<u64>,
+        }
+        impl ReactionExecutor for Spinner {
+            fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+                let mut seen = self.seen.lock().unwrap();
+                *seen += 1;
+                let writes = if *seen >= 4096 {
+                    BTreeMap::from([("result".to_string(), json!(*seen))])
+                } else {
+                    BTreeMap::from([("next".to_string(), json!(*seen))])
+                };
+                validate_contract(&invocation.contract, &writes)?;
+                Ok(writes)
+            }
+        }
+
+        let executor = Spinner {
+            seen: Mutex::new(0),
+        };
+        let outputs = run_event_loop(
+            &state,
+            BTreeMap::from([("start".to_string(), json!(0))]),
+            &executor,
+        )
+        .unwrap();
+        assert_eq!(outputs["result"], json!(4096));
+    }
+
+    #[test]
     fn a_timer_with_no_period_fires_once_at_its_offset() {
         let state = verify(&timer_bytecode(3, 0)).unwrap();
         let executor = TimerExecutor {
             fired: Mutex::new(Vec::new()),
+            // A one-shot ends on its own; nothing has to stop it.
+            stop_after: 0,
         };
 
         let outputs = run_event_loop(&state, BTreeMap::new(), &executor).unwrap();
@@ -2562,20 +2990,21 @@ mod tests {
         let state = verify(&timer_bytecode(0, 10)).unwrap();
         let executor = TimerExecutor {
             fired: Mutex::new(Vec::new()),
+            // Well past the 1024 tags that used to end every run, so this also
+            // says the bound is gone rather than merely raised.
+            stop_after: 1500,
         };
 
-        // A periodic timer never stops on its own, so the run ends at the tag
-        // cap rather than failing: what it produced up to then still stands.
-        let outputs = run_event_loop(&state, BTreeMap::new(), &executor).unwrap();
+        // A periodic timer has no end of its own. Nothing in the runtime
+        // invents one, so it runs until the work does something about it.
+        let error = run_event_loop(&state, BTreeMap::new(), &executor).unwrap_err();
+        assert!(error.to_string().contains("enough"), "{error}");
 
         let fired = executor.fired.lock().unwrap().clone();
         assert_eq!(&fired[..4], &[0, 10, 20, 30], "fired at {fired:?}");
-        assert!(
-            fired.len() > 100,
-            "a periodic timer keeps going: {}",
-            fired.len()
-        );
-        assert_eq!(outputs, BTreeMap::from([("note".into(), json!("tick"))]));
+        assert_eq!(fired.len(), 1500, "kept its period the whole way");
+        // Every firing is one period on from the last, all the way out.
+        assert_eq!(*fired.last().unwrap(), 10 * 1499);
     }
 
     #[test]
@@ -2793,6 +3222,8 @@ mod tests {
             reaction: "reaction.0".into(),
             contract: "opinion".into(),
             allowed_effects: BTreeMap::from([("opinion".into(), "string".into())]),
+            trigger_values: BTreeMap::new(),
+            prompt: "p".into(),
             writes: BTreeMap::new(),
             completed: false,
         };
@@ -2828,6 +3259,8 @@ mod tests {
             reaction: "reaction.0".into(),
             contract: "opinion".into(),
             allowed_effects: BTreeMap::from([("opinion".into(), "string".into())]),
+            trigger_values: BTreeMap::new(),
+            prompt: "p".into(),
             writes: BTreeMap::new(),
             completed: false,
         };

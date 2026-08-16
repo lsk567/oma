@@ -182,6 +182,61 @@ test("a reaction's deadline is drawn as a stopwatch on its chevron", async ({
   expect(markedBox.width).toBeGreaterThan(plainBox.width);
 });
 
+test("a web component's panel opens from the diagram, and answers it", async ({
+  page,
+}) => {
+  // Its own topology: one reaction on the `Web` backend. Kept apart from the
+  // shared capture because a web agent parks until it is answered, and every
+  // other test here drives a run to completion.
+  await fake.close();
+  fake = (await startFakeServe({
+    stepMs: 30,
+    port: FAKE_SERVE_PORT,
+    snapshot: "diagram-web.v1.json",
+  })) as FakeServe;
+  await useFakeServe(page);
+  await draftUntilProposed(page);
+  await deploy(page);
+
+  const panel = page.getByRole("dialog", { name: /Port panel for/ });
+  // Not docked anywhere: nothing is on screen until the component is opened.
+  await expect(panel).toBeHidden();
+
+  // Drawn as reachable before it is touched: exactly one reaction on the
+  // canvas is web-backed, and it is the only one a person can answer.
+  const web = page.locator(".omar-reaction.web");
+  await expect(web).toHaveCount(1, { timeout: 30_000 });
+  await expect(page.locator(".omar-reaction")).toHaveCount(3);
+  await expect(web).toContainText("reviewer");
+
+  // Double-clicking a reaction opens the agent that runs it; this one has no
+  // pane, so what opens is its panel.
+  await web.dblclick();
+
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText("flow.reviewer");
+  // Scoped to this component's wiring: what it reads, and what it may set.
+  await expect(panel.locator(".port-list").first()).toContainText("flow.plan");
+  await expect(panel).toContainText("flow.critique");
+
+  // Only what this invocation is allowed to write, with its declared type.
+  const waiting = panel.locator(".port-waiting");
+  await expect(waiting).toHaveCount(1);
+  await expect(waiting.locator(".port-field-name")).toHaveText("flow.critique");
+  await expect(waiting.locator(".port-field-type")).toHaveText("string");
+
+  await waiting.getByLabel("flow.critique (string)").fill("looks fine");
+  await waiting.getByRole("button", { name: /^Send/ }).click();
+
+  // Answered, so it leaves the queue; the panel stays open on the component.
+  await expect(panel.locator(".port-waiting")).toHaveCount(0);
+  await expect(panel).toContainText("Nothing is waiting on you");
+
+  // And it closes, rather than living beside the events forever.
+  await panel.getByRole("button", { name: "Close" }).click();
+  await expect(panel).toBeHidden();
+});
+
 test("Enter sends, modified Enter writes a new line", async ({ page }) => {
   await useFakeServe(page);
   const composer = page.getByLabel("Describe a workflow");

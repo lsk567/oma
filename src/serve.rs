@@ -81,6 +81,7 @@ fn default_timeout_seconds() -> u64 {
 }
 
 type Runs = Arc<Mutex<BTreeMap<String, RunRecord>>>;
+type Panels = Arc<Mutex<BTreeMap<String, topology::PanelAccess>>>;
 
 /// One entry in the operator/EA conversation. `design` is set only on
 /// proposals, and carries a program the operator has *not* yet approved.
@@ -146,6 +147,10 @@ struct Context_ {
     default_workdir: String,
     health_idle_warning: i64,
     runs: Runs,
+    /// Where each run's web-backed invocations are answered. Absent for a run
+    /// whose program has no `Web` agent, which is what makes the panel routes
+    /// 404 rather than offer an empty panel.
+    panels: Panels,
     chat: Arc<Mutex<Chat>>,
     /// Authenticates the EA's MCP sidecar on the agent-only endpoints.
     agent_token: String,
@@ -236,6 +241,7 @@ impl Serve {
             default_workdir: config.agent.default_workdir.clone(),
             health_idle_warning: config.health.idle_warning,
             runs: Runs::default(),
+            panels: Panels::default(),
             chat: Arc::new(Mutex::new(Chat::default())),
             agent_token: agent_token.clone(),
             command: Arc::new(Mutex::new(config.agent.default_command.clone())),
@@ -559,9 +565,35 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
                 agent_proposal(&context, &read_body(content_length)?)
             }
         }
+        ("POST", "/v1/programs/check") => {
+            if content_length > MAX_BODY_BYTES {
+                (413, json!({"error": "program too large"}))
+            } else {
+                check_program(&read_body(content_length)?)
+            }
+        }
         ("GET", "/v1/runs") => {
             let runs = context.runs.lock().expect("serve runs poisoned");
             (200, json!({"runs": runs.values().collect::<Vec<_>>()}))
+        }
+        // Before the run-record route, which would otherwise swallow the
+        // suffix and answer with a record for a run id that has "/panel" on it.
+        ("GET", rest) if rest.starts_with("/v1/runs/") && rest.ends_with("/panel") => {
+            let id = rest
+                .trim_start_matches("/v1/runs/")
+                .trim_end_matches("/panel");
+            panel_status(&context, id)
+        }
+        ("POST", rest) if rest.starts_with("/v1/runs/") && rest.ends_with("/panel") => {
+            let id = rest
+                .trim_start_matches("/v1/runs/")
+                .trim_end_matches("/panel")
+                .to_string();
+            if content_length > MAX_BODY_BYTES {
+                (413, json!({"error": "answer too large"}))
+            } else {
+                panel_answer(&context, &id, &read_body(content_length)?)
+            }
         }
         ("GET", rest) if rest.starts_with("/v1/runs/") => {
             let id = rest.trim_start_matches("/v1/runs/");
@@ -1071,6 +1103,166 @@ fn start_run(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct CheckRequest {
+    program: String,
+    /// Shown in errors, so a message names the file the operator is editing.
+    /// Must end in `.omar`, which is the compiler's own rule.
+    #[serde(default)]
+    filename: Option<String>,
+}
+
+/// Compile a program and say whether it holds together, without running it.
+///
+/// The runtime's own compiler and verifier, so a program this calls valid is one
+/// the daemon accepts — there is no second opinion to keep in step.
+fn check_program(body: &[u8]) -> (u16, Value) {
+    let request: CheckRequest = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(error) => return (400, json!({"error": format!("invalid request: {error}")})),
+    };
+
+    let name = request.filename.as_deref().unwrap_or("program.omar");
+    // The compiler rejects any other extension, and doing that here names the
+    // problem as the filename rather than as a compile failure.
+    if !name.ends_with(".omar") || name.contains('/') || name.contains('\\') {
+        return (
+            200,
+            json!({"ok": false, "errors": [format!("'{name}' is not a program file name: it must be a plain name ending in .omar")]}),
+        );
+    }
+
+    // Its own directory per check, so the file can carry the operator's name
+    // without two checks colliding over it. Removed on the way out.
+    let directory = match crate::paths::private_temp_dir()
+        .map(|root| root.join(format!("omar-check-{}", Uuid::new_v4())))
+        .and_then(|directory| fs::create_dir_all(&directory).map(|_| directory))
+    {
+        Ok(directory) => directory,
+        Err(error) => return (500, json!({"error": format!("{error}")})),
+    };
+    let path = directory.join(name);
+    if let Err(error) = fs::write(&path, &request.program) {
+        let _ = fs::remove_dir_all(&directory);
+        return (500, json!({"error": format!("{error}")}));
+    }
+
+    // Compiling is half of it: `verify` is what catches a program that parses
+    // and still cannot run, which is most of what an editor should say early.
+    let outcome = topology::load_program(&path).and_then(|bytecode| topology::verify(&bytecode));
+    let _ = fs::remove_dir_all(&directory);
+    match outcome {
+        Ok(state) => (
+            200,
+            json!({
+                "ok": true,
+                "team": state.team,
+                // A diagnostic: a program that closes its loop has none.
+                "open_inputs": topology::open_inputs(&state),
+            }),
+        ),
+        Err(error) => {
+            // The compiler names the file it was given, which is a scratch path
+            // nobody asked about. Say the name the operator is looking at.
+            let message = format!("{error:#}").replace(&format!("{}/", directory.display()), "");
+            (200, json!({"ok": false, "errors": [message]}))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PanelAnswer {
+    invocation_id: String,
+    agent: String,
+    values: BTreeMap<String, Value>,
+}
+
+/// A run's panel and the team it belongs to, or the reason there is neither.
+fn panel_for(
+    context: &Arc<Context_>,
+    run_id: &str,
+) -> Result<(topology::PanelAccess, String), (u16, Value)> {
+    let team = {
+        let runs = context.runs.lock().expect("serve runs poisoned");
+        match runs.get(run_id) {
+            None => return Err((404, json!({"error": "unknown run"}))),
+            Some(record) => record.team.clone(),
+        }
+    };
+    let panels = context.panels.lock().expect("serve panels poisoned");
+    match panels.get(run_id) {
+        // Either the program declares no `Web` agent, or the run is over and
+        // its invocation service went with it. Both mean there is nothing to
+        // answer, which is a different thing from an empty queue.
+        None => Err((404, json!({"error": "run has no panel"}))),
+        Some(access) => Ok((access.clone(), team)),
+    }
+}
+
+/// What the run's web agents are waiting on.
+///
+/// The client learns *that* something is waiting from the diagram's
+/// `reaction_started`; this is where it learns what, because an event carries
+/// an id and a panel needs the prompt, the trigger values, and the ports it is
+/// allowed to set.
+fn panel_status(context: &Arc<Context_>, run_id: &str) -> (u16, Value) {
+    let (access, team) = match panel_for(context, run_id) {
+        Ok(found) => found,
+        Err(response) => return response,
+    };
+    match topology::panel_pending(&access, &team) {
+        Ok(pending) => (
+            200,
+            json!({"run_id": run_id, "team": team, "pending": pending}),
+        ),
+        Err(error) => (502, json!({"error": format!("{error:#}")})),
+    }
+}
+
+/// Answer one invocation on a web agent's behalf.
+///
+/// The daemon holds the run's token rather than handing it to the page: it
+/// authorises writing any effect of any invocation in the run, which is not a
+/// capability a browser tab should carry. What a client can do here is bounded
+/// by what the program wired, because the runtime still refuses a port outside
+/// the invocation's effects.
+fn panel_answer(context: &Arc<Context_>, run_id: &str, body: &[u8]) -> (u16, Value) {
+    let answer: PanelAnswer = match serde_json::from_slice(body) {
+        Ok(answer) => answer,
+        Err(error) => return (400, json!({"error": format!("invalid request: {error}")})),
+    };
+    let (access, team) = match panel_for(context, run_id) {
+        Ok(found) => found,
+        Err(response) => return response,
+    };
+    if !access.agents.contains(&answer.agent) {
+        return (
+            400,
+            json!({"error": format!("'{}' is not a web agent of this run", answer.agent)}),
+        );
+    }
+    match topology::panel_submit(
+        &access,
+        &team,
+        &answer.agent,
+        &answer.invocation_id,
+        &answer.values,
+    ) {
+        Ok(()) => (
+            202,
+            json!({
+                "run_id": run_id,
+                "invocation_id": answer.invocation_id,
+                "sent": answer.values.keys().collect::<Vec<_>>()
+            }),
+        ),
+        // The runtime's own refusal — a port outside the invocation's effects,
+        // a value of the wrong type, a contract left unsatisfied — reported as
+        // the caller's error rather than the daemon's.
+        Err(error) => (400, json!({"error": format!("{error:#}")})),
+    }
+}
+
 fn spawn_run_thread(
     context: &Arc<Context_>,
     run_id: &str,
@@ -1079,6 +1271,22 @@ fn spawn_run_thread(
     request: &StartRunRequest,
     ready_sender: mpsc::Sender<SocketAddr>,
 ) {
+    // The panel's credentials arrive on their own channel, and only for a run
+    // that has a web agent. Stored as they come rather than waited for: a run
+    // with none would otherwise hold up admission for nothing.
+    let (panel_sender, panel_receiver) = mpsc::channel();
+    {
+        let panels = context.panels.clone();
+        let id = run_id.to_string();
+        thread::spawn(move || {
+            if let Ok(access) = panel_receiver.recv() {
+                panels
+                    .lock()
+                    .expect("serve panels poisoned")
+                    .insert(id, access);
+            }
+        });
+    }
     let context = context.clone();
     let run_id = run_id.to_string();
     let replace = request.replace;
@@ -1104,8 +1312,16 @@ fn spawn_run_thread(
                 pace,
                 diagram_address: Some(diagram_address),
                 diagram_ready: Some(ready_sender),
+                panel_ready: Some(panel_sender),
             },
         );
+        // The run is over, so its invocation service is gone with it. Leaving
+        // the entry would let a panel offer work nothing can accept.
+        context
+            .panels
+            .lock()
+            .expect("serve panels poisoned")
+            .remove(&run_id);
         let mut runs = context.runs.lock().expect("serve runs poisoned");
         if let Some(record) = runs.get_mut(&run_id) {
             record.finished_at = Some(now_unix());
@@ -1358,6 +1574,42 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("\"status\":\"ok\""));
         assert!(response.contains(&format!("\"protocol_version\":{SERVE_PROTOCOL_VERSION}")));
+    }
+
+    #[test]
+    fn the_panel_routes_are_not_swallowed_by_the_run_record_route() {
+        // `/v1/runs/{id}` matches any suffix, so the panel arms have to come
+        // first or a GET for a panel answers with a record for a run id that
+        // has "/panel" glued to it.
+        let server = test_server();
+        let response = request(server.address(), "GET", "/v1/runs/nope/panel", None);
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
+        assert!(response.contains("unknown run"), "{response}");
+
+        let response = request(
+            server.address(),
+            "POST",
+            "/v1/runs/nope/panel",
+            Some(r#"{"invocation_id":"i","agent":"panel","values":{}}"#),
+        );
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
+        assert!(response.contains("unknown run"), "{response}");
+    }
+
+    #[test]
+    fn a_malformed_panel_answer_is_rejected_before_the_run_is_looked_up() {
+        let server = test_server();
+        let response = request(
+            server.address(),
+            "POST",
+            "/v1/runs/nope/panel",
+            Some("not json"),
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "{response}"
+        );
+        assert!(response.contains("invalid request"), "{response}");
     }
 
     #[test]
