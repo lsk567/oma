@@ -173,13 +173,6 @@ export function Studio({
   const checkTokenRef = useRef(0);
 
   /**
-   * `present` is derived from the snapshot, and a projection sets the snapshot
-   * — so depending on the array itself would make every projection ask for
-   * another. The key is what actually changed.
-   */
-  const presentKey = present.join("\u0000");
-
-  /**
    * What the tag being shown touches: the ports carrying a value and the
    * reactions firing. Ids, because that is what the drawing is keyed by.
    */

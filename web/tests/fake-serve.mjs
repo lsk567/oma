@@ -404,6 +404,14 @@ export async function startFakeServe({
     });
   }
 
+  /** Inputs nothing in the topology writes to: a diagnostic, as on the daemon. */
+  function openInputsOf(snapshot) {
+    const fed = new Set(
+      snapshot.edges.filter((edge) => edge.kind === "connection").map((edge) => edge.target),
+    );
+    return snapshot.ports.filter((port) => port.kind === "input" && !fed.has(port.id));
+  }
+
   /** One pending invocation per reaction whose agent is on the `web` backend. */
   function webPending(snapshot) {
     const web = new Set(
