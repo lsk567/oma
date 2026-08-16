@@ -310,6 +310,9 @@ run_case SameAgentSerial SameAgentSerial serial.result \
   --input serial.request='serialize these reactions'
 run_case SuperdenseTime SuperdenseTime time.fixed_result,time.connected_result \
   --input time.start=7
+# `PortManager` is deliberately absent too: its panel is answered by a web
+# client, and nothing here is one, so the run would wait out its deadline rather
+# than finish. Compiled and backend-checked like every other source.
 # `Heartbeat` and `Bureau` are deliberately absent. `Heartbeat`'s timer has a
 # non-zero period, so the program never finishes and has no completion marker to
 # wait for. `Bureau` is 32 agents across eight sequential stages, and a release

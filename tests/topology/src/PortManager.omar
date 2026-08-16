@@ -1,0 +1,52 @@
+// The `web` backend, and the smallest thing the port manager panel can drive.
+//
+// `PortManager` is an ordinary team whose agent happens to be answered by a web
+// client rather than a spawned process. Nothing is started for it: no command,
+// no pane, no readiness. It exists as a name in the topology and an inbox in
+// the invocation registry.
+//
+// What the panel may do is the wiring and nothing else:
+//
+//   - it sees `reading`, because that is what is connected to its input;
+//   - it may set `setpoint`, because that is what its reaction declares.
+//
+// Neither is a setting of the panel. A client cannot reach a port the program
+// did not give it, which is the whole reason the operator is a component here
+// rather than a side channel into the run.
+//
+// Deliberately not in the release gate: a web agent waits for an answer, and
+// nothing in that harness would give one. Compiled and backend-checked like
+// every other source, never run there.
+team Gauge[sensor : Stub]
+{
+    output reading : string
+
+    // One shot: the program has no open input, so something has to start it.
+    timer beat(1ns, 0)
+
+    prompt sensor(beat) -> reading
+    "
+        Set `reading` to exactly: 41
+    "
+}
+
+team PortManager[panel : Web]
+{
+    input reading : string
+    output setpoint : int
+
+    prompt panel(reading) -> setpoint within(10min)
+    "
+        The gauge reads $(reading).
+
+        Set `setpoint` to the value the run should carry on with. Until you do,
+        this reaction is what the run is waiting for.
+    "
+}
+
+main WebPanel {
+    gauge = Gauge()
+    pm = PortManager()
+
+    gauge.reading -> pm.reading after 0
+}

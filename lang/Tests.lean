@@ -40,6 +40,9 @@ def topologyCases : Array TopologyCase := #[
     reactions := 3, instructions := 14 },
   { file := "OrderedWrites.omar", team := "OrderedWrites", agents := 4, ports := 3,
     reactions := 4, instructions := 14 },
+  -- A `Stub` and a `Web`, so the shared backend assertion does not apply.
+  { file := "PortManager.omar", team := "WebPanel", agents := 2, ports := 3,
+    connections := 1, reactions := 2, instructions := 13, codexOnly := false },
   { file := "Recurrence.omar", team := "Recurrence", agents := 1, ports := 3,
     reactions := 1, instructions := 8 },
   -- Three instances of one team, so every count is the team's times three.
@@ -115,6 +118,21 @@ def testTopology (test : TopologyCase) : IO Unit := do
     assertEqual "ring is wired head to tail"
       (program.connections.map fun connection => s!"{connection.source}->{connection.target}")
       #["n1.out->n2.token", "n2.out->n3.token", "n3.out->n1.token"]
+  if test.file == "PortManager.omar" then
+    -- The backend is the whole point of the sample, and `codexOnly` is off, so
+    -- nothing else would check it.
+    assertEqual "the panel is answered by a web client"
+      (program.agents.any (fun agent => agent.name == "pm.panel" && agent.backend == "Web")) true
+    assertEqual "and the gauge is not"
+      (program.agents.any (fun agent => agent.name == "gauge.sensor" && agent.backend == "Stub")) true
+    -- What the panel may see and set is the wiring: an input fed by a
+    -- connection, and an effect its own reaction declares.
+    assertEqual "the panel's input is connected, not dangling"
+      (program.connections.any (fun c => c.target == "pm.reading")) true
+    assertEqual "the panel may set exactly one port"
+      (program.reactions.any (fun r => r.effects == #["pm.setpoint"])) true
+    assertEqual "and is bounded while it decides"
+      (program.reactions.any (·.within == some 600000000000)) true
   if test.file == "DeadlineProbe.omar" then
     -- `codexOnly` is off, so the backend is pinned here instead of skipped.
     assertEqual "every agent runs on Claude Code"
