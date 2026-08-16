@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import {
   formatDuration,
@@ -10,57 +10,118 @@ import {
 } from "./lib/protocol";
 
 /**
- * Every port's value, and the ports a web agent is waiting to be given.
+ * One web component's panel: what it can see, and what it is waiting to be told.
  *
- * Two halves of one question. Reading is free: the diagram stream already
- * carries every port's value and the tag it arrived at, so this is a list of
- * what the run already told us. Writing goes back through the reaction that
- * asked, so an operator's answer is recorded dataflow rather than a side effect
- * on the run.
+ * Opened by double-clicking the component, not docked beside the events. A
+ * program may declare several `Web` agents and each has its own interface —
+ * different ports, different prompts, different deadlines — so one shared panel
+ * would have to invent a way to merge them, and there is no honest way to do
+ * that.
  *
- * What can be set is not a setting of this panel. It is whatever the program
- * wired to a `Web` agent, which is why an operator cannot reach a port the
- * topology never offered them.
+ * Scoped to this agent's wiring, which is the same rule the runtime enforces:
+ * the ports its reactions trigger on are what it may see, and the ports they
+ * declare as effects are what it may set. Neither is a setting of the panel.
  */
 export function PortPanel({
+  agent,
   snapshot,
   pending,
   sending,
   onAnswer,
+  onClose,
 }: {
+  /** Qualified agent name, as the diagram and the daemon both spell it. */
+  agent: string;
   snapshot: DiagramSnapshot;
   pending: PendingInvocation[];
   sending: boolean;
   onAnswer: (invocation: PendingInvocation, values: Record<string, unknown>) => void;
+  onClose: () => void;
 }) {
-  return (
-    <div className="port-panel" role="tabpanel">
-      {pending.map((invocation) => (
-        <Waiting
-          key={invocation.invocation_id}
-          invocation={invocation}
-          sending={sending}
-          onAnswer={onAnswer}
-        />
-      ))}
+  useEffect(() => {
+    const dismiss = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", dismiss);
+    return () => window.removeEventListener("keydown", dismiss);
+  }, [onClose]);
 
-      <div className="port-list">
-        <span className="eyebrow">PORTS</span>
-        {snapshot.ports.map((port) => (
-          <div key={port.id} className={`port-row${port.value === null ? "" : " filled"}`}>
-            <span className="port-row-name">{port.name}</span>
-            <span className="port-row-type">{port.type}</span>
-            <span className="port-row-value">
-              {port.value === null ? "—" : JSON.stringify(port.value)}
-            </span>
-            <span className="port-row-tag">
-              {port.last_tag === null
-                ? ""
-                : `${formatDuration(port.last_tag.timestamp)}:${port.last_tag.microstep}`}
-            </span>
+  // The ports this component is wired to, in the order a reader wants them:
+  // what it reads, then what it writes.
+  const wiring = useMemo(() => {
+    const agentId = snapshot.agents.find((a) => a.name === agent)?.id;
+    const mine = snapshot.reactions.filter((reaction) => reaction.agent === agentId);
+    const reads = new Set(mine.flatMap((reaction) => reaction.triggers));
+    const writes = new Set(mine.flatMap((reaction) => reaction.effects));
+    const port = (id: string) => snapshot.ports.find((p) => p.id === id);
+    return {
+      reads: [...reads].map(port).filter((p) => p !== undefined),
+      writes: [...writes].map(port).filter((p) => p !== undefined),
+    };
+  }, [agent, snapshot]);
+
+  return (
+    <div className="port-overlay" role="dialog" aria-label={`Port panel for ${agent}`}>
+      <div className="port-panel">
+        <header className="port-panel-head">
+          <div>
+            <span className="eyebrow">PORT PANEL</span>
+            <h2>{agent}</h2>
           </div>
-        ))}
+          <button type="button" className="port-panel-close" onClick={onClose}>
+            Close
+          </button>
+        </header>
+
+        <div className="port-panel-body">
+          {pending.map((invocation) => (
+            <Waiting
+              key={invocation.invocation_id}
+              invocation={invocation}
+              sending={sending}
+              onAnswer={onAnswer}
+            />
+          ))}
+          {pending.length === 0 ? (
+            <p className="port-panel-idle">
+              Nothing is waiting on you. This panel opens the moment one of this
+              component&rsquo;s reactions is invoked.
+            </p>
+          ) : null}
+
+          <PortList label="SEES" ports={wiring.reads} />
+          <PortList label="SETS" ports={wiring.writes} />
+        </div>
       </div>
+    </div>
+  );
+}
+
+function PortList({
+  label,
+  ports,
+}: {
+  label: string;
+  ports: DiagramSnapshot["ports"];
+}) {
+  if (ports.length === 0) return null;
+  return (
+    <div className="port-list">
+      <span className="eyebrow">{label}</span>
+      {ports.map((port) => (
+        <div key={port.id} className={`port-row${port.value === null ? "" : " filled"}`}>
+          <span className="port-row-name">{port.name}</span>
+          <span className="port-row-type">{port.type}</span>
+          <span className="port-row-value">
+            {port.value === null ? "—" : JSON.stringify(port.value)}
+          </span>
+          <span className="port-row-tag">
+            {port.last_tag === null
+              ? ""
+              : `${formatDuration(port.last_tag.timestamp)}:${port.last_tag.microstep}`}
+          </span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -98,10 +159,7 @@ function Waiting({
 
   return (
     <form className="port-waiting" onSubmit={submit}>
-      <div className="port-waiting-head">
-        <span className="eyebrow">WAITING ON YOU</span>
-        <h3>{invocation.agent}</h3>
-      </div>
+      <span className="eyebrow">WAITING ON YOU</span>
       <p className="port-waiting-prompt">{invocation.prompt}</p>
 
       {effects.map(([port, type]) => (

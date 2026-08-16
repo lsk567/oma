@@ -182,7 +182,7 @@ test("a reaction's deadline is drawn as a stopwatch on its chevron", async ({
   expect(markedBox.width).toBeGreaterThan(plainBox.width);
 });
 
-test("a web agent's ports are read and set from the ports tab", async ({
+test("a web component's panel opens from the diagram, and answers it", async ({
   page,
 }) => {
   // Its own topology: one reaction on the `Web` backend. Kept apart from the
@@ -198,86 +198,43 @@ test("a web agent's ports are read and set from the ports tab", async ({
   await draftUntilProposed(page);
   await deploy(page);
 
-  // The inspector starts collapsed behind its handle, and a collapsed pane is
-  // out of the accessibility tree — so open it before asking for a tab by role.
-  await page.getByRole("button", { name: "Show the source pane" }).click();
+  const panel = page.getByRole("dialog", { name: /Port panel for/ });
+  // Not docked anywhere: nothing is on screen until the component is opened.
+  await expect(panel).toBeHidden();
 
-  // The count on the tab is how an operator learns something is owed without
-  // having the tab open.
-  const tab = page.getByRole("tab", { name: /^Ports/ });
-  await expect(tab).toContainText("Ports (1)", { timeout: 30_000 });
-  await tab.click();
+  // Drawn as reachable before it is touched: exactly one reaction on the
+  // canvas is web-backed, and it is the only one a person can answer.
+  const web = page.locator(".omar-reaction.web");
+  await expect(web).toHaveCount(1, { timeout: 30_000 });
+  await expect(page.locator(".omar-reaction")).toHaveCount(3);
+  await expect(web).toContainText("reviewer");
 
-  // Reading: every port, with the value the run has given it so far.
-  await expect(page.locator(".port-row")).not.toHaveCount(0);
-  await expect(page.locator(".port-row.filled")).not.toHaveCount(0);
+  // Double-clicking a reaction opens the agent that runs it; this one has no
+  // pane, so what opens is its panel.
+  await web.dblclick();
 
-  // Setting: only what this invocation is allowed to write, with its type.
-  const waiting = page.locator(".port-waiting");
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText("flow.reviewer");
+  // Scoped to this component's wiring: what it reads, and what it may set.
+  await expect(panel.locator(".port-list").first()).toContainText("flow.plan");
+  await expect(panel).toContainText("flow.critique");
+
+  // Only what this invocation is allowed to write, with its declared type.
+  const waiting = panel.locator(".port-waiting");
   await expect(waiting).toHaveCount(1);
-  await expect(waiting).toContainText("flow.reviewer");
   await expect(waiting.locator(".port-field-name")).toHaveText("flow.critique");
   await expect(waiting.locator(".port-field-type")).toHaveText("string");
 
   await waiting.getByLabel("flow.critique (string)").fill("looks fine");
   await waiting.getByRole("button", { name: /^Send/ }).click();
 
-  // Answered, so it leaves the queue and the tab stops counting it.
-  await expect(page.locator(".port-waiting")).toHaveCount(0);
-  await expect(tab).toHaveText("Ports");
-});
+  // Answered, so it leaves the queue; the panel stays open on the component.
+  await expect(panel.locator(".port-waiting")).toHaveCount(0);
+  await expect(panel).toContainText("Nothing is waiting on you");
 
-test("the program can be edited, and the compiler answers as you type", async ({
-  page,
-}) => {
-  // The source view is where a program is read; making it the place a program
-  // is corrected means the compiler has to say what is wrong before a deploy
-  // is refused for the same reason.
-  await useFakeServe(page);
-  await draftUntilProposed(page);
-  await page.getByRole("button", { name: "Show the source pane" }).click();
-
-  const editor = page.getByLabel("OMAR program");
-  await expect(editor).toBeVisible();
-  await expect(editor).toHaveValue(/team ReviewFlow\[/);
-
-  // A name is a name, and the compiler only accepts one kind.
-  const name = page.getByLabel("Program file name");
-  await expect(name).toHaveValue("ReviewFlow.omar");
-  await name.fill("ReviewFlow.txt");
-  await name.blur();
-  await expect(page.getByRole("alert")).toContainText("must be a plain name ending in .omar");
-
-  await name.fill("Release.omar");
-  await name.blur();
-  await expect(page.getByRole("alert")).toBeHidden();
-
-  // A program the compiler rejects says so where it is being written.
-  await editor.fill("team Broken {");
-  await expect(page.getByRole("alert")).toContainText("expected identifier");
-
-  // And correcting it clears the error rather than needing a deploy to find out.
-  await editor.fill("team Fixed[a : Codex] {}\nmain Fixed { f = Fixed() }");
-  await expect(page.getByRole("alert")).toBeHidden();
-});
-
-test("what is deployed is what the editor shows", async ({ page }) => {
-  await useFakeServe(page);
-  await draftUntilProposed(page);
-  await page.getByRole("button", { name: "Show the source pane" }).click();
-
-  const edited = "team Edited[a : Codex] {}\nmain Edited { e = Edited() }";
-  await page.getByLabel("OMAR program").fill(edited);
-  await expect(page.getByRole("alert")).toBeHidden();
-
-  const admitted = page.waitForRequest(
-    (request) =>
-      request.method() === "POST" && new URL(request.url()).pathname === "/v1/runs",
-  );
-  await deploy(page);
-
-  // The design the assistant proposed is not what was on screen by the end.
-  expect(JSON.parse((await admitted).postData() ?? "{}").program).toBe(edited);
+  // And it closes, rather than living beside the events forever.
+  await panel.getByRole("button", { name: "Close" }).click();
+  await expect(panel).toBeHidden();
 });
 
 test("Enter sends, modified Enter writes a new line", async ({ page }) => {
@@ -478,12 +435,8 @@ test("deploying is armed, reversible, and only then shows events", async ({
   await deploy(page);
   expect(admissions).toBe(1);
 
-  // Deployed: events and ports exist, and the view moves to the events.
-  await expect(page.locator(".tabs button")).toHaveText([
-    "Source",
-    "Events",
-    "Ports",
-  ]);
+  // Deployed: events exist, and the view moves to them.
+  await expect(page.locator(".tabs button")).toHaveText(["Source", "Events"]);
   await expect(page.locator(".tabs button.active")).toHaveText("Events");
   await expect(page.locator(".event-strip")).toContainText("run started");
 });

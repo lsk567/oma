@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { formatDuration, type DiagramSnapshot } from "../lib/protocol";
+import { formatDuration, webAgents, type DiagramSnapshot } from "../lib/protocol";
 
 /**
  * Lingua Franca renders reactors as labelled containers whose ports sit on the
@@ -139,6 +139,8 @@ type ReactionView = {
   agent: string;
   /** Nanoseconds from `within`, drawn as a stopwatch. Null when unbounded. */
   within: number | null;
+  /** Whether a web client answers this reaction rather than a spawned agent. */
+  web: boolean;
 };
 
 type EdgeView = {
@@ -733,6 +735,7 @@ function buildLayout(
   });
 
   const labels = reactionLabels(snapshot);
+  const web = webAgents(snapshot);
   const reactions: ReactionView[] = snapshot.reactions.map((reaction) => {
     const label = labels.get(reaction.id) ?? { name: reaction.name, meta: "" };
     return {
@@ -744,6 +747,7 @@ function buildLayout(
       box: nodeBoxes.get(reaction.id) ?? { x: 0, y: 0, ...REACTION_SIZE },
       agent: componentName(reaction.agent),
       within: reaction.within,
+      web: web.has(reaction.agent),
     };
   });
 
@@ -1008,12 +1012,15 @@ export function DiagramCanvas({
   selection = [],
   onToggleComponent,
   onOpenTerminal,
+  onOpenPanel,
 }: {
   snapshot: DiagramSnapshot;
   selection?: string[];
   onToggleComponent?: (component: string) => void;
   /** Given only while agents are actually running and can be attached to. */
   onOpenTerminal?: (agent: string) => void;
+  /** A web agent has no pane, so its double-click opens its panel instead. */
+  onOpenPanel?: (agent: string) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [layout, setLayout] = useState<Layout | null>(null);
@@ -1373,12 +1380,18 @@ export function DiagramCanvas({
               {layout.reactions.map((reaction) => (
                 <g
                   key={reaction.id}
-                  {...selectable(reaction.id, `omar-reaction ${reaction.status}`)}
+                  {...selectable(
+                    reaction.id,
+                    `omar-reaction ${reaction.status}${reaction.web ? " web" : ""}`,
+                  )}
                   onDoubleClick={(event) => {
                     // The canvas resets the view on double click; a reaction
-                    // opens the terminal of the agent that runs it.
+                    // opens the agent that runs it. A web agent has no pane to
+                    // attach to, so what opens is the panel it is answered
+                    // through — the same gesture, the thing that is there.
                     event.stopPropagation();
-                    onOpenTerminal?.(reaction.agent);
+                    if (reaction.web) onOpenPanel?.(reaction.agent);
+                    else onOpenTerminal?.(reaction.agent);
                   }}
                   transform={`translate(${reaction.box.x},${reaction.box.y})`}
                 >

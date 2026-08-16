@@ -99,7 +99,7 @@ export function Studio({
   const [checking, setChecking] = useState(false);
   // Chat gets the whole width until there is a design to look at. The operator
   // can flip back and forth once there is.
-  const [tab, setTab] = useState<"source" | "events" | "ports">("source");
+  const [tab, setTab] = useState<"source" | "events">("source");
   /** What the run's web agents are waiting to be given. */
   const [pending, setPending] = useState<PendingInvocation[]>([]);
   const [answering, setAnswering] = useState(false);
@@ -127,6 +127,10 @@ export function Studio({
   const [selection, setSelection] = useState<string[]>([]);
   /** The agent whose terminal is open, if any. */
   const [terminalAgent, setTerminalAgent] = useState<string | null>(null);
+  /** The web agent whose port panel is open. A program may declare several,
+      each with its own ports and prompts, so this names one rather than
+      merging them into a shared view. */
+  const [panelAgent, setPanelAgent] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [events, setEvents] = useState<DiagramEvent[]>([]);
   const disconnectRef = useRef<null | (() => void)>(null);
@@ -684,6 +688,9 @@ export function Studio({
             // Agents outlive the run that spawned them, so a finished run can
             // still be opened; before a run there is nothing behind the node.
             onOpenTerminal={canRun && run ? setTerminalAgent : undefined}
+            // A web agent has no pane; double-clicking it opens the panel it is
+            // answered through instead, which is the only thing there is.
+            onOpenPanel={run ? setPanelAgent : undefined}
           />
         </section>
         ) : null}
@@ -724,29 +731,9 @@ export function Studio({
                 Events
               </button>
             ) : null}
-            {/* Like events, only once something is running: before a deploy
-                every value is null and nothing can be set, so the tab would
-                offer a list of dashes. */}
-            {isDeployed ? (
-            <button
-              role="tab"
-              aria-selected={tab === "ports"}
-              className={tab === "ports" ? "active" : ""}
-              onClick={() => setTab("ports")}
-            >
-              {pending.length > 0 ? `Ports (${pending.length})` : "Ports"}
-            </button>
-            ) : null}
           </div>
 
-          {tab === "ports" ? (
-            <PortPanel
-              snapshot={snapshot}
-              pending={pending}
-              sending={answering}
-              onAnswer={(invocation, values) => void answer(invocation, values)}
-            />
-          ) : tab === "source" ? (
+          {tab === "source" ? (
             <OmarEditor
               source={source}
               filename={filename}
@@ -773,6 +760,17 @@ export function Studio({
         </aside>
         ) : null}
       </section>
+
+      {panelAgent && snapshot ? (
+        <PortPanel
+          agent={panelAgent}
+          snapshot={snapshot}
+          pending={pending.filter((item) => item.agent === panelAgent)}
+          sending={answering}
+          onAnswer={(invocation, values) => void answer(invocation, values)}
+          onClose={() => setPanelAgent(null)}
+        />
+      ) : null}
 
       {terminalAgent ? (
         <AgentTerminal

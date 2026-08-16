@@ -398,7 +398,10 @@ export async function startFakeServe({
       .filter((reaction) => web.has(reaction.agent))
       .map((reaction) => ({
         invocation_id: `inv-${reaction.id}`,
-        agent: reaction.agent,
+        // The name, not the id: that is what the daemon sends, because the
+        // invocation protocol addresses an agent by the name the program
+        // gave it.
+        agent: snapshot.agents.find((a) => a.id === reaction.agent)?.name ?? reaction.agent,
         reaction: reaction.id,
         contract: reaction.contract,
         prompt: `Answer for ${reaction.name}.`,

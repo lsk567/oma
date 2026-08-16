@@ -910,6 +910,20 @@ h2 {
   stroke-linejoin: round;
 }
 
+/* A web-backed reaction is the one thing on the canvas a person can answer, so
+   it is the one thing drawn as reachable. Sky blue rather than the purple the
+   diagram uses for selection and firing: this is a property of the component,
+   not a thing that just happened to it. */
+.omar-reaction.web .omar-reaction-body {
+  stroke: #38bdf8;
+  stroke-width: 1.8;
+}
+
+.omar-reaction.web .omar-reaction-badge {
+  fill: #38bdf8;
+}
+
+
 .omar-reaction-badge {
   fill: #ffffff;
   stroke: #b3b1b8;
@@ -1256,12 +1270,78 @@ h2 {
   margin-bottom: 0;
 }
 
-/* Ports: what the run has said, and what it is waiting to be told. */
+/* One web component's panel, opened from the diagram rather than docked. A
+   program may declare several web agents with different interfaces, so this is
+   scoped to one and says whose it is. Not full-window like a terminal: the
+   diagram behind it is the context for what is being answered. */
+.port-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: rgba(6, 6, 9, 0.72);
+}
+
 .port-panel {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 92vw);
+  max-height: 84vh;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+.port-panel-head {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.port-panel-head h2 {
+  margin: 3px 0 0;
+  font-size: 15px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.port-panel-close {
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 10px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.port-panel-close:hover {
+  color: var(--text);
+  border-color: var(--purple);
+}
+
+.port-panel-body {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 14px;
+  padding: 14px 18px 18px;
+}
+
+.port-panel-idle {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.port-list + .port-list {
+  margin-top: 14px;
 }
 
 /* An invocation owed comes first: it is the only part with a deadline. */
