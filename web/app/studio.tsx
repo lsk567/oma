@@ -5,7 +5,7 @@ import { ChatMessage as ChatMessageView } from "./chat-message";
 import { AgentTerminal } from "./agent-terminal";
 import { BackendMenu } from "./backend-menu";
 import { DiagramCanvas } from "./diagram/diagram-canvas";
-import { OmarSource } from "./omar-source";
+import { OmarEditor } from "./omar-source";
 import { PortPanel } from "./port-panel";
 import { Resizer } from "./resizer";
 import { Waiting } from "./waiting";
@@ -29,6 +29,7 @@ import {
 import {
   answerPanel,
   ASSISTANT,
+  checkProgram,
   checkServeHealth,
   diagramUrlFor,
   fetchDiagram,
@@ -88,6 +89,14 @@ export function Studio({
     isDemo ? reviewWorkflow : null,
   );
   const [source, setSource] = useState(isDemo ? reviewProgram : "");
+  /** What the program is called. Named for the team it declares until the
+      operator says otherwise. */
+  const [filename, setFilename] = useState(
+    isDemo ? `${reviewWorkflow.team}.omar` : "program.omar",
+  );
+  /** What the compiler said about the source as it stands. */
+  const [sourceErrors, setSourceErrors] = useState<string[]>([]);
+  const [checking, setChecking] = useState(false);
   // Chat gets the whole width until there is a design to look at. The operator
   // can flip back and forth once there is.
   const [tab, setTab] = useState<"source" | "events" | "ports">("source");
@@ -173,6 +182,8 @@ export function Studio({
         setConfirming(false);
         setDesign(message.design);
         setSource(message.design.program);
+        setSourceErrors([]);
+        setFilename(`${message.design.preview.team}.omar`);
         // Show the proposed topology, not whatever was on screen before.
         setSnapshot(message.design.preview);
         if (!arrangedRef.current) {
@@ -335,8 +346,10 @@ export function Studio({
     setPhase("spawning");
     setError("");
     try {
+      // The source, not the design: the operator may have edited it, and what
+      // they are looking at is what they are deploying.
       const record = await startRun(serveUrl, {
-        program: design.program,
+        program: source,
         inputs: design.inputs,
       });
       setSnapshot((current) => (current ? { ...current, team: record.team } : current));
@@ -370,6 +383,8 @@ export function Studio({
     // leaving the topology on screen implies a design is still in play.
     setSnapshot(isDemo ? reviewWorkflow : null);
     setSource(isDemo ? reviewProgram : "");
+    setFilename(isDemo ? `${reviewWorkflow.team}.omar` : "program.omar");
+    setSourceErrors([]);
     arrangedRef.current = isDemo;
     setPhase("idle");
     setError("");
@@ -384,6 +399,35 @@ export function Studio({
   // messages, which told an operator nothing they wanted to know.
   const lag = typeof snapshot?.lag === "number" ? formatDuration(snapshot.lag) : "—";
   const canRun = daemon.state === "live";
+  // The compiler answers on every pause in typing. Debounced because a check
+  // compiles a real program on disk, and aborted on the next keystroke so a
+  // stale answer cannot land after a newer one.
+  useEffect(() => {
+    const abort = new AbortController();
+    const timer = setTimeout(() => {
+      // Nothing to check against, or nothing to check: clear rather than leave
+      // an error standing for text that is gone.
+      if (!canRun || source.trim() === "") {
+        setSourceErrors([]);
+        return;
+      }
+      setChecking(true);
+      checkProgram(serveUrl, source, filename, abort.signal)
+        .then((result) => setSourceErrors(result.ok ? [] : (result.errors ?? [])))
+        .catch((cause) => {
+          if (abort.signal.aborted) return;
+          setSourceErrors([cause instanceof Error ? cause.message : String(cause)]);
+        })
+        .finally(() => {
+          if (!abort.signal.aborted) setChecking(false);
+        });
+    }, 400);
+    return () => {
+      clearTimeout(timer);
+      abort.abort();
+    };
+  }, [source, filename, serveUrl, canRun]);
+
   const isDeployed = run !== null;
 
   // Widths are clamped against the workspace so the diagram always keeps a
@@ -703,13 +747,15 @@ export function Studio({
               onAnswer={(invocation, values) => void answer(invocation, values)}
             />
           ) : tab === "source" ? (
-            <>
-              <div className="source-title">
-                <span>{`${snapshot.team}.omar`}</span>
-                <span>{run ? run.status : "draft"}</span>
-              </div>
-              <OmarSource source={source} />
-            </>
+            <OmarEditor
+              source={source}
+              filename={filename}
+              status={run ? run.status : "draft"}
+              errors={sourceErrors}
+              checking={checking}
+              onSourceChange={setSource}
+              onFilenameChange={setFilename}
+            />
           ) : (
             <div className="event-strip" role="tabpanel">
               {events.length ? (

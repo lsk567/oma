@@ -174,6 +174,40 @@ export async function startRun(
   return assertRunRecord(await response.json());
 }
 
+/** What the compiler says about a program nobody has deployed. */
+export type ProgramCheck = {
+  ok: boolean;
+  team?: string;
+  /** A diagnostic: a program that closes its loop reports none. */
+  open_inputs?: string[];
+  errors?: string[];
+};
+
+/**
+ * Compile a program without running it.
+ *
+ * The same compiler and verifier a deploy would use, so a program that passes
+ * here is not refused a moment later.
+ */
+export async function checkProgram(
+  serveUrl: string,
+  program: string,
+  filename: string,
+  signal?: AbortSignal,
+): Promise<ProgramCheck> {
+  const base = normalizeRuntimeUrl(serveUrl);
+  const response = await fetch(`${base}/v1/programs/check`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ program, filename }),
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+  return (await response.json()) as ProgramCheck;
+}
+
 /**
  * What the run's web agents are waiting on.
  *

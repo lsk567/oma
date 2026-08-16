@@ -1392,6 +1392,27 @@ fn spawn_topology_agents(
     Ok(())
 }
 
+/// Input ports nothing inside the topology writes to.
+///
+/// Reported by `/v1/programs/check` as a diagnostic, not as something to set: a
+/// program that closes its loop has none, and one that has some has a port
+/// nothing will ever drive. Naming them while the operator is still editing is
+/// cheaper than discovering it from a run that sits still.
+pub fn open_inputs(state: &VmState) -> Vec<String> {
+    state
+        .ports
+        .iter()
+        .filter(|(name, port)| {
+            port.kind == PortKind::Input
+                && !state
+                    .connections
+                    .iter()
+                    .any(|connection| connection.target == **name)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 pub fn parse_inputs(state: &VmState, raw_inputs: &[String]) -> Result<BTreeMap<String, Value>> {
     let mut inputs = BTreeMap::new();
     for raw in raw_inputs {
