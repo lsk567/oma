@@ -1531,7 +1531,10 @@ mod tests {
             "/v1/runs/nope/panel",
             Some("not json"),
         );
-        assert!(response.starts_with("HTTP/1.1 400 Bad Request"), "{response}");
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "{response}"
+        );
         assert!(response.contains("invalid request"), "{response}");
     }
 

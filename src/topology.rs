@@ -1543,8 +1543,15 @@ fn run_event_loop_observed<E: ReactionExecutor>(
             .insert(name.clone(), json!(timer.offset));
     }
     let mut outputs = BTreeMap::new();
-    let mut steps = 0usize;
 
+    // No bound on how many tags a run may pass through. A graph cycle is not a
+    // causality loop here: every zero-delay hop advances the microstep, so a
+    // loop is a walk through superdense time rather than a knot to be untied.
+    // What used to be a runaway guard mostly cut long-lived programs short —
+    // and silently reported success when it did.
+    //
+    // The real limits are the two `checked_add`s in `Tag::advance`, which end a
+    // run that exhausts u64 rather than wrapping it into the past.
     while let Some((tag, events)) = queue.pop_first() {
         let due = Duration::from_nanos(tag.timestamp);
         if pace == Pace::RealTime {
@@ -1561,16 +1568,6 @@ fn run_event_loop_observed<E: ReactionExecutor>(
         // whether a program is keeping the promise its delays make.
         let lag = origin.elapsed().saturating_sub(due).as_nanos() as u64;
         observer.tag_advanced(tag.timestamp, tag.microstep, lag, &events);
-        steps += 1;
-        if steps > 1024 {
-            // A periodic timer re-arms forever by design, so for those this is
-            // the end of the run rather than a fault: stop with what the
-            // program has produced so far.
-            if state.timers.values().any(|timer| timer.period > 0) {
-                return Ok(outputs);
-            }
-            bail!("topology exceeded 1024 logical tags");
-        }
         for (name, timer) in &state.timers {
             if timer.period > 0 && events.contains_key(name) {
                 let next = tag
@@ -2811,6 +2808,12 @@ mod tests {
     /// be read off the run rather than inferred from its outputs.
     struct TimerExecutor {
         fired: Mutex<Vec<u64>>,
+        /// Firings after which this executor stops the run.
+        ///
+        /// A periodic timer has no end of its own, so something has to say
+        /// when. It used to be the tag cap, which stopped every run at 1024
+        /// whether or not that was the program's intent.
+        stop_after: usize,
     }
 
     impl ReactionExecutor for TimerExecutor {
@@ -2821,7 +2824,14 @@ mod tests {
                 .next()
                 .and_then(Value::as_u64)
                 .expect("a timer carries the time it fired at");
-            self.fired.lock().unwrap().push(at);
+            let count = {
+                let mut fired = self.fired.lock().unwrap();
+                fired.push(at);
+                fired.len()
+            };
+            if self.stop_after > 0 && count >= self.stop_after {
+                bail!("enough");
+            }
             let writes = BTreeMap::from([("note".into(), json!("tick"))]);
             validate_contract(&invocation.contract, &writes)?;
             Ok(writes)
@@ -2847,10 +2857,104 @@ mod tests {
     }
 
     #[test]
+    fn exhausting_a_tag_field_ends_the_run_rather_than_wrapping_it() {
+        // With no cap on tags, these two are the only limits left. Wrapping
+        // either would put an event in the run's own past, where the queue
+        // would hand it back before things that already happened.
+        let last_microstep = Tag {
+            timestamp: 7,
+            microstep: u64::MAX,
+        };
+        let error = last_microstep.advance(0).unwrap_err().to_string();
+        assert!(error.contains("microstep overflow"), "{error}");
+
+        let last_timestamp = Tag {
+            timestamp: u64::MAX,
+            microstep: 0,
+        };
+        let error = last_timestamp.advance(1).unwrap_err().to_string();
+        assert!(error.contains("timestamp overflow"), "{error}");
+
+        // And one short of each still advances, so the guard is at the edge
+        // rather than a step inside it.
+        assert_eq!(
+            Tag {
+                timestamp: 7,
+                microstep: u64::MAX - 1,
+            }
+            .advance(0)
+            .unwrap(),
+            Tag {
+                timestamp: 7,
+                microstep: u64::MAX,
+            }
+        );
+    }
+
+    #[test]
+    fn a_zero_delay_loop_runs_past_where_the_tag_cap_used_to_be() {
+        // A graph cycle is not a causality loop: every zero-delay hop advances
+        // the microstep, so this is a walk through superdense time. It used to
+        // be cut off at 1024 tags with an error; now it ends when the work
+        // says so.
+        let bytecode: Bytecode = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Loop",
+              "instructions": [
+                {"op":"begin_plan","team":"Loop"},
+                {"op":"spawn_agent","name":"counter","backend":"Codex"},
+                {"op":"define_port","kind":"input","name":"start","type":"int"},
+                {"op":"define_port","kind":"action","name":"next","type":"int"},
+                {"op":"define_port","kind":"output","name":"result","type":"int"},
+                {"op":"install_reaction","id":"reaction.0","agent":"counter",
+                 "triggers":["start","next"],"effects":["next","result"],
+                 "contract":"( next | result )","prompt":"p"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let state = verify(&bytecode).unwrap();
+
+        /// Feeds itself until it has gone well past the old bound, then exits
+        /// through the other alternative of its contract.
+        struct Spinner {
+            seen: Mutex<u64>,
+        }
+        impl ReactionExecutor for Spinner {
+            fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+                let mut seen = self.seen.lock().unwrap();
+                *seen += 1;
+                let writes = if *seen >= 4096 {
+                    BTreeMap::from([("result".to_string(), json!(*seen))])
+                } else {
+                    BTreeMap::from([("next".to_string(), json!(*seen))])
+                };
+                validate_contract(&invocation.contract, &writes)?;
+                Ok(writes)
+            }
+        }
+
+        let executor = Spinner {
+            seen: Mutex::new(0),
+        };
+        let outputs = run_event_loop(
+            &state,
+            BTreeMap::from([("start".to_string(), json!(0))]),
+            &executor,
+        )
+        .unwrap();
+        assert_eq!(outputs["result"], json!(4096));
+    }
+
+    #[test]
     fn a_timer_with_no_period_fires_once_at_its_offset() {
         let state = verify(&timer_bytecode(3, 0)).unwrap();
         let executor = TimerExecutor {
             fired: Mutex::new(Vec::new()),
+            // A one-shot ends on its own; nothing has to stop it.
+            stop_after: 0,
         };
 
         let outputs = run_event_loop(&state, BTreeMap::new(), &executor).unwrap();
@@ -2865,20 +2969,21 @@ mod tests {
         let state = verify(&timer_bytecode(0, 10)).unwrap();
         let executor = TimerExecutor {
             fired: Mutex::new(Vec::new()),
+            // Well past the 1024 tags that used to end every run, so this also
+            // says the bound is gone rather than merely raised.
+            stop_after: 1500,
         };
 
-        // A periodic timer never stops on its own, so the run ends at the tag
-        // cap rather than failing: what it produced up to then still stands.
-        let outputs = run_event_loop(&state, BTreeMap::new(), &executor).unwrap();
+        // A periodic timer has no end of its own. Nothing in the runtime
+        // invents one, so it runs until the work does something about it.
+        let error = run_event_loop(&state, BTreeMap::new(), &executor).unwrap_err();
+        assert!(error.to_string().contains("enough"), "{error}");
 
         let fired = executor.fired.lock().unwrap().clone();
         assert_eq!(&fired[..4], &[0, 10, 20, 30], "fired at {fired:?}");
-        assert!(
-            fired.len() > 100,
-            "a periodic timer keeps going: {}",
-            fired.len()
-        );
-        assert_eq!(outputs, BTreeMap::from([("note".into(), json!("tick"))]));
+        assert_eq!(fired.len(), 1500, "kept its period the whole way");
+        // Every firing is one period on from the last, all the way out.
+        assert_eq!(*fired.last().unwrap(), 10 * 1499);
     }
 
     #[test]
