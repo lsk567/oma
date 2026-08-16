@@ -25,6 +25,9 @@ def topologyCases : Array TopologyCase := #[
     reactions := 1, instructions := 23 },
   { file := "BusinessLoop.omar", team := "BusinessLoop", agents := 8,
     ports := 20, reactions := 11, instructions := 42 },
+  -- `main WithinTest` names the program, so the team is not the file stem.
+  { file := "DeadlineProbe.omar", team := "WithinTest", agents := 3, ports := 3,
+    reactions := 3, instructions := 13, codexOnly := false },
   { file := "EffectContracts.omar", team := "EffectContracts", agents := 1, ports := 6,
     reactions := 3, instructions := 13 },
   { file := "FanOutFanIn.omar", team := "FanOutFanIn", agents := 4, ports := 5,
@@ -112,6 +115,21 @@ def testTopology (test : TopologyCase) : IO Unit := do
     assertEqual "ring is wired head to tail"
       (program.connections.map fun connection => s!"{connection.source}->{connection.target}")
       #["n1.out->n2.token", "n2.out->n3.token", "n3.out->n1.token"]
+  if test.file == "DeadlineProbe.omar" then
+    -- `codexOnly` is off, so the backend is pinned here instead of skipped.
+    assertEqual "every agent runs on Claude Code"
+      (program.agents.all (·.backend == "ClaudeCode")) true
+    -- Nanoseconds, and only on the reactions that asked for one.
+    assertEqual "generous deadline"
+      (program.reactions.any (·.within == some 600000000000)) true
+    assertEqual "1ms deadline"
+      (program.reactions.any (·.within == some 1000000)) true
+    assertEqual "no deadline on the reporter"
+      (program.reactions.any (·.within == none)) true
+    -- The optional contract is what turns expiry into a completed tag rather
+    -- than a failed run, so it has to survive instantiation.
+    assertEqual "expiry-absorbing contract"
+      (program.reactions.any (·.contract == "probe.missed ?")) true
   if test.file == "SuperdenseTime.omar" then
     -- Names are instance-qualified now that every program instantiates.
     assertEqual "fixed action delay"

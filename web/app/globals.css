@@ -801,6 +801,29 @@ h2 {
   font-weight: 600;
 }
 
+/* A `within` deadline: a stopwatch, not a clock. A timer fires on its own; this
+   counts down against work already running, and red because reaching zero is a
+   thing the operator wants to notice. */
+.omar-within-face {
+  fill: #fff5f5;
+  stroke: #c0392b;
+  stroke-width: 1.4;
+}
+
+.omar-within-crown,
+.omar-within-hand {
+  stroke: #c0392b;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+.omar-within-meta {
+  fill: #c0392b;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 /* Timers: a clock face, because nothing feeds one — it fires on its own. */
 .omar-timer-face {
   fill: #ffffff;

@@ -151,6 +151,37 @@ test("the run header reports how far behind it is, in readable units", async ({
   await expect(stats).toContainText("LAG");
 });
 
+test("a reaction's deadline is drawn as a stopwatch on its chevron", async ({
+  page,
+}) => {
+  await useFakeServe(page);
+  await draftUntilProposed(page);
+  await expect(page.locator(".omar-reaction")).toHaveCount(3);
+
+  // One reaction in the captured topology declares `within(5min)`; the other
+  // two are bounded only by the run and carry nothing.
+  const deadlines = page.locator(".omar-within");
+  await expect(deadlines).toHaveCount(1);
+  await expect(deadlines.locator(".omar-within-face")).toBeVisible();
+  // The crown is what tells a stopwatch from the clock a timer already uses.
+  // Attached rather than visible: it is a vertical line, so its bounding box
+  // has no width and Playwright counts that as hidden.
+  await expect(deadlines.locator(".omar-within-crown")).toBeAttached();
+  // 300000000000ns divides exactly into five minutes, so that is the unit it
+  // reads in — not 300s, and not the digits.
+  await expect(deadlines.locator(".omar-within-meta")).toHaveText("5min");
+  await expect(deadlines.locator("title")).toHaveText(
+    "must answer within 5min",
+  );
+
+  // The chevron widens for it rather than the stopwatch landing on the name.
+  const marked = page.locator(".omar-reaction", { has: deadlines });
+  const plain = page.locator(".omar-reaction").first();
+  const markedBox = (await marked.locator("polygon").boundingBox())!;
+  const plainBox = (await plain.locator("polygon").boundingBox())!;
+  expect(markedBox.width).toBeGreaterThan(plainBox.width);
+});
+
 test("Enter sends, modified Enter writes a new line", async ({ page }) => {
   await useFakeServe(page);
   const composer = page.getByLabel("Describe a workflow");

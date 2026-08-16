@@ -69,6 +69,11 @@ export type DiagramReaction = {
   status: "idle" | "running" | "completed";
   invocation_id: string | null;
   instance: string;
+  /**
+   * Nanoseconds this reaction gave itself with `within`, or null for one
+   * bounded only by the run. Null also for a runtime that predates the field.
+   */
+  within: number | null;
 };
 
 /**
@@ -266,6 +271,14 @@ export function assertDiagramSnapshot(value: unknown): DiagramSnapshot {
     // A runtime that does not measure lag is not a runtime with no lag, so
     // this stays null and the readout says so rather than claiming zero.
     lag: typeof snapshot.lag === "number" ? snapshot.lag : null,
+    // Likewise `within`: a reaction that declares no deadline, and one from a
+    // runtime that predates them, both arrive without the field. The type says
+    // `number | null`, so make that true rather than leaving `undefined` for
+    // every reader to guard against.
+    reactions: (snapshot.reactions ?? []).map((reaction) => ({
+      ...reaction,
+      within: typeof reaction.within === "number" ? reaction.within : null,
+    })),
   } as DiagramSnapshot;
 }
 

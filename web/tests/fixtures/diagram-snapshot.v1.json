@@ -98,7 +98,8 @@
       "contract": "critique",
       "status": "idle",
       "invocation_id": null,
-      "instance": "flow"
+      "instance": "flow",
+      "within": 300000000000
     },
     {
       "id": "reaction::flow.reaction.2",
