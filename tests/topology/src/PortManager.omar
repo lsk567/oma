@@ -1,4 +1,5 @@
-// The `web` backend, and the smallest thing the port manager panel can drive.
+// The `web` backend, and the smallest periodic feedback loop the port manager
+// panel can drive.
 //
 // `PortManager` is an ordinary team whose agent happens to be answered by a web
 // client rather than a spawned process. Nothing is started for it: no command,
@@ -14,19 +15,30 @@
 // did not give it, which is the whole reason the operator is a component here
 // rather than a side channel into the run.
 //
+// The loop is closed, so nothing dangles: every input is fed by a connection or
+// a timer, and there is no open input for anyone to write from outside.
+//
 // Deliberately not in the release gate: a web agent waits for an answer, and
-// nothing in that harness would give one. Compiled and backend-checked like
-// every other source, never run there.
-team Gauge[sensor : Stub]
+// nothing in that harness would give one. A periodic timer also means the
+// program never finishes on its own, the same reason `Heartbeat` sits it out.
+// Compiled and backend-checked like every other source.
+team Gauge[sensor : ClaudeCode]
 {
+    // A reaction sees only what triggers it, so the setpoint has to be a
+    // trigger for the gauge to read it back.
+    input setpoint : int
     output reading : string
 
-    // One shot: the program has no open input, so something has to start it.
-    timer beat(1ns, 0)
+    timer beat(0s, 30s)
 
-    prompt sensor(beat) -> reading
+    prompt sensor(beat, setpoint) -> reading
     "
-        Set `reading` to exactly: 41
+        A monitoring tick fired at logical time $(beat). The setpoint currently
+        in force is $(setpoint); `<absent>` means none has been chosen yet.
+
+        Report the state of this machine's git working tree in one line: the
+        current branch, and how many files are modified. Set `reading` to that
+        line and nothing else.
     "
 }
 
@@ -37,10 +49,10 @@ team PortManager[panel : Web]
 
     prompt panel(reading) -> setpoint within(10min)
     "
-        The gauge reads $(reading).
+        The gauge reports: $(reading)
 
-        Set `setpoint` to the value the run should carry on with. Until you do,
-        this reaction is what the run is waiting for.
+        Set `setpoint` to how many minutes should pass before you want to be
+        asked again. It takes effect from the next tick, not this one.
     "
 }
 
@@ -49,4 +61,10 @@ main WebPanel {
     pm = PortManager()
 
     gauge.reading -> pm.reading after 0
+
+    // A period's delay, so the answer lands with the next tick rather than at
+    // the microstep after this one. Without it the setpoint would re-trigger
+    // the gauge immediately, and the pair would spin at one timestamp forever
+    // without the clock ever moving.
+    pm.setpoint -> gauge.setpoint after 30s
 }

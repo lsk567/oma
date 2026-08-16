@@ -40,9 +40,9 @@ def topologyCases : Array TopologyCase := #[
     reactions := 3, instructions := 14 },
   { file := "OrderedWrites.omar", team := "OrderedWrites", agents := 4, ports := 3,
     reactions := 4, instructions := 14 },
-  -- A `Stub` and a `Web`, so the shared backend assertion does not apply.
-  { file := "PortManager.omar", team := "WebPanel", agents := 2, ports := 3,
-    connections := 1, reactions := 2, instructions := 13, codexOnly := false },
+  -- A `ClaudeCode` and a `Web`, so the shared backend assertion does not apply.
+  { file := "PortManager.omar", team := "WebPanel", agents := 2, ports := 4,
+    connections := 2, reactions := 2, instructions := 15, codexOnly := false },
   { file := "Recurrence.omar", team := "Recurrence", agents := 1, ports := 3,
     reactions := 1, instructions := 8 },
   -- Three instances of one team, so every count is the team's times three.
@@ -124,7 +124,7 @@ def testTopology (test : TopologyCase) : IO Unit := do
     assertEqual "the panel is answered by a web client"
       (program.agents.any (fun agent => agent.name == "pm.panel" && agent.backend == "Web")) true
     assertEqual "and the gauge is not"
-      (program.agents.any (fun agent => agent.name == "gauge.sensor" && agent.backend == "Stub")) true
+      (program.agents.any (fun agent => agent.name == "gauge.sensor" && agent.backend == "ClaudeCode")) true
     -- What the panel may see and set is the wiring: an input fed by a
     -- connection, and an effect its own reaction declares.
     assertEqual "the panel's input is connected, not dangling"
@@ -133,6 +133,15 @@ def testTopology (test : TopologyCase) : IO Unit := do
       (program.reactions.any (fun r => r.effects == #["pm.setpoint"])) true
     assertEqual "and is bounded while it decides"
       (program.reactions.any (·.within == some 600000000000)) true
+    -- The feedback carries a period's delay. Without it the setpoint would
+    -- re-trigger the gauge at the next microstep and the pair would spin at one
+    -- timestamp forever, with the clock never moving.
+    assertEqual "the loop closes over a period, not a microstep"
+      (program.connections.any (fun c =>
+        c.source == "pm.setpoint" && c.target == "gauge.setpoint" &&
+        c.delay == 30000000000)) true
+    assertEqual "and the gauge reads the setpoint back"
+      (program.reactions.any (fun r => r.triggers == #["gauge.beat", "gauge.setpoint"])) true
   if test.file == "DeadlineProbe.omar" then
     -- `codexOnly` is off, so the backend is pinned here instead of skipped.
     assertEqual "every agent runs on Claude Code"
