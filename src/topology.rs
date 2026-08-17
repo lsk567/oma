@@ -2021,6 +2021,16 @@ fn run_event_loop_observed<E: ReactionExecutor>(
     let layers = precedence_layers(state)?;
 
     while let Some((tag, events)) = queue.pop_first() {
+        // A tag nothing is present at is not a moment the run passed through.
+        // No reaction can fire at one -- enabling asks whether any trigger is
+        // in `events`, which is false for every reaction when it is empty --
+        // and no connection, output or timer can move either. Announcing it
+        // would tell a client the run had advanced when nothing had. The only
+        // way to reach one is a program admitted with no inputs, which seeds
+        // the start tag with an empty map.
+        if events.is_empty() {
+            continue;
+        }
         // Everything this tag knows. It grows as the tag settles: an
         // instantaneous connection or a reaction's effect joins it rather than
         // landing on a later tag, and the reactions downstream read it before
@@ -2963,16 +2973,8 @@ mod tests {
             timestamp: u64,
             microstep: u64,
             _lag: u64,
-            ports: &BTreeMap<String, Value>,
+            _ports: &BTreeMap<String, Value>,
         ) {
-            // Only tags where something is present. The loop seeds the start
-            // tag whether or not anything was supplied, so a program with no
-            // inputs passes through an empty (0, 0) that carries no event and
-            // fires no reaction. The timeline does not draw it, and a test that
-            // counted it would be asserting an artefact rather than agreement.
-            if ports.is_empty() {
-                return;
-            }
             self.tags.lock().unwrap().push((timestamp, microstep));
         }
     }
@@ -3001,6 +3003,29 @@ mod tests {
             .iter()
             .map(|step| (step.timestamp, step.microstep))
             .collect()
+    }
+
+    #[test]
+    fn a_run_nothing_can_start_reaches_no_tag_at_all() {
+        // The counterpart to the timeline showing nothing: a tag nothing is
+        // present at is not a moment the run passed through, so the run does
+        // not announce one. It used to announce (0, 0) — the start tag, seeded
+        // whether or not anything was supplied — which told a client the run
+        // had advanced when nothing had.
+        let state = verify(&open_input_bytecode()).unwrap();
+        let observer = RunTags {
+            tags: Mutex::new(Vec::new()),
+        };
+        let outputs = run_event_loop_observed(
+            &state,
+            BTreeMap::new(),
+            &SilentExecutor,
+            &observer,
+            Pace::Fast,
+        )
+        .unwrap();
+        assert!(observer.tags.lock().unwrap().is_empty(), "announced a tag");
+        assert!(outputs.is_empty());
     }
 
     #[test]
