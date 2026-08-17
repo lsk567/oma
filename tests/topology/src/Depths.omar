@@ -1,0 +1,61 @@
+// OMAR topology integration source.
+// A watcher wired to two producers that sit at different distances from the
+// same trigger: `shallow` is one hop away, `deep` is three. Because a plain
+// connection costs nothing, both land at the tag the source wrote, and the
+// watcher runs once holding both.
+//
+// This is the program that says what the fixpoint rule buys. If a hop cost a
+// microstep, `shallow` would arrive first and wake the watcher with `deep`
+// still absent, and the watcher would report twice — once on half a picture.
+// Ordering is not something the program asks for here; it follows from the
+// wiring.
+team Source[agent : Stub]
+{
+    input go : int
+    output value : int
+
+    prompt agent(go) -> value
+    "
+        Set `value` to $(go) plus 1.
+    "
+}
+
+team Relay[agent : Stub]
+{
+    input value : int
+    output relayed : int
+
+    prompt agent(value) -> relayed
+    "
+        Set `relayed` to $(value) plus 1.
+    "
+}
+
+team Watcher[agent : Stub]
+{
+    input shallow : int
+    input deep : int
+    output verdict : int
+
+    prompt agent(shallow, deep) -> verdict
+    "
+        You were triggered once, holding both of your inputs: shallow is
+        $(shallow) and deep is $(deep). Set `verdict` to their sum.
+        Neither should read <absent>. If one does, this program fired you
+        before the other had been decided.
+    "
+}
+
+main {
+    src = Source()
+    near = Relay()
+    far = Relay()
+    watch = Watcher()
+
+    // One hop to the watcher, three hops the long way round. Neither costs
+    // anything, so both are known at the same tag.
+    src.value -> watch.shallow
+    src.value -> near.value
+    near.relayed -> far.value
+    far.relayed -> watch.deep
+}

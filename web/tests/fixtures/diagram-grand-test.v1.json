@@ -226,1050 +226,1050 @@
  "current_tag": null,
  "edges": [
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e1.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e1.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e2.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e2.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e3.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e3.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e4.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e4.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e5.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e5.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e6.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e6.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e7.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e7.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e8.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e8.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e9.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e9.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e10.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e10.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e11.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e11.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e12.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e12.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e13.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e13.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e14.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e14.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e15.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e15.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.spec::e16.spec",
    "kind": "connection",
    "source": "port::coord.spec",
    "target": "port::e16.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e1.note::g1.n1",
    "kind": "connection",
    "source": "port::e1.note",
    "target": "port::g1.n1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e2.note::g1.n2",
    "kind": "connection",
    "source": "port::e2.note",
    "target": "port::g1.n2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e3.note::g2.n1",
    "kind": "connection",
    "source": "port::e3.note",
    "target": "port::g2.n1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e4.note::g2.n2",
    "kind": "connection",
    "source": "port::e4.note",
    "target": "port::g2.n2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e5.note::g3.n1",
    "kind": "connection",
    "source": "port::e5.note",
    "target": "port::g3.n1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e6.note::g3.n2",
    "kind": "connection",
    "source": "port::e6.note",
    "target": "port::g3.n2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e7.note::g4.n1",
    "kind": "connection",
    "source": "port::e7.note",
    "target": "port::g4.n1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e8.note::g4.n2",
    "kind": "connection",
    "source": "port::e8.note",
    "target": "port::g4.n2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e9.note::g5.n1",
    "kind": "connection",
    "source": "port::e9.note",
    "target": "port::g5.n1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e10.note::g5.n2",
    "kind": "connection",
    "source": "port::e10.note",
    "target": "port::g5.n2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e11.note::g6.n1",
    "kind": "connection",
    "source": "port::e11.note",
    "target": "port::g6.n1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e12.note::g6.n2",
    "kind": "connection",
    "source": "port::e12.note",
    "target": "port::g6.n2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e13.note::g7.n1",
    "kind": "connection",
    "source": "port::e13.note",
    "target": "port::g7.n1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e14.note::g7.n2",
    "kind": "connection",
    "source": "port::e14.note",
    "target": "port::g7.n2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e15.note::g8.n1",
    "kind": "connection",
    "source": "port::e15.note",
    "target": "port::g8.n1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::e16.note::g8.n2",
    "kind": "connection",
    "source": "port::e16.note",
    "target": "port::g8.n2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::g1.digest::lead1.d1",
    "kind": "connection",
    "source": "port::g1.digest",
    "target": "port::lead1.d1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::g2.digest::lead1.d2",
    "kind": "connection",
    "source": "port::g2.digest",
    "target": "port::lead1.d2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::g3.digest::lead2.d1",
    "kind": "connection",
    "source": "port::g3.digest",
    "target": "port::lead2.d1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::g4.digest::lead2.d2",
    "kind": "connection",
    "source": "port::g4.digest",
    "target": "port::lead2.d2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::g5.digest::lead3.d1",
    "kind": "connection",
    "source": "port::g5.digest",
    "target": "port::lead3.d1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::g6.digest::lead3.d2",
    "kind": "connection",
    "source": "port::g6.digest",
    "target": "port::lead3.d2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::g7.digest::lead4.d1",
    "kind": "connection",
    "source": "port::g7.digest",
    "target": "port::lead4.d1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::g8.digest::lead4.d2",
    "kind": "connection",
    "source": "port::g8.digest",
    "target": "port::lead4.d2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::lead1.sector_view::syn.s1",
    "kind": "connection",
    "source": "port::lead1.sector_view",
    "target": "port::syn.s1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::lead2.sector_view::syn.s2",
    "kind": "connection",
    "source": "port::lead2.sector_view",
    "target": "port::syn.s2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::lead3.sector_view::syn.s3",
    "kind": "connection",
    "source": "port::lead3.sector_view",
    "target": "port::syn.s3"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::lead4.sector_view::syn.s4",
    "kind": "connection",
    "source": "port::lead4.sector_view",
    "target": "port::syn.s4"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::syn.synthesis::ax.synthesis",
    "kind": "connection",
    "source": "port::syn.synthesis",
    "target": "port::ax.synthesis"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::syn.synthesis::ay.synthesis",
    "kind": "connection",
    "source": "port::syn.synthesis",
    "target": "port::ay.synthesis"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::syn.synthesis::az.synthesis",
    "kind": "connection",
    "source": "port::syn.synthesis",
    "target": "port::az.synthesis"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::syn.synthesis::aw.synthesis",
    "kind": "connection",
    "source": "port::syn.synthesis",
    "target": "port::aw.synthesis"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::ax.finding::coord.red",
    "kind": "connection",
    "source": "port::ax.finding",
    "target": "port::coord.red"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::ay.finding::coord.blue",
    "kind": "connection",
    "source": "port::ay.finding",
    "target": "port::coord.blue"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::az.finding::coord.black",
    "kind": "connection",
    "source": "port::az.finding",
    "target": "port::coord.black"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::aw.finding::coord.yellow",
    "kind": "connection",
    "source": "port::aw.finding",
    "target": "port::coord.yellow"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::coord.report::close.report",
    "kind": "connection",
    "source": "port::coord.report",
    "target": "port::close.report"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::aw.synthesis::aw.reaction.0",
    "kind": "trigger",
    "source": "port::aw.synthesis",
    "target": "reaction::aw.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::aw.reaction.0::aw.finding",
    "kind": "effect",
    "source": "reaction::aw.reaction.0",
    "target": "port::aw.finding"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::ax.synthesis::ax.reaction.0",
    "kind": "trigger",
    "source": "port::ax.synthesis",
    "target": "reaction::ax.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::ax.reaction.0::ax.finding",
    "kind": "effect",
    "source": "reaction::ax.reaction.0",
    "target": "port::ax.finding"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::ay.synthesis::ay.reaction.0",
    "kind": "trigger",
    "source": "port::ay.synthesis",
    "target": "reaction::ay.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::ay.reaction.0::ay.finding",
    "kind": "effect",
    "source": "reaction::ay.reaction.0",
    "target": "port::ay.finding"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::az.synthesis::az.reaction.0",
    "kind": "trigger",
    "source": "port::az.synthesis",
    "target": "reaction::az.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::az.reaction.0::az.finding",
    "kind": "effect",
    "source": "reaction::az.reaction.0",
    "target": "port::az.finding"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::close.report::close.reaction.0",
    "kind": "trigger",
    "source": "port::close.report",
    "target": "reaction::close.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::close.reaction.0::close.draft",
    "kind": "effect",
    "source": "reaction::close.reaction.0",
    "target": "port::close.draft"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::close.draft::close.reaction.1",
    "kind": "trigger",
    "source": "port::close.draft",
    "target": "reaction::close.reaction.1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::close.reaction.1::close.verdict",
    "kind": "effect",
    "source": "reaction::close.reaction.1",
    "target": "port::close.verdict"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::close.draft::close.reaction.2",
    "kind": "trigger",
    "source": "port::close.draft",
    "target": "reaction::close.reaction.2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::close.verdict::close.reaction.2",
    "kind": "trigger",
    "source": "port::close.verdict",
    "target": "reaction::close.reaction.2"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::close.reaction.2::close.summary",
    "kind": "effect",
    "source": "reaction::close.reaction.2",
    "target": "port::close.summary"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::coord.topic::coord.reaction.0",
    "kind": "trigger",
    "source": "port::coord.topic",
    "target": "reaction::coord.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::coord.max_rounds::coord.reaction.0",
    "kind": "trigger",
    "source": "port::coord.max_rounds",
    "target": "reaction::coord.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::coord.reaction.0::coord.spec",
    "kind": "effect",
    "source": "reaction::coord.reaction.0",
    "target": "port::coord.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::coord.red::coord.reaction.1",
    "kind": "trigger",
    "source": "port::coord.red",
    "target": "reaction::coord.reaction.1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::coord.blue::coord.reaction.1",
    "kind": "trigger",
    "source": "port::coord.blue",
    "target": "reaction::coord.reaction.1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::coord.black::coord.reaction.1",
    "kind": "trigger",
    "source": "port::coord.black",
    "target": "reaction::coord.reaction.1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::coord.yellow::coord.reaction.1",
    "kind": "trigger",
    "source": "port::coord.yellow",
    "target": "reaction::coord.reaction.1"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::coord.reaction.1::coord.spec",
    "kind": "effect",
    "source": "reaction::coord.reaction.1",
    "target": "port::coord.spec"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::coord.reaction.1::coord.report",
    "kind": "effect",
    "source": "reaction::coord.reaction.1",
    "target": "port::coord.report"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e1.spec::e1.reaction.0",
    "kind": "trigger",
    "source": "port::e1.spec",
    "target": "reaction::e1.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e1.reaction.0::e1.note",
    "kind": "effect",
    "source": "reaction::e1.reaction.0",
    "target": "port::e1.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e10.spec::e10.reaction.0",
    "kind": "trigger",
    "source": "port::e10.spec",
    "target": "reaction::e10.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e10.reaction.0::e10.note",
    "kind": "effect",
    "source": "reaction::e10.reaction.0",
    "target": "port::e10.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e11.spec::e11.reaction.0",
    "kind": "trigger",
    "source": "port::e11.spec",
    "target": "reaction::e11.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e11.reaction.0::e11.note",
    "kind": "effect",
    "source": "reaction::e11.reaction.0",
    "target": "port::e11.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e12.spec::e12.reaction.0",
    "kind": "trigger",
    "source": "port::e12.spec",
    "target": "reaction::e12.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e12.reaction.0::e12.note",
    "kind": "effect",
    "source": "reaction::e12.reaction.0",
    "target": "port::e12.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e13.spec::e13.reaction.0",
    "kind": "trigger",
    "source": "port::e13.spec",
    "target": "reaction::e13.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e13.reaction.0::e13.note",
    "kind": "effect",
    "source": "reaction::e13.reaction.0",
    "target": "port::e13.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e14.spec::e14.reaction.0",
    "kind": "trigger",
    "source": "port::e14.spec",
    "target": "reaction::e14.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e14.reaction.0::e14.note",
    "kind": "effect",
    "source": "reaction::e14.reaction.0",
    "target": "port::e14.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e15.spec::e15.reaction.0",
    "kind": "trigger",
    "source": "port::e15.spec",
    "target": "reaction::e15.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e15.reaction.0::e15.note",
    "kind": "effect",
    "source": "reaction::e15.reaction.0",
    "target": "port::e15.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e16.spec::e16.reaction.0",
    "kind": "trigger",
    "source": "port::e16.spec",
    "target": "reaction::e16.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e16.reaction.0::e16.note",
    "kind": "effect",
    "source": "reaction::e16.reaction.0",
    "target": "port::e16.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e2.spec::e2.reaction.0",
    "kind": "trigger",
    "source": "port::e2.spec",
    "target": "reaction::e2.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e2.reaction.0::e2.note",
    "kind": "effect",
    "source": "reaction::e2.reaction.0",
    "target": "port::e2.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e3.spec::e3.reaction.0",
    "kind": "trigger",
    "source": "port::e3.spec",
    "target": "reaction::e3.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e3.reaction.0::e3.note",
    "kind": "effect",
    "source": "reaction::e3.reaction.0",
    "target": "port::e3.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e4.spec::e4.reaction.0",
    "kind": "trigger",
    "source": "port::e4.spec",
    "target": "reaction::e4.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e4.reaction.0::e4.note",
    "kind": "effect",
    "source": "reaction::e4.reaction.0",
    "target": "port::e4.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e5.spec::e5.reaction.0",
    "kind": "trigger",
    "source": "port::e5.spec",
    "target": "reaction::e5.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e5.reaction.0::e5.note",
    "kind": "effect",
    "source": "reaction::e5.reaction.0",
    "target": "port::e5.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e6.spec::e6.reaction.0",
    "kind": "trigger",
    "source": "port::e6.spec",
    "target": "reaction::e6.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e6.reaction.0::e6.note",
    "kind": "effect",
    "source": "reaction::e6.reaction.0",
    "target": "port::e6.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e7.spec::e7.reaction.0",
    "kind": "trigger",
    "source": "port::e7.spec",
    "target": "reaction::e7.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e7.reaction.0::e7.note",
    "kind": "effect",
    "source": "reaction::e7.reaction.0",
    "target": "port::e7.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e8.spec::e8.reaction.0",
    "kind": "trigger",
    "source": "port::e8.spec",
    "target": "reaction::e8.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e8.reaction.0::e8.note",
    "kind": "effect",
    "source": "reaction::e8.reaction.0",
    "target": "port::e8.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::e9.spec::e9.reaction.0",
    "kind": "trigger",
    "source": "port::e9.spec",
    "target": "reaction::e9.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::e9.reaction.0::e9.note",
    "kind": "effect",
    "source": "reaction::e9.reaction.0",
    "target": "port::e9.note"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g1.n1::g1.reaction.0",
    "kind": "trigger",
    "source": "port::g1.n1",
    "target": "reaction::g1.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g1.n2::g1.reaction.0",
    "kind": "trigger",
    "source": "port::g1.n2",
    "target": "reaction::g1.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::g1.reaction.0::g1.digest",
    "kind": "effect",
    "source": "reaction::g1.reaction.0",
    "target": "port::g1.digest"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g2.n1::g2.reaction.0",
    "kind": "trigger",
    "source": "port::g2.n1",
    "target": "reaction::g2.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g2.n2::g2.reaction.0",
    "kind": "trigger",
    "source": "port::g2.n2",
    "target": "reaction::g2.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::g2.reaction.0::g2.digest",
    "kind": "effect",
    "source": "reaction::g2.reaction.0",
    "target": "port::g2.digest"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g3.n1::g3.reaction.0",
    "kind": "trigger",
    "source": "port::g3.n1",
    "target": "reaction::g3.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g3.n2::g3.reaction.0",
    "kind": "trigger",
    "source": "port::g3.n2",
    "target": "reaction::g3.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::g3.reaction.0::g3.digest",
    "kind": "effect",
    "source": "reaction::g3.reaction.0",
    "target": "port::g3.digest"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g4.n1::g4.reaction.0",
    "kind": "trigger",
    "source": "port::g4.n1",
    "target": "reaction::g4.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g4.n2::g4.reaction.0",
    "kind": "trigger",
    "source": "port::g4.n2",
    "target": "reaction::g4.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::g4.reaction.0::g4.digest",
    "kind": "effect",
    "source": "reaction::g4.reaction.0",
    "target": "port::g4.digest"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g5.n1::g5.reaction.0",
    "kind": "trigger",
    "source": "port::g5.n1",
    "target": "reaction::g5.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g5.n2::g5.reaction.0",
    "kind": "trigger",
    "source": "port::g5.n2",
    "target": "reaction::g5.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::g5.reaction.0::g5.digest",
    "kind": "effect",
    "source": "reaction::g5.reaction.0",
    "target": "port::g5.digest"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g6.n1::g6.reaction.0",
    "kind": "trigger",
    "source": "port::g6.n1",
    "target": "reaction::g6.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g6.n2::g6.reaction.0",
    "kind": "trigger",
    "source": "port::g6.n2",
    "target": "reaction::g6.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::g6.reaction.0::g6.digest",
    "kind": "effect",
    "source": "reaction::g6.reaction.0",
    "target": "port::g6.digest"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g7.n1::g7.reaction.0",
    "kind": "trigger",
    "source": "port::g7.n1",
    "target": "reaction::g7.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g7.n2::g7.reaction.0",
    "kind": "trigger",
    "source": "port::g7.n2",
    "target": "reaction::g7.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::g7.reaction.0::g7.digest",
    "kind": "effect",
    "source": "reaction::g7.reaction.0",
    "target": "port::g7.digest"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g8.n1::g8.reaction.0",
    "kind": "trigger",
    "source": "port::g8.n1",
    "target": "reaction::g8.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::g8.n2::g8.reaction.0",
    "kind": "trigger",
    "source": "port::g8.n2",
    "target": "reaction::g8.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::g8.reaction.0::g8.digest",
    "kind": "effect",
    "source": "reaction::g8.reaction.0",
    "target": "port::g8.digest"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::lead1.d1::lead1.reaction.0",
    "kind": "trigger",
    "source": "port::lead1.d1",
    "target": "reaction::lead1.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::lead1.d2::lead1.reaction.0",
    "kind": "trigger",
    "source": "port::lead1.d2",
    "target": "reaction::lead1.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::lead1.reaction.0::lead1.sector_view",
    "kind": "effect",
    "source": "reaction::lead1.reaction.0",
    "target": "port::lead1.sector_view"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::lead2.d1::lead2.reaction.0",
    "kind": "trigger",
    "source": "port::lead2.d1",
    "target": "reaction::lead2.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::lead2.d2::lead2.reaction.0",
    "kind": "trigger",
    "source": "port::lead2.d2",
    "target": "reaction::lead2.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::lead2.reaction.0::lead2.sector_view",
    "kind": "effect",
    "source": "reaction::lead2.reaction.0",
    "target": "port::lead2.sector_view"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::lead3.d1::lead3.reaction.0",
    "kind": "trigger",
    "source": "port::lead3.d1",
    "target": "reaction::lead3.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::lead3.d2::lead3.reaction.0",
    "kind": "trigger",
    "source": "port::lead3.d2",
    "target": "reaction::lead3.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::lead3.reaction.0::lead3.sector_view",
    "kind": "effect",
    "source": "reaction::lead3.reaction.0",
    "target": "port::lead3.sector_view"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::lead4.d1::lead4.reaction.0",
    "kind": "trigger",
    "source": "port::lead4.d1",
    "target": "reaction::lead4.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::lead4.d2::lead4.reaction.0",
    "kind": "trigger",
    "source": "port::lead4.d2",
    "target": "reaction::lead4.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::lead4.reaction.0::lead4.sector_view",
    "kind": "effect",
    "source": "reaction::lead4.reaction.0",
    "target": "port::lead4.sector_view"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::syn.s1::syn.reaction.0",
    "kind": "trigger",
    "source": "port::syn.s1",
    "target": "reaction::syn.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::syn.s2::syn.reaction.0",
    "kind": "trigger",
    "source": "port::syn.s2",
    "target": "reaction::syn.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::syn.s3::syn.reaction.0",
    "kind": "trigger",
    "source": "port::syn.s3",
    "target": "reaction::syn.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::syn.s4::syn.reaction.0",
    "kind": "trigger",
    "source": "port::syn.s4",
    "target": "reaction::syn.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::syn.reaction.0::syn.synthesis",
    "kind": "effect",
    "source": "reaction::syn.reaction.0",

@@ -26,7 +26,7 @@ output      = "output", identifier, ":", type ;
 action      = "action", identifier, [ "(", "delay", "=", delay, ")" ],
               [ ":", type ] ;
 timer       = "timer", identifier, "(", delay, ",", delay, ")" ;
-connection  = identifier, "->", identifier, "after", delay ;
+connection  = identifier, "->", identifier, [ "after", delay ] ;
 
 prompt      = "prompt", identifier, "(", triggers, ")",
               "->", effects, [ deadline ], prompt-string ;
@@ -58,8 +58,12 @@ delimits a block comment.
 - An action without a type is a signal carrying no value.
 - `action a(delay=2ms) : int` gives `a` a fixed logical delay of two
   milliseconds.
-- `a -> b after 3s` copies each value present on `a` to `b` with an additional
-  logical delay of three seconds.
+- `a -> b` copies each value present on `a` to `b` at the same tag. A plain
+  connection costs nothing, so a reaction reading `b` sees the value in the tag
+  it was written.
+- `a -> b after 0` copies it one microstep later. No time passes, but the tag
+  moves, which is what lets a cycle close.
+- `a -> b after 3s` copies it three seconds later.
 - `timer t(1s, 500ms)` fires at one second and every five hundred milliseconds
   after that. A period of `0` fires once, at the offset.
 - `prompt agent(a, b)` declares a reaction on `agent` triggered when port `a`
@@ -120,8 +124,10 @@ know from elsewhere.
 `m` is rejected as ambiguous: `min` is minutes, `ms` is milliseconds, and the
 two differ by one character and five orders of magnitude.
 
-Zero is the one exception. `after 0` is the same instant in every unit, so it
-needs none — though `0ms` is also accepted and means the same thing.
+Zero is the one exception. `after 0` names no span of time, so it needs no unit
+— though `0ms` is also accepted and means the same thing. It is not the same as
+writing no `after` at all: `after 0` buys a microstep, and omitting it buys
+nothing. See §4.
 
 A unit binds to the number it touches. `after 3ns` is one duration; `after 3`
 followed by a declaration beginning with a word is a delay and then that
@@ -136,7 +142,7 @@ The compiler produces a canonical topology containing:
 team
 agents
 typed ports
-delayed port connections
+port connections
 prompt reactions in declaration order
 ```
 
@@ -169,33 +175,53 @@ event = (tag, flow, port, value)
 ```
 
 Logical time is a nonnegative integer timestamp in nanoseconds. External inputs
-begin at `(0, 0)`. Scheduling uses the following rules:
+begin at `(0, 0)`. Every hop costs one of three things:
 
-- An effect written to a port without a fixed delay at `(t, m)` is enqueued at
-  `(t, m + 1)`.
-- An effect written to `action a(delay=D)` with `D > 0` is enqueued at
-  `(t + D, 0)`.
-- A connection `a -> b after X` schedules `b` with logical delay `X`.
-- If `b` is an action with fixed delay `D`, connection and action delays are
-  additive: `b` is scheduled at `(t + X + D, 0)`.
-- A total logical delay of zero schedules the value at `(t, m + 1)`.
+- **Nothing.** An effect written to an `input` or `output` port, and a plain
+  connection `a -> b`, land at the tag they were written. The value is readable
+  by the rest of that tag.
+- **A microstep.** An effect written to `action a` with no fixed delay, and a
+  connection written `after 0`, land at `(t, m + 1)`. No time passes.
+- **Time.** `action a(delay=D)` with `D > 0`, and `a -> b after X` with
+  `X > 0`, land at `(t + D + X, 0)`. Connection and action delays are additive,
+  and a microstep anywhere in the pair costs one microstep.
 
-Thus, zero-delay causality advances the microstep while positive logical delay
-advances the timestamp and resets the microstep, matching LF-style superdense
-time.
+This is Lingua Franca's rule: ports do not introduce delays. What a tag decides,
+it decides completely.
 
-At each tag, the runtime:
+### 4.0 Fixpoint at a tag
 
-1. pops all events at that tag;
-2. validates and groups values by flow and port;
-3. enables prompts with at least one declared trigger present for the flow;
-4. builds an invocation dependency DAG;
-5. executes the DAG;
-6. waits for every invocation at the tag to complete; and
-7. atomically enqueues resulting effects and connected values at their
-   calculated superdense tags.
+A reaction fires at most once per tag, and only once the presence of every one
+of its triggers is decided. Ordering is not something a program asks for; it
+follows from the wiring.
 
-The runtime advances only after the global tag barrier closes.
+Reaction `A` must precede `B` when:
+
+- `A` writes a port that reaches one of `B`'s triggers over hops that cost
+  nothing; or
+- both write a port in common, and `A` is declared first; or
+- both run on the same agent, and `A` is declared first.
+
+Those constraints form a graph. A cycle in it is a **causality loop**: every
+reaction on the cycle would have to run before itself, and no order exists. The
+runtime rejects such a program before it runs rather than picking an order.
+Breaking a loop means saying what it costs to go round — an action, or a
+connection written `after 0`.
+
+A program without a loop has a topological order, and the runtime walks it once
+per tag:
+
+1. pop every event at the tag;
+2. carry each connection whose source is present, instantaneous hops joining
+   the tag and the rest going on the queue;
+3. take the next group of reactions that need not follow each other, and invoke
+   those with a trigger present;
+4. wait for that group, then merge its effects — instantaneous ones join the
+   tag, so reactions further down read them — and carry connections again;
+5. repeat from 3 until the order is exhausted.
+
+The tag is over when nothing further can fire. Its outputs are what its ports
+hold then.
 
 ### 4.0 Pace
 
@@ -210,8 +236,7 @@ Being late is not a reason to be later. How late is a separate question, and one
 the language does not yet ask.
 
 Microsteps carry no time. Every tag at the same timestamp is due at the same
-moment, which is what makes zero-delay causality instantaneous rather than
-merely fast.
+moment, which is what makes a microstep a step in order rather than in time.
 
 `--fast` runs the same program as quickly as the work allows. Tags, ordering
 and outputs are identical; only the waiting is skipped. It is what a test wants
@@ -219,17 +244,13 @@ and what a program's meaning must not depend on.
 
 ### 4.1 Invocation DAG
 
-Each enabled prompt invocation is a DAG vertex. Add an edge `A -> B` when:
+The precedence graph of §4.0 is the invocation DAG. It is a property of the
+wiring, computed once, and the same at every tag; what changes from tag to tag
+is only which of its vertices have a trigger present.
 
-- `A` is declared before `B`; and
-- both may write at least one common port.
-
-Invocations assigned to the same non-concurrent agent are also ordered by
-declaration order. Since all edges follow declaration order, the DAG is acyclic.
-
-The runtime repeatedly runs all zero-indegree vertices concurrently, waits for
-them to complete, removes them, and continues. Every firing order is therefore
-a topological ordering of the DAG.
+Two of its three edge kinds follow declaration order and so cannot cycle. The
+third — `A` writes what `B` reads — can, and that is the loop the runtime
+refuses.
 
 ### 4.2 Agent protocol
 
@@ -337,7 +358,7 @@ KILL_AGENT name
 DEFINE_PORT kind name type [delay]
 REMOVE_PORT name
 
-CONNECT_PORTS source target delay
+CONNECT_PORTS source target [delay]
 
 INSTALL_REACTION id agent triggers effects contract prompt within
 UPDATE_REACTION id triggers effects contract prompt within

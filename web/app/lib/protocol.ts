@@ -111,7 +111,12 @@ export type DiagramEdge = {
   kind: "connection" | "trigger" | "effect";
   source: string;
   target: string;
-  delay: number;
+  /**
+   * What the hop costs. Null for a plain connection, whose value is readable
+   * at the tag it was written; 0 for `after 0`, which costs a microstep; and
+   * nanoseconds above that. Trigger and effect edges are always null.
+   */
+  delay: number | null;
 };
 
 export type DiagramSnapshot = {

@@ -13,14 +13,14 @@
  },
  "edges": [
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::beacon.t::beacon.reaction.0",
    "kind": "trigger",
    "source": "timer::beacon.t",
    "target": "reaction::beacon.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::beacon.reaction.0::beacon.note",
    "kind": "effect",
    "source": "reaction::beacon.reaction.0",

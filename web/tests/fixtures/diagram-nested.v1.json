@@ -22,56 +22,56 @@
  "current_tag": null,
  "edges": [
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::run.brief::run.draft.inp",
    "kind": "connection",
    "source": "port::run.brief",
    "target": "port::run.draft.inp"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "connection::run.draft.out::run.refine.inp",
    "kind": "connection",
    "source": "port::run.draft.out",
    "target": "port::run.refine.inp"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::run.draft.inp::run.draft.reaction.0",
    "kind": "trigger",
    "source": "port::run.draft.inp",
    "target": "reaction::run.draft.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::run.draft.reaction.0::run.draft.out",
    "kind": "effect",
    "source": "reaction::run.draft.reaction.0",
    "target": "port::run.draft.out"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::run.refine.out::run.reaction.0",
    "kind": "trigger",
    "source": "port::run.refine.out",
    "target": "reaction::run.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::run.reaction.0::run.summary",
    "kind": "effect",
    "source": "reaction::run.reaction.0",
    "target": "port::run.summary"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "trigger::run.refine.inp::run.refine.reaction.0",
    "kind": "trigger",
    "source": "port::run.refine.inp",
    "target": "reaction::run.refine.reaction.0"
   },
   {
-   "delay": 0,
+   "delay": null,
    "id": "effect::run.refine.reaction.0::run.refine.out",
    "kind": "effect",
    "source": "reaction::run.refine.reaction.0",

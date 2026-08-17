@@ -69,7 +69,10 @@ pub enum Instruction {
     ConnectPorts {
         source: String,
         target: String,
-        delay: u64,
+        /// Absent for a plain connection, which is instantaneous. `Some(0)` is
+        /// `after 0` and costs a microstep; larger values are nanoseconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delay: Option<u64>,
     },
     InstallReaction {
         id: String,
@@ -143,7 +146,8 @@ pub struct TimerState {
 pub struct ConnectionState {
     pub source: String,
     pub target: String,
-    pub delay: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -513,7 +517,139 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
             Instruction::CommitPlan => committed = true,
         }
     }
+    reject_causality_loops(&state)?;
     Ok(state)
+}
+
+/// Ports a value written to `port` reaches without any logical delay.
+///
+/// A write incurs the target's own fixed delay, and a connection adds its own,
+/// so a hop is instantaneous only when both are zero. Following those hops is
+/// what says which reactions must be ordered against each other at one tag.
+fn zero_delay_reach(state: &VmState, port: &str) -> BTreeSet<String> {
+    let mut reached = BTreeSet::new();
+    if !port_delay(state, port).is_instant() {
+        return reached;
+    }
+    let mut frontier = vec![port.to_string()];
+    while let Some(name) = frontier.pop() {
+        if !reached.insert(name.clone()) {
+            continue;
+        }
+        for connection in &state.connections {
+            if connection.source != name {
+                continue;
+            }
+            let hop = connection_delay(connection)
+                .then(port_delay(state, &connection.target))
+                .unwrap_or(Delay::MICROSTEP);
+            if hop.is_instant() {
+                frontier.push(connection.target.clone());
+            }
+        }
+    }
+    reached
+}
+
+/// Reaction ids that must run after `id` at a tag it fires in.
+///
+/// Three reasons to be ordered: one writes a port the other is triggered by,
+/// so the second cannot decide whether its trigger is present until the first
+/// has run; both write the same port, so the later declaration wins; or they
+/// share an agent, which answers one invocation at a time.
+pub fn must_follow(state: &VmState, id: &str) -> BTreeSet<String> {
+    let Some(reaction) = state.reactions.get(id) else {
+        return BTreeSet::new();
+    };
+    // An action carries a microstep even at zero delay, so writing one settles
+    // nothing at this tag and orders nobody.
+    let instant_writes: BTreeSet<String> = reaction
+        .effects
+        .iter()
+        .flat_map(|effect| zero_delay_reach(state, effect))
+        .collect();
+    state
+        .reactions
+        .iter()
+        .filter(|(other, _)| other.as_str() != id)
+        .filter(|(other, state_of)| {
+            let reads = state_of
+                .triggers
+                .iter()
+                .any(|trigger| instant_writes.contains(trigger));
+            let shares_port = state_of
+                .effects
+                .iter()
+                .any(|effect| reaction.effects.contains(effect));
+            let shares_agent = state_of.agent == reaction.agent;
+            // Declaration order decides the last two; only the first is a
+            // dependency the program states rather than a tie to break.
+            reads
+                || ((shares_port || shares_agent)
+                    && state_of.order > reaction.order
+                    && other.as_str() != id)
+        })
+        .map(|(other, _)| other.clone())
+        .collect()
+}
+
+/// A cycle in that ordering is a tag that cannot be scheduled.
+///
+/// Every hop in it is instantaneous, so each reaction would have to run before
+/// the other at one tag. Lingua Franca rejects the same shape for the same
+/// reason. A loop through an action is not one: an action carries a microstep,
+/// so the second firing is at a later tag and the order is decided by time
+/// rather than by precedence.
+fn reject_causality_loops(state: &VmState) -> Result<()> {
+    let mut colour: BTreeMap<&str, u8> = state
+        .reactions
+        .keys()
+        .map(|id| (id.as_str(), 0u8))
+        .collect();
+    let edges: BTreeMap<String, BTreeSet<String>> = state
+        .reactions
+        .keys()
+        .map(|id| (id.clone(), must_follow(state, id)))
+        .collect();
+
+    // Iterative depth-first search: a topology can nest deeply enough that
+    // recursion is a stack overflow rather than a compile error.
+    for root in state.reactions.keys() {
+        if colour[root.as_str()] != 0 {
+            continue;
+        }
+        let mut path: Vec<String> = Vec::new();
+        let mut stack: Vec<(String, bool)> = vec![(root.clone(), false)];
+        while let Some((id, leaving)) = stack.pop() {
+            if leaving {
+                colour.insert(state.reactions.get_key_value(&id).unwrap().0.as_str(), 2);
+                path.pop();
+                continue;
+            }
+            match colour[id.as_str()] {
+                1 => {
+                    let from = path.iter().position(|step| *step == id).unwrap_or(0);
+                    let mut cycle: Vec<&str> = path[from..].iter().map(String::as_str).collect();
+                    cycle.push(&id);
+                    bail!(
+                        "causality loop: {} — every hop is instantaneous, so none of these can run first",
+                        cycle.join(" -> ")
+                    );
+                }
+                2 => continue,
+                _ => {}
+            }
+            colour.insert(state.reactions.get_key_value(&id).unwrap().0.as_str(), 1);
+            path.push(id.clone());
+            stack.push((id.clone(), true));
+            for next in edges.get(&id).into_iter().flatten() {
+                if colour[next.as_str()] != 2 {
+                    stack.push((next.clone(), false));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1474,50 +1610,221 @@ impl Tag {
         microstep: 0,
     };
 
-    fn advance(self, delay: u64) -> Result<Self> {
-        if delay == 0 {
-            Ok(Self {
+    fn advance(self, delay: Delay) -> Result<Self> {
+        if delay.time > 0 {
+            return Ok(Self {
+                timestamp: self
+                    .timestamp
+                    .checked_add(delay.time)
+                    .context("logical timestamp overflow")?,
+                microstep: 0,
+            });
+        }
+        if delay.microstep {
+            return Ok(Self {
                 timestamp: self.timestamp,
                 microstep: self
                     .microstep
                     .checked_add(1)
                     .context("logical microstep overflow")?,
-            })
-        } else {
-            Ok(Self {
-                timestamp: self
-                    .timestamp
-                    .checked_add(delay)
-                    .context("logical timestamp overflow")?,
-                microstep: 0,
-            })
+            });
         }
+        Ok(self)
     }
 }
 
-fn enqueue_event(
+/// What one hop costs.
+///
+/// The distinction Lingua Franca draws, and the reason a fixpoint exists to be
+/// reached: a plain connection is instantaneous, so a value written at a tag is
+/// readable by the rest of that same tag. `after 0` costs a microstep, which is
+/// how a loop closes without letting time pass. Anything larger is real time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Delay {
+    /// Nanoseconds of logical time. Zero unless the hop was written with one.
+    time: u64,
+    /// Whether the hop still costs a microstep when no time passes.
+    microstep: bool,
+}
+
+impl Delay {
+    const INSTANT: Self = Self {
+        time: 0,
+        microstep: false,
+    };
+    const MICROSTEP: Self = Self {
+        time: 0,
+        microstep: true,
+    };
+
+    /// What `after n` costs: `after 0` buys a microstep, and anything larger
+    /// buys that much logical time.
+    fn after(time: u64) -> Self {
+        if time == 0 {
+            Self::MICROSTEP
+        } else {
+            Self {
+                time,
+                microstep: false,
+            }
+        }
+    }
+
+    /// A hop that settles within the tag it started in.
+    fn is_instant(self) -> bool {
+        self.time == 0 && !self.microstep
+    }
+
+    /// Two hops in a row: time adds, and a microstep anywhere costs one.
+    fn then(self, other: Self) -> Result<Self> {
+        Ok(Self {
+            time: self
+                .time
+                .checked_add(other.time)
+                .context("logical delay overflow")?,
+            microstep: self.microstep || other.microstep,
+        })
+    }
+}
+
+/// What writing to `port` costs, before any connection is followed.
+///
+/// An action is the one port that carries a microstep of its own: that is what
+/// makes it the way to schedule something later without naming a time, and what
+/// keeps a self-loop through one from being a causality loop. Every other port
+/// is instantaneous — a reaction's effect is readable at the tag it fired at.
+fn port_delay(state: &VmState, port: &str) -> Delay {
+    match state.ports.get(port) {
+        Some(state) if state.kind == PortKind::Action => match state.delay {
+            Some(time) if time > 0 => Delay {
+                time,
+                microstep: false,
+            },
+            _ => Delay::MICROSTEP,
+        },
+        _ => Delay::INSTANT,
+    }
+}
+
+/// What a connection costs on top of its target port.
+fn connection_delay(connection: &ConnectionState) -> Delay {
+    match connection.delay {
+        None => Delay::INSTANT,
+        Some(time) => Delay::after(time),
+    }
+}
+
+/// Write a value to a port, at this tag or a later one.
+///
+/// Returns whether this tag learned something, which is what tells the settling
+/// loop it has more to do. An instantaneous hop joins the tag in progress; only
+/// a hop that costs a microstep or real time goes on the queue.
+fn deliver(
     state: &VmState,
+    events: &mut BTreeMap<String, Value>,
     queue: &mut BTreeMap<Tag, BTreeMap<String, Value>>,
     current_tag: Tag,
     port: &str,
     value: Value,
-    additional_delay: u64,
-) -> Result<()> {
-    let fixed_delay = state
-        .ports
-        .get(port)
-        .with_context(|| format!("unknown scheduled port '{port}'"))?
-        .delay
-        .unwrap_or(0);
-    let total_delay = fixed_delay
-        .checked_add(additional_delay)
-        .context("logical delay overflow")?;
-    let destination_tag = current_tag.advance(total_delay)?;
+    additional_delay: Delay,
+) -> Result<bool> {
+    if !state.ports.contains_key(port) {
+        bail!("unknown scheduled port '{port}'");
+    }
+    let total = port_delay(state, port).then(additional_delay)?;
+    if total.is_instant() {
+        events.insert(port.to_string(), value);
+        return Ok(true);
+    }
     queue
-        .entry(destination_tag)
+        .entry(current_tag.advance(total)?)
         .or_default()
         .insert(port.to_string(), value);
+    Ok(false)
+}
+
+/// Carry every connection whose source is present, until none is left to carry.
+///
+/// A connection fires at most once per tag — `carried` is what remembers — so
+/// this terminates after at most one round per connection, and a chain of
+/// instantaneous connections settles in the tag it started in.
+fn settle_connections(
+    state: &VmState,
+    events: &mut BTreeMap<String, Value>,
+    queue: &mut BTreeMap<Tag, BTreeMap<String, Value>>,
+    tag: Tag,
+    carried: &mut BTreeSet<usize>,
+) -> Result<()> {
+    loop {
+        let mut learned = false;
+        for (index, connection) in state.connections.iter().enumerate() {
+            if carried.contains(&index) {
+                continue;
+            }
+            let Some(value) = events.get(&connection.source).cloned() else {
+                continue;
+            };
+            carried.insert(index);
+            learned |= deliver(
+                state,
+                events,
+                queue,
+                tag,
+                &connection.target,
+                value,
+                connection_delay(connection),
+            )?;
+        }
+        if !learned {
+            break;
+        }
+    }
     Ok(())
+}
+
+/// Reactions grouped so everything in a layer may run at once, and everything
+/// in a later layer runs after.
+///
+/// Static: the order follows from the wiring, not from what happens to be
+/// present. Walking it once per tag is what makes a reaction fire at most once
+/// per tag, and only once every reaction that could decide one of its triggers
+/// has had its turn — which is what "all triggers known" means operationally.
+fn precedence_layers(state: &VmState) -> Result<Vec<Vec<String>>> {
+    let mut indegree: BTreeMap<&str, usize> =
+        state.reactions.keys().map(|id| (id.as_str(), 0)).collect();
+    let mut outgoing: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    for id in state.reactions.keys() {
+        let after = must_follow(state, id);
+        for later in &after {
+            if let Some(count) = indegree.get_mut(later.as_str()) {
+                *count += 1;
+            }
+        }
+        outgoing.insert(id.as_str(), after);
+    }
+
+    let mut remaining: BTreeSet<&str> = state.reactions.keys().map(String::as_str).collect();
+    let mut layers = Vec::new();
+    while !remaining.is_empty() {
+        let layer: Vec<&str> = remaining
+            .iter()
+            .copied()
+            .filter(|id| indegree[id] == 0)
+            .collect();
+        if layer.is_empty() {
+            bail!("causality loop among reactions: {remaining:?}");
+        }
+        for id in &layer {
+            remaining.remove(id);
+            for target in &outgoing[id] {
+                if let Some(count) = indegree.get_mut(target.as_str()) {
+                    *count -= 1;
+                }
+            }
+        }
+        layers.push(layer.into_iter().map(str::to_string).collect());
+    }
+    Ok(layers)
 }
 
 /// How a run's logical clock is held against the wall clock.
@@ -1565,15 +1872,26 @@ fn run_event_loop_observed<E: ReactionExecutor>(
     }
     let mut outputs = BTreeMap::new();
 
-    // No bound on how many tags a run may pass through. A graph cycle is not a
-    // causality loop here: every zero-delay hop advances the microstep, so a
-    // loop is a walk through superdense time rather than a knot to be untied.
+    // No bound on how many tags a run may pass through. A loop that costs a
+    // microstep somewhere -- through an action, or a connection written
+    // `after 0` -- is a walk through superdense time rather than a knot to be
+    // untied, and `verify` has already refused the ones that cost nothing.
     // What used to be a runaway guard mostly cut long-lived programs short —
     // and silently reported success when it did.
     //
     // The real limits are the two `checked_add`s in `Tag::advance`, which end a
     // run that exhausts u64 rather than wrapping it into the past.
+    // Fixed before the first tag: precedence follows from the wiring, and the
+    // wiring does not change while a run is in flight.
+    let layers = precedence_layers(state)?;
+
     while let Some((tag, events)) = queue.pop_first() {
+        // Everything this tag knows. It grows as the tag settles: an
+        // instantaneous connection or a reaction's effect joins it rather than
+        // landing on a later tag, and the reactions downstream read it before
+        // the tag is over.
+        let mut events = events;
+        let mut carried = BTreeSet::new();
         let due = Duration::from_nanos(tag.timestamp);
         if pace == Pace::RealTime {
             // Microsteps carry no time, so only the timestamp is owed. A tag
@@ -1588,6 +1906,10 @@ fn run_event_loop_observed<E: ReactionExecutor>(
         // outlasts the gap it was given -- which is the one number that says
         // whether a program is keeping the promise its delays make.
         let lag = origin.elapsed().saturating_sub(due).as_nanos() as u64;
+        // Settle before observing, so what a tag reports includes the values
+        // its connections carried into it rather than only what it was woken
+        // with.
+        settle_connections(state, &mut events, &mut queue, tag, &mut carried)?;
         observer.tag_advanced(tag.timestamp, tag.microstep, lag, &events);
         for (name, timer) in &state.timers {
             if timer.period > 0 && events.contains_key(name) {
@@ -1604,50 +1926,29 @@ fn run_event_loop_observed<E: ReactionExecutor>(
                     .insert(name.clone(), json!(next));
             }
         }
-        for (name, value) in &events {
-            if state
-                .ports
-                .get(name)
-                .is_some_and(|p| p.kind == PortKind::Output)
-            {
-                outputs.insert(name.clone(), value.clone());
-            }
-        }
-
-        for connection in &state.connections {
-            if let Some(value) = events.get(&connection.source) {
-                enqueue_event(
-                    state,
-                    &mut queue,
-                    tag,
-                    &connection.target,
-                    value.clone(),
-                    connection.delay,
-                )?;
-            }
-        }
-
-        let mut enabled: Vec<_> = state
-            .reactions
-            .iter()
-            .filter(|(_, reaction)| {
-                reaction
-                    .triggers
-                    .iter()
-                    .any(|trigger| events.contains_key(trigger))
-            })
-            .collect();
-        enabled.sort_by_key(|(_, reaction)| reaction.order);
-        if enabled.is_empty() {
-            continue;
-        }
-
-        let layers = dag_layers(&enabled);
-        let mut completed = Vec::new();
-        for layer in layers {
-            let specs: Vec<_> = layer
+        // One pass down the precedence order. A layer's reactions cannot
+        // decide each other's triggers -- that is what put them in one layer --
+        // so running them together is safe, and by the time a layer is reached
+        // every reaction that could feed it has already had its turn.
+        for layer in &layers {
+            let mut enabled: Vec<_> = layer
                 .iter()
-                .map(|index| invocation_spec(state, enabled[*index], &events))
+                .filter_map(|id| state.reactions.get_key_value(id))
+                .filter(|(_, reaction)| {
+                    reaction
+                        .triggers
+                        .iter()
+                        .any(|trigger| events.contains_key(trigger))
+                })
+                .collect();
+            if enabled.is_empty() {
+                continue;
+            }
+            enabled.sort_by_key(|(_, reaction)| reaction.order);
+
+            let specs: Vec<_> = enabled
+                .iter()
+                .map(|entry| invocation_spec(state, *entry, &events))
                 .collect::<Result<_>>()?;
             for spec in &specs {
                 observer.reaction_started(
@@ -1672,24 +1973,50 @@ fn run_event_loop_observed<E: ReactionExecutor>(
                     })
                     .collect::<Result<Vec<_>>>()
             })?;
-            for ((index, invocation_id), writes) in
-                layer.into_iter().zip(invocation_ids).zip(results)
-            {
-                observer.reaction_completed(
-                    tag.timestamp,
-                    tag.microstep,
-                    enabled[index].0,
-                    &invocation_id,
-                    &writes,
-                );
-                completed.push((enabled[index].1.order, writes));
+
+            // Declaration order decides who wins a port two reactions in this
+            // layer both write, which is the rule the language states.
+            let mut completed: Vec<_> = enabled
+                .iter()
+                .zip(invocation_ids)
+                .zip(results)
+                .map(|(((id, reaction), invocation_id), writes)| {
+                    observer.reaction_completed(
+                        tag.timestamp,
+                        tag.microstep,
+                        id,
+                        &invocation_id,
+                        &writes,
+                    );
+                    (reaction.order, writes)
+                })
+                .collect();
+            completed.sort_by_key(|(order, _)| *order);
+            for (_, writes) in completed {
+                for (port, value) in writes {
+                    deliver(
+                        state,
+                        &mut events,
+                        &mut queue,
+                        tag,
+                        &port,
+                        value,
+                        Delay::INSTANT,
+                    )?;
+                }
             }
+            settle_connections(state, &mut events, &mut queue, tag, &mut carried)?;
         }
 
-        completed.sort_by_key(|(order, _)| *order);
-        for (_, writes) in completed {
-            for (port, value) in writes {
-                enqueue_event(state, &mut queue, tag, &port, value, 0)?;
+        // Read the outputs once the tag has settled, so a value a reaction
+        // wrote at this tag counts as this tag's output.
+        for (name, value) in &events {
+            if state
+                .ports
+                .get(name)
+                .is_some_and(|p| p.kind == PortKind::Output)
+            {
+                outputs.insert(name.clone(), value.clone());
             }
         }
     }
@@ -1731,44 +2058,6 @@ fn invocation_spec(
         prompt: reaction.prompt.clone(),
         within: reaction.within.map(Duration::from_nanos),
     })
-}
-
-fn dag_layers(enabled: &[(&String, &ReactionState)]) -> Vec<Vec<usize>> {
-    let mut outgoing = vec![Vec::new(); enabled.len()];
-    let mut indegree = vec![0usize; enabled.len()];
-    for earlier in 0..enabled.len() {
-        for later in (earlier + 1)..enabled.len() {
-            let left = enabled[earlier].1;
-            let right = enabled[later].1;
-            let overlaps = left
-                .effects
-                .iter()
-                .any(|effect| right.effects.contains(effect));
-            if overlaps || left.agent == right.agent {
-                outgoing[earlier].push(later);
-                indegree[later] += 1;
-            }
-        }
-    }
-
-    let mut remaining: BTreeSet<usize> = (0..enabled.len()).collect();
-    let mut layers = Vec::new();
-    while !remaining.is_empty() {
-        let layer: Vec<_> = remaining
-            .iter()
-            .copied()
-            .filter(|index| indegree[*index] == 0)
-            .collect();
-        debug_assert!(!layer.is_empty());
-        for index in &layer {
-            remaining.remove(index);
-            for target in &outgoing[*index] {
-                indegree[*target] -= 1;
-            }
-        }
-        layers.push(layer);
-    }
-    layers
 }
 
 fn render_prompt(template: &str, values: &BTreeMap<String, Value>) -> Result<String> {
@@ -2192,14 +2481,17 @@ mod tests {
             microstep: 7,
         };
         assert_eq!(
-            tag.advance(0).unwrap(),
+            tag.advance(Delay::after(0)).unwrap(),
             Tag {
                 timestamp: 10,
                 microstep: 8
             }
         );
+        // A plain connection costs nothing, so it stays on the tag it started
+        // on -- which is what lets a value be read by the rest of that tag.
+        assert_eq!(tag.advance(Delay::INSTANT).unwrap(), tag);
         assert_eq!(
-            tag.advance(2).unwrap(),
+            tag.advance(Delay::after(2)).unwrap(),
             Tag {
                 timestamp: 12,
                 microstep: 0
@@ -2886,14 +3178,20 @@ mod tests {
             timestamp: 7,
             microstep: u64::MAX,
         };
-        let error = last_microstep.advance(0).unwrap_err().to_string();
+        let error = last_microstep
+            .advance(Delay::after(0))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("microstep overflow"), "{error}");
 
         let last_timestamp = Tag {
             timestamp: u64::MAX,
             microstep: 0,
         };
-        let error = last_timestamp.advance(1).unwrap_err().to_string();
+        let error = last_timestamp
+            .advance(Delay::after(1))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("timestamp overflow"), "{error}");
 
         // And one short of each still advances, so the guard is at the edge
@@ -2903,7 +3201,7 @@ mod tests {
                 timestamp: 7,
                 microstep: u64::MAX - 1,
             }
-            .advance(0)
+            .advance(Delay::after(0))
             .unwrap(),
             Tag {
                 timestamp: 7,
@@ -2912,12 +3210,263 @@ mod tests {
         );
     }
 
+    /// Every program in the corpus still verifies.
+    ///
+    /// Rejecting a causality loop is a rejection the compiler cannot make on
+    /// its own — it needs the whole elaborated topology — so without this a
+    /// program that stops verifying is only found when someone deploys it.
+    /// Skipped where `omarc` has not been built, which is why CI builds it.
+    #[test]
+    fn the_topology_corpus_verifies() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let omarc = root.join("lang/.lake/build/bin/omarc");
+        if !omarc.exists() {
+            eprintln!("skipping: {} has not been built", omarc.display());
+            return;
+        }
+
+        let mut checked = 0;
+        let mut sources: Vec<_> = std::fs::read_dir(root.join("tests/topology/src"))
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|kind| kind == "omar"))
+            .collect();
+        sources.sort();
+
+        for source in sources {
+            let bytecode_path = std::env::temp_dir().join(format!(
+                "omar-verify-{}.json",
+                source.file_stem().unwrap().to_string_lossy()
+            ));
+            let compiled = std::process::Command::new(&omarc)
+                .arg(&source)
+                .arg(&bytecode_path)
+                .output()
+                .unwrap();
+            assert!(
+                compiled.status.success(),
+                "{} did not compile: {}",
+                source.display(),
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+
+            let bytecode: Bytecode =
+                serde_json::from_str(&std::fs::read_to_string(&bytecode_path).unwrap()).unwrap();
+            verify(&bytecode)
+                .unwrap_or_else(|error| panic!("{} does not verify: {error}", source.display()));
+            let _ = std::fs::remove_file(&bytecode_path);
+            checked += 1;
+        }
+        assert!(checked > 0, "the corpus is empty");
+    }
+
+    /// A parent triggered by two children at different depths fires once.
+    ///
+    /// This is the whole of the fixpoint rule in one program. `deep` is three
+    /// instantaneous hops from `start` and `shallow` is one, so under a
+    /// semantics where a hop costs a microstep the watcher would be woken by
+    /// `shallow`, run with `deep` absent, and then be woken again — reading a
+    /// half-built picture the first time and reporting twice. Because no hop
+    /// costs anything, both land at one tag and the watcher runs after both.
+    #[test]
+    fn a_parent_reading_two_depths_fires_once_with_both_in_hand() {
+        let bytecode: Bytecode = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Depths",
+              "instructions": [
+                {"op":"begin_plan","team":"Depths"},
+                {"op":"spawn_agent","name":"near","backend":"Stub"},
+                {"op":"spawn_agent","name":"far","backend":"Stub"},
+                {"op":"spawn_agent","name":"deeper","backend":"Stub"},
+                {"op":"spawn_agent","name":"watcher","backend":"Stub"},
+                {"op":"define_port","kind":"input","name":"start","type":"int"},
+                {"op":"define_port","kind":"output","name":"shallow","type":"int"},
+                {"op":"define_port","kind":"input","name":"shallow_in","type":"int"},
+                {"op":"define_port","kind":"output","name":"middle","type":"int"},
+                {"op":"define_port","kind":"input","name":"middle_in","type":"int"},
+                {"op":"define_port","kind":"output","name":"deep","type":"int"},
+                {"op":"define_port","kind":"input","name":"deep_in","type":"int"},
+                {"op":"define_port","kind":"output","name":"verdict","type":"int"},
+                {"op":"connect_ports","source":"shallow","target":"shallow_in"},
+                {"op":"connect_ports","source":"middle","target":"middle_in"},
+                {"op":"connect_ports","source":"deep","target":"deep_in"},
+                {"op":"install_reaction","id":"reaction.0","agent":"near",
+                 "triggers":["start"],"effects":["shallow"],
+                 "contract":"shallow","prompt":"p"},
+                {"op":"install_reaction","id":"reaction.1","agent":"far",
+                 "triggers":["shallow_in"],"effects":["middle"],
+                 "contract":"middle","prompt":"p"},
+                {"op":"install_reaction","id":"reaction.2","agent":"deeper",
+                 "triggers":["middle_in"],"effects":["deep"],
+                 "contract":"deep","prompt":"p"},
+                {"op":"install_reaction","id":"reaction.3","agent":"watcher",
+                 "triggers":["shallow_in","deep_in"],"effects":["verdict"],
+                 "contract":"verdict","prompt":"p"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let state = verify(&bytecode).unwrap();
+
+        /// Records what the watcher was holding each time it ran.
+        #[derive(Default)]
+        struct Watch {
+            saw: Mutex<Vec<BTreeMap<String, Value>>>,
+        }
+        impl ReactionExecutor for Watch {
+            fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+                if invocation.reaction_id == "reaction.3" {
+                    self.saw
+                        .lock()
+                        .unwrap()
+                        .push(invocation.trigger_values.clone());
+                }
+                Ok(invocation
+                    .allowed_effects
+                    .keys()
+                    .map(|port| (port.clone(), json!(1)))
+                    .collect())
+            }
+        }
+
+        let executor = Watch::default();
+        run_event_loop(
+            &state,
+            BTreeMap::from([("start".to_string(), json!(1))]),
+            &executor,
+        )
+        .unwrap();
+
+        let saw = executor.saw.lock().unwrap();
+        assert_eq!(saw.len(), 1, "the watcher ran more than once: {saw:?}");
+        assert_eq!(
+            saw[0].keys().collect::<Vec<_>>(),
+            vec!["deep_in", "shallow_in"],
+            "the watcher ran without both of its triggers"
+        );
+    }
+
+    /// The two kinds of connection, told apart by the tag they land on.
+    #[test]
+    fn a_plain_connection_is_instant_and_after_zero_costs_a_microstep() {
+        let program = |delay: &str| {
+            format!(
+                r#"{{
+                  "version": 1,
+                  "team": "Hop",
+                  "instructions": [
+                    {{"op":"begin_plan","team":"Hop"}},
+                    {{"op":"spawn_agent","name":"downstream","backend":"Stub"}},
+                    {{"op":"define_port","kind":"input","name":"source","type":"int"}},
+                    {{"op":"define_port","kind":"input","name":"target","type":"int"}},
+                    {{"op":"define_port","kind":"output","name":"done","type":"int"}},
+                    {{"op":"connect_ports","source":"source","target":"target"{delay}}},
+                    {{"op":"install_reaction","id":"reaction.0","agent":"downstream",
+                     "triggers":["target"],"effects":["done"],
+                     "contract":"done","prompt":"p"}},
+                    {{"op":"commit_plan"}}
+                  ]
+                }}"#
+            )
+        };
+
+        /// Reports the tag the downstream reaction was invoked at.
+        #[derive(Default)]
+        struct At {
+            tag: Mutex<Option<(u64, u64)>>,
+        }
+        impl TopologyObserver for At {
+            fn reaction_started(&self, timestamp: u64, microstep: u64, _: &str, _: &str) {
+                *self.tag.lock().unwrap() = Some((timestamp, microstep));
+            }
+        }
+        struct Yes;
+        impl ReactionExecutor for Yes {
+            fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+                Ok(invocation
+                    .allowed_effects
+                    .keys()
+                    .map(|port| (port.clone(), json!(1)))
+                    .collect())
+            }
+        }
+
+        let ran_at = |delay: &str| {
+            let bytecode: Bytecode = serde_json::from_str(&program(delay)).unwrap();
+            let state = verify(&bytecode).unwrap();
+            let observer = At::default();
+            run_event_loop_observed(
+                &state,
+                BTreeMap::from([("source".to_string(), json!(1))]),
+                &Yes,
+                &observer,
+                Pace::Fast,
+            )
+            .unwrap();
+            let tag = *observer.tag.lock().unwrap();
+            tag.expect("the downstream reaction never ran")
+        };
+
+        // No `after`: the value is readable at the tag it was written.
+        assert_eq!(ran_at(""), (0, 0));
+        // `after 0`: one microstep later, no time passed.
+        assert_eq!(ran_at(r#","delay":0"#), (0, 1));
+        // `after n`: n nanoseconds later, back at microstep zero.
+        assert_eq!(ran_at(r#","delay":5"#), (5, 0));
+    }
+
+    /// A cycle that costs nothing to go round is refused before it runs.
+    #[test]
+    fn a_loop_of_instant_hops_is_refused() {
+        let program = |delay: &str| {
+            format!(
+                r#"{{
+                  "version": 1,
+                  "team": "Knot",
+                  "instructions": [
+                    {{"op":"begin_plan","team":"Knot"}},
+                    {{"op":"spawn_agent","name":"left","backend":"Stub"}},
+                    {{"op":"spawn_agent","name":"right","backend":"Stub"}},
+                    {{"op":"define_port","kind":"output","name":"a","type":"int"}},
+                    {{"op":"define_port","kind":"input","name":"a_in","type":"int"}},
+                    {{"op":"define_port","kind":"output","name":"b","type":"int"}},
+                    {{"op":"define_port","kind":"input","name":"b_in","type":"int"}},
+                    {{"op":"connect_ports","source":"a","target":"a_in"}},
+                    {{"op":"connect_ports","source":"b","target":"b_in"{delay}}},
+                    {{"op":"install_reaction","id":"reaction.0","agent":"left",
+                     "triggers":["a_in"],"effects":["b"],"contract":"b","prompt":"p"}},
+                    {{"op":"install_reaction","id":"reaction.1","agent":"right",
+                     "triggers":["b_in"],"effects":["a"],"contract":"a","prompt":"p"}},
+                    {{"op":"commit_plan"}}
+                  ]
+                }}"#
+            )
+        };
+
+        let verified = |delay: &str| {
+            let bytecode: Bytecode = serde_json::from_str(&program(delay)).unwrap();
+            verify(&bytecode)
+        };
+
+        // Every hop instantaneous: neither reaction can go first.
+        let error = verified("").unwrap_err().to_string();
+        assert!(error.contains("causality loop"), "{error}");
+
+        // One `after 0` anywhere in the cycle turns it into a walk through
+        // superdense time, which is a thing a run can do.
+        verified(r#","delay":0"#).expect("a microstep breaks the loop");
+        // As does real time.
+        verified(r#","delay":5"#).expect("a delay breaks the loop");
+    }
+
     #[test]
     fn a_zero_delay_loop_runs_past_where_the_tag_cap_used_to_be() {
-        // A graph cycle is not a causality loop: every zero-delay hop advances
-        // the microstep, so this is a walk through superdense time. It used to
-        // be cut off at 1024 tags with an error; now it ends when the work
-        // says so.
+        // A graph cycle is not a causality loop when it costs a microstep to go
+        // round -- here through an action -- so this is a walk through
+        // superdense time. It used to be cut off at 1024 tags with an error;
+        // now it ends when the work says so.
         let bytecode: Bytecode = serde_json::from_str(
             r#"{
               "version": 1,
@@ -3185,25 +3734,20 @@ mod tests {
     }
 
     #[test]
-    fn dag_orders_overlapping_effects_and_same_agent() {
+    fn precedence_orders_overlapping_effects_and_same_agent() {
         let mut state = hr_state();
         state.reactions.get_mut("reaction.2").unwrap().effects = vec!["opinion1".into()];
         state.reactions.get_mut("reaction.2").unwrap().agent = "reviewer1".into();
-        let enabled = [
-            (
-                "reaction.1".to_string(),
-                state.reactions["reaction.1"].clone(),
-            ),
-            (
-                "reaction.2".to_string(),
-                state.reactions["reaction.2"].clone(),
-            ),
-        ];
-        let refs: Vec<_> = enabled
-            .iter()
-            .map(|(id, reaction)| (id, reaction))
-            .collect();
-        assert_eq!(dag_layers(&refs), vec![vec![0], vec![1]]);
+        assert!(must_follow(&state, "reaction.1").contains("reaction.2"));
+
+        let layers = precedence_layers(&state).unwrap();
+        let layer_of = |id: &str| {
+            layers
+                .iter()
+                .position(|layer| layer.iter().any(|entry| entry == id))
+                .unwrap()
+        };
+        assert!(layer_of("reaction.1") < layer_of("reaction.2"));
     }
 
     #[test]

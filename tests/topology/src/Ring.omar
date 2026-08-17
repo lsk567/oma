@@ -26,7 +26,7 @@ main {
     n2 = Node(2)
     n3 = Node(3)
 
-    n1.out -> n2.token
-    n2.out -> n3.token
-    n3.out -> n1.token
+    n1.out -> n2.token after 0
+    n2.out -> n3.token after 0
+    n3.out -> n1.token after 0
 }

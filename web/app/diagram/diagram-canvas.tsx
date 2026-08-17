@@ -881,7 +881,7 @@ function buildLayout(
       {
         id: edge.id,
         kind: edge.kind,
-        delayed: edge.delay > 0,
+        delayed: edge.delay !== null,
         path: orthogonalPath(adjustEnds(squareOff(routed), start, end)),
       },
     ];

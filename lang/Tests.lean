@@ -28,6 +28,9 @@ def topologyCases : Array TopologyCase := #[
   -- `main WithinTest` names the program, so the team is not the file stem.
   { file := "DeadlineProbe.omar", team := "WithinTest", agents := 3, ports := 3,
     reactions := 3, instructions := 13, codexOnly := false },
+  -- Every agent is a Stub, so the shared-backend assertion does not apply.
+  { file := "Depths.omar", team := "Depths", agents := 4, ports := 9,
+    connections := 4, reactions := 4, instructions := 27, codexOnly := false },
   { file := "EffectContracts.omar", team := "EffectContracts", agents := 1, ports := 6,
     reactions := 3, instructions := 13 },
   { file := "FanOutFanIn.omar", team := "FanOutFanIn", agents := 4, ports := 5,
@@ -139,7 +142,7 @@ def testTopology (test : TopologyCase) : IO Unit := do
     assertEqual "the loop closes over a period, not a microstep"
       (program.connections.any (fun c =>
         c.source == "pm.setpoint" && c.target == "gauge.setpoint" &&
-        c.delay == 30000000000)) true
+        c.delay == some 30000000000)) true
     assertEqual "and the gauge reads the setpoint back"
       (program.reactions.any (fun r => r.triggers == #["gauge.beat", "gauge.setpoint"])) true
   if test.file == "DeadlineProbe.omar" then
@@ -157,6 +160,13 @@ def testTopology (test : TopologyCase) : IO Unit := do
     -- than a failed run, so it has to survive instantiation.
     assertEqual "expiry-absorbing contract"
       (program.reactions.any (·.contract == "probe.missed ?")) true
+  if test.file == "Depths.omar" then
+    -- The whole point of the program: nothing on the path to the watcher costs
+    -- anything, so both of its inputs are decided at one tag.
+    assertEqual "every hop is a plain connection"
+      (program.connections.all (·.delay == none)) true
+    assertEqual "the watcher reads both depths"
+      (program.reactions.any (·.triggers == #["watch.shallow", "watch.deep"])) true
   if test.file == "SuperdenseTime.omar" then
     -- Names are instance-qualified now that every program instantiates.
     assertEqual "fixed action delay"
@@ -167,7 +177,7 @@ def testTopology (test : TopologyCase) : IO Unit := do
       (program.connections.any fun connection =>
         connection.source == "time.immediate" &&
         connection.target == "time.connected" &&
-        connection.delay == 3) true
+        connection.delay == some 3) true
   IO.println s!"{test.file} compiler test passed"
 
 /-- A team with one parameter and one agent, for the `main` error cases. -/
@@ -224,8 +234,17 @@ def testDelayUnits : IO Unit := do
     match lex (wireTeam body) >>= parse "Wire" with
     | .ok program =>
         assertEqual s!"connection delay for '{body}'"
-          (program.connections.any (·.delay == nanos)) true
+          (program.connections.any (·.delay == some nanos)) true
     | .error message => throw (IO.userError s!"{body}: {message}")
+
+  -- Written or not written are different hops. A plain connection costs
+  -- nothing and its value is readable at the tag it was written; `after 0`
+  -- costs a microstep, which is how a loop closes without letting time pass.
+  match lex (wireTeam "src -> dst") >>= parse "Wire" with
+  | .ok program =>
+      assertEqual "a plain connection carries no delay"
+        (program.connections.any (·.delay == none)) true
+  | .error message => throw (IO.userError s!"plain connection: {message}")
 
   match lex (wireTeam "src -> dst after 0 timer t(0, 10ns)") >>= parse "Wire" with
   | .ok program => do
