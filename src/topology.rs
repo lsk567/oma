@@ -1827,9 +1827,9 @@ fn precedence_layers(state: &VmState) -> Result<Vec<Vec<String>>> {
     Ok(layers)
 }
 
-/// One logical tag of a projected run.
+/// One logical tag a program would pass through.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProjectedStep {
+pub struct TimelineStep {
     pub timestamp: u64,
     pub microstep: u64,
     /// Ports and timers carrying a value at this tag, in name order.
@@ -1838,19 +1838,23 @@ pub struct ProjectedStep {
     pub reactions: Vec<String>,
 }
 
-/// What a program would do, worked out without running it.
+/// The tags a program would pass through, worked out without running it.
 ///
-/// This is the determinism claim made visible: given which inputs are present,
-/// the tags a program passes through and what fires at each are decided by the
-/// program, not by what the agents happen to say. So they can be shown before
-/// anything is deployed.
+/// The determinism claim made visible: which tags a program reaches and what
+/// fires at each are decided by the program, not by what the agents happen to
+/// say. So they can be shown before anything is deployed.
 ///
-/// Values are not projected, only presence — an agent's answer is the one thing
-/// here that is not determined. Two consequences worth knowing:
+/// `present` names the ports to treat as carrying a value at the first tag —
+/// the inputs a run would be admitted with. Timers are always seeded; they are
+/// what starts a program that starts itself. Presence is all that is needed:
+/// a reaction fires on a trigger being there, whatever it holds.
 ///
-/// - a reaction whose contract offers alternatives (`-> (x|y)`) is projected as
-///   writing *both*, because which one it picks is the agent's to decide. The
-///   projection is an over-approximation, never a missed step;
+/// Values are not worked out, only presence — an agent's answer is the one
+/// thing here that is not determined. Two consequences worth knowing:
+///
+/// - a reaction whose contract offers alternatives (`-> (x|y)`) is shown as
+///   writing *both*, because which one it picks is the agent's to decide. This
+///   over-approximates, and never misses a step;
 /// - it cannot know a value that decides a delay, and nothing in the language
 ///   has one, which is why this works at all.
 ///
@@ -1858,11 +1862,11 @@ pub struct ProjectedStep {
 /// `precedence_layers` are the same ones the event loop walks, so what settles
 /// at a tag — and which tag it settles at — cannot drift between what is shown
 /// and what runs.
-pub fn project(
+pub fn timeline(
     state: &VmState,
     present: &BTreeSet<String>,
     max_steps: usize,
-) -> (Vec<ProjectedStep>, bool) {
+) -> (Vec<TimelineStep>, bool) {
     let seed: BTreeMap<String, Value> = present
         .iter()
         .filter(|name| state.ports.contains_key(*name))
@@ -1948,7 +1952,7 @@ pub fn project(
             let _ = settle_connections(state, &mut events, &mut queue, tag, &mut carried);
         }
 
-        steps.push(ProjectedStep {
+        steps.push(TimelineStep {
             timestamp: tag.timestamp,
             microstep: tag.microstep,
             events: events.keys().cloned().collect(),
@@ -2947,24 +2951,6 @@ mod tests {
         .unwrap()
     }
 
-    /// Records which triggers arrived together, which is how a batch sent at
-    /// one tag is told apart from values dribbled in one at a time.
-    struct BatchExecutor {
-        seen: Mutex<Vec<Vec<String>>>,
-    }
-
-    impl ReactionExecutor for BatchExecutor {
-        fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
-            self.seen
-                .lock()
-                .unwrap()
-                .push(invocation.trigger_values.keys().cloned().collect());
-            let writes = BTreeMap::from([("memo".into(), json!("done"))]);
-            validate_contract(&invocation.contract, &writes)?;
-            Ok(writes)
-        }
-    }
-
     /// Records the tags a run actually passed through, so a projection can be
     /// held against the thing it claims to predict.
     struct RunTags {
@@ -2977,8 +2963,16 @@ mod tests {
             timestamp: u64,
             microstep: u64,
             _lag: u64,
-            _ports: &BTreeMap<String, Value>,
+            ports: &BTreeMap<String, Value>,
         ) {
+            // Only tags where something is present. The loop seeds the start
+            // tag whether or not anything was supplied, so a program with no
+            // inputs passes through an empty (0, 0) that carries no event and
+            // fires no reaction. The timeline does not draw it, and a test that
+            // counted it would be asserting an artefact rather than agreement.
+            if ports.is_empty() {
+                return;
+            }
             self.tags.lock().unwrap().push((timestamp, microstep));
         }
     }
@@ -2999,10 +2993,10 @@ mod tests {
         tags
     }
 
-    fn projected_tags(state: &VmState, present: &[&str]) -> Vec<(u64, u64)> {
+    fn timeline_tags(state: &VmState, present: &[&str]) -> Vec<(u64, u64)> {
         let present = present.iter().map(|name| name.to_string()).collect();
-        let (steps, truncated) = project(state, &present, 256);
-        assert!(!truncated, "projection ran out of room");
+        let (steps, truncated) = timeline(state, &present, 256);
+        assert!(!truncated, "the timeline ran out of room");
         steps
             .iter()
             .map(|step| (step.timestamp, step.microstep))
@@ -3010,54 +3004,35 @@ mod tests {
     }
 
     #[test]
-    fn a_program_nobody_has_fed_projects_nothing() {
-        // An open input nobody has set means the program does not move, which
-        // is what the timeline should show before anything is sent.
+    fn a_program_nothing_can_start_shows_nothing() {
+        // No timer, and every input dangling: there is nothing to begin it, so
+        // the timeline is empty rather than guessing at a first tag.
         let state = verify(&open_input_bytecode()).unwrap();
-        let (steps, truncated) = project(&state, &BTreeSet::new(), 256);
+        let (steps, truncated) = timeline(&state, &BTreeSet::new(), 256);
         assert!(steps.is_empty(), "{steps:?}");
         assert!(!truncated);
-
-        // Setting one of the two is enough: the reaction's triggers are an OR,
-        // and the projection has to agree with the loop about that.
-        //
-        // One tag, not two: `memo` is a port, a port costs nothing, and so the
-        // reaction's effect is present at the tag that triggered it.
-        let one = BTreeSet::from(["topic".to_string()]);
-        let (steps, _) = project(&state, &one, 256);
-        assert_eq!(steps.len(), 1, "{steps:?}");
-        assert_eq!(
-            steps[0].events,
-            vec!["memo".to_string(), "topic".to_string()]
-        );
-        assert_eq!(steps[0].reactions, vec!["reaction.0".to_string()]);
     }
 
     #[test]
-    fn a_projection_hits_the_tags_the_run_does() {
-        // The claim the timeline makes: what a program does is decided by the
-        // program. If these disagree, one of them is lying to the operator.
-        let state = verify(&open_input_bytecode()).unwrap();
-        let executor = BatchExecutor {
-            seen: Mutex::new(Vec::new()),
+    fn the_timeline_hits_the_tags_the_run_does() {
+        // The claim it makes: what a program does is decided by the program. If
+        // these disagree, one of them is lying to the operator. A timer starts
+        // both, which is the only thing that can start either.
+        let state = verify(&timer_bytecode(3, 0)).unwrap();
+        let executor = TimerExecutor {
+            fired: Mutex::new(Vec::new()),
+            stop_after: 0,
         };
-        let real = tags_of_a_real_run(
-            &state,
-            BTreeMap::from([
-                ("topic".to_string(), json!("nesting")),
-                ("depth".to_string(), json!(3)),
-            ]),
-            &executor,
-        );
-
-        assert_eq!(projected_tags(&state, &["topic", "depth"]), real);
+        let real = tags_of_a_real_run(&state, BTreeMap::new(), &executor);
+        assert!(!real.is_empty(), "the run reached no tags");
+        assert_eq!(timeline_tags(&state, &[]), real);
     }
 
     #[test]
     fn a_periodic_projection_stops_rather_than_running_forever() {
         // A periodic timer has no end. A preview has to have one.
         let state = verify(&timer_bytecode(0, 10)).unwrap();
-        let (steps, truncated) = project(&state, &BTreeSet::new(), 8);
+        let (steps, truncated) = timeline(&state, &BTreeSet::new(), 8);
         assert!(truncated);
         assert_eq!(steps.len(), 8);
         assert_eq!(steps[0].timestamp, 0);
@@ -3946,7 +3921,7 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
             },
         );
-        assert_eq!(projected_tags(&state, &["start"]), real);
+        assert_eq!(timeline_tags(&state, &["start"]), real);
     }
 
     struct OrTriggerExecutor {

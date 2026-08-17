@@ -1,6 +1,6 @@
 "use client";
 
-import type { ProjectedStep } from "./lib/runtime-client";
+import type { TimelineStep } from "./lib/runtime-client";
 
 /**
  * The logical timeline of a program: every tag it passes through, in order.
@@ -28,7 +28,7 @@ export function Timeline({
   onScrub,
   onClose,
 }: {
-  steps: ProjectedStep[];
+  steps: TimelineStep[];
   /** Which step is showing; the run's own position when live. */
   index: number;
   /** Following a run rather than being scrubbed by hand. */

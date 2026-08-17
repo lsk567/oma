@@ -28,7 +28,7 @@ import {
   type ProposedDesign,
   type RunRecord,
 } from "./lib/protocol";
-import type { ProjectedStep } from "./lib/runtime-client";
+import type { TimelineStep } from "./lib/runtime-client";
 import {
   answerPanel,
   ASSISTANT,
@@ -37,7 +37,7 @@ import {
   fetchDiagram,
   fetchPanel,
   fetchRun,
-  projectProgram,
+  checkProgram,
   startRun,
   subscribeToDiagram,
 } from "./lib/runtime-client";
@@ -101,7 +101,7 @@ export function Studio({
   const [sourceErrors, setSourceErrors] = useState<string[]>([]);
   const [checking, setChecking] = useState(false);
   /** Every tag the program passes through, projected or observed. */
-  const [steps, setSteps] = useState<ProjectedStep[]>([]);
+  const [steps, setSteps] = useState<TimelineStep[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [stepIndex, setStepIndex] = useState(0);
   const [timelineOpen, setTimelineOpen] = useState(false);
@@ -501,11 +501,17 @@ export function Studio({
       setChecking(true);
       // Checking and projecting are the same question asked twice — is this a
       // program, and what would it do — so they are asked together.
-      projectProgram(
+      // The timeline is asked for because the editor draws it. Both answers
+      // come off one compile, so they cannot disagree about which text they
+      // are describing.
+      checkProgram(
         serveUrl,
         source,
         filename,
-        presentKey ? presentKey.split("\u0000") : [],
+        {
+          timeline: true,
+          present: presentKey ? presentKey.split("\u0000") : [],
+        },
         abort.signal,
       )
         .then((result) => {

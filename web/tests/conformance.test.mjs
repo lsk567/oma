@@ -307,32 +307,38 @@ describe("wire conformance between the fake and the real daemon", { skip: WIRE_S
     }
   });
 
-  test("a projection is what the run then does", async () => {
-    // The timeline's whole claim. If the projection and the run disagree, the
-    // operator is being shown a prediction of a different program.
-    const project = async (present) =>
+  test("a timeline is what the run then does, and is asked for", async () => {
+    // The timeline's whole claim. If it and the run disagree, the operator is
+    // being shown a prediction of a different program.
+    const check = async (body) =>
       (
-        await fetch(`${real.url}/v1/programs/project`, {
-          ...post({ program: STUB_FLOW, filename: "StubFlow.omar", present }),
+        await fetch(`${real.url}/v1/programs/check`, {
+          ...post({ program: STUB_FLOW, filename: "StubFlow.omar", ...body }),
         })
       ).json();
 
+    // Validity alone. A caller that did not ask for a timeline is not handed
+    // one to ignore.
+    const plain = await check({});
+    assert.equal(plain.ok, true, JSON.stringify(plain));
+    assert.deepEqual(plain.open_inputs, ["flow.topic"]);
+    assert.equal(plain.steps, undefined);
+    assert.equal(plain.truncated, undefined);
+
     // Nothing set: the program does not move, and says so rather than
     // pretending it would.
-    const idle = await project([]);
-    assert.equal(idle.ok, true, JSON.stringify(idle));
-    assert.deepEqual(idle.open_inputs, ["flow.topic"]);
+    const idle = await check({ timeline: true, present: [] });
     assert.deepEqual(idle.steps, []);
 
-    const projected = await project(["flow.topic"]);
-    assert.equal(projected.truncated, false);
-    assert.ok(projected.steps.length >= 2, JSON.stringify(projected.steps));
-    assert.deepEqual(projected.steps[0].events, ["flow.topic"]);
+    const drawn = await check({ timeline: true, present: ["flow.topic"] });
+    assert.equal(drawn.truncated, false);
+    assert.ok(drawn.steps.length >= 2, JSON.stringify(drawn.steps));
+    assert.deepEqual(drawn.steps[0].events, ["flow.topic"]);
 
-    // A program that does not compile is reported, not projected.
+    // A program that does not compile is reported, not drawn.
     const broken = await (
-      await fetch(`${real.url}/v1/programs/project`, {
-        ...post({ program: "team Broken {", filename: "Broken.omar", present: [] }),
+      await fetch(`${real.url}/v1/programs/check`, {
+        ...post({ program: "team Broken {", filename: "Broken.omar", timeline: true }),
       })
     ).json();
     assert.equal(broken.ok, false);
