@@ -1007,11 +1007,15 @@ h2 {
   stroke-linecap: round;
 }
 
-/* A delayed connection still carries a value; the dashes are longer so it is
-   told apart from the wiring inside a reaction. */
-.omar-edge.delayed {
-  stroke: #7b648f;
-  stroke-dasharray: 8 5;
+/* A delayed connection is a connection: solid, like any other. What it carries
+   is the same, and only the when differs — so the when is written on it rather
+   than encoded in the stroke, which could only ever say "some delay" and never
+   which. The line breaks around the number instead of running through it. */
+.omar-edge-delay {
+  fill: #5f5c66;
+  font: 9px ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 /* Triggers and effects are a reaction's own wiring, not a path a value travels
