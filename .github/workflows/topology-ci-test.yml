@@ -48,7 +48,7 @@ jobs:
           test: false
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y tmux
+        run: .github/scripts/install-packages.sh tmux
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4

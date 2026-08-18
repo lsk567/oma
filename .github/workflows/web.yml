@@ -59,7 +59,7 @@ jobs:
         run: cargo build --bin omar
         working-directory: .
       # Topology agents run in tmux panes, so a real run needs one.
-      - run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: .github/scripts/install-packages.sh tmux
         working-directory: .
       - run: npm ci
       # Probes the runtime for the features it needs and skips what is missing,
@@ -83,7 +83,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
       # `omar serve` launches the assistant in a tmux pane.
-      - run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: .github/scripts/install-packages.sh tmux
         working-directory: .
       - run: npm ci
       - name: Start both, check both, stop both

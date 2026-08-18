@@ -14,6 +14,7 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -37,6 +38,7 @@ jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -51,6 +53,7 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -76,6 +79,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -83,7 +87,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
+        run: .github/scripts/install-packages.sh tmux
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -102,6 +106,7 @@ jobs:
   omar-language:
     name: OMAR Language
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -220,6 +225,7 @@ jobs:
   popup-quote-integration:
     name: Popup Quote Integration
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -227,7 +233,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install tmux and zsh
-        run: sudo apt-get update && sudo apt-get install -y tmux zsh
+        run: .github/scripts/install-packages.sh tmux zsh
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -249,6 +255,7 @@ jobs:
   unresolved-session-integration:
     name: Unresolved Session Integration
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -256,7 +263,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
+        run: .github/scripts/install-packages.sh tmux
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -278,6 +285,7 @@ jobs:
   codex-yolo-integration:
     name: Codex YOLO Integration
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -285,7 +293,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
+        run: .github/scripts/install-packages.sh tmux
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -307,6 +315,7 @@ jobs:
   ea-zero-selector-integration:
     name: EA Zero Selector Integration
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -314,7 +323,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
+        run: .github/scripts/install-packages.sh tmux
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -336,6 +345,7 @@ jobs:
   dashboard-relaunch-handoff-integration:
     name: Dashboard Relaunch Handoff Integration
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -343,7 +353,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
+        run: .github/scripts/install-packages.sh tmux
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -365,6 +375,7 @@ jobs:
   opencode-compat:
     name: Opencode Compatibility
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -372,7 +383,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
+        run: .github/scripts/install-packages.sh tmux
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -406,6 +417,7 @@ jobs:
   build:
     name: Build
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -443,6 +455,7 @@ jobs:
     name: CI Success
     needs: [check, fmt, clippy, test, omar-language, popup-quote-integration, unresolved-session-integration, codex-yolo-integration, ea-zero-selector-integration, dashboard-relaunch-handoff-integration, opencode-compat, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: always()
     steps:
       - name: Check all jobs passed
