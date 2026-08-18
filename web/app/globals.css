@@ -2072,8 +2072,8 @@ h2 {
   color: #d8caff;
 }
 
-/* The screen renders at the agent's own geometry and is scaled down to fit,
-   never reflowed: reflowing would resize the agent's tmux window. */
+/* The screen reflows to the panel and the session is told to match, so the
+   text is always at its own scale. */
 .terminal-frame {
   position: relative;
   flex: 1;
@@ -2081,13 +2081,14 @@ h2 {
   overflow: hidden;
 }
 
-/* Taken out of the flow: its box keeps the terminal's unscaled size, and the
-   scale that fits it is applied about the top-left with an explicit offset. */
+/* Fills the frame, and must: the fit addon measures this element to decide how
+   many characters fit. Sized by its own content -- which is what it was while
+   the screen was scaled rather than reflowed -- it can only ever report the
+   terminal's current size back to it, and the terminal stays at the 80x24
+   xterm opens with however large the window gets. */
 .terminal-screen {
   position: absolute;
-  top: 0;
-  left: 0;
-  transform-origin: 0 0;
+  inset: 0;
 }
 
 .terminal-note {

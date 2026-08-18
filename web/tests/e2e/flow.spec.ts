@@ -1325,6 +1325,68 @@ test("dragging the canvas does not select the diagram", async ({ page }) => {
   expect(await scene.getAttribute("transform")).not.toBe(before);
 });
 
+test("a drag resizes the view every frame and the session once", async ({
+  page,
+}) => {
+  // Reflowing locally is cheap: xterm re-wraps its own buffer. Telling the
+  // session is not — it resizes a tmux window and redraws the pane — so a drag
+  // that sent one for every pixel would spend the whole drag redrawing.
+  //
+  // VS Code splits this the same way and for the same reason, debouncing the
+  // expensive half by 100ms ("vertical resize is cheap and horizontal resize is
+  // expensive due to reflow", terminalResizeDebouncer.ts).
+  await fake.close();
+  fake = (await startFakeServe({
+    stepMs: 3000,
+    port: FAKE_SERVE_PORT,
+    terminal: { cols: 200, rows: 50 },
+  })) as FakeServe;
+  await useFakeServe(page);
+
+  // Every geometry the client asks the session for.
+  const claims: string[] = [];
+  page.on("websocket", (socket) => {
+    socket.on("framesent", (frame) => {
+      if (typeof frame.payload === "string" && frame.payload.startsWith("{")) {
+        claims.push(frame.payload);
+      }
+    });
+  });
+
+  await page.getByLabel("Describe a workflow").fill("Review the release plan");
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "Inspect on terminal" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByRole("dialog")).toContainText("attached");
+
+  const opening = claims.length;
+
+  // A drag: sizes arriving every frame, which is what a mouse produces.
+  // `setViewportSize` waits for each one to settle, so it cannot show this.
+  await page.evaluate(async () => {
+    const panel = document.querySelector(".terminal-panel") as HTMLElement;
+    for (let width = 1200; width >= 900; width -= 6) {
+      panel.style.width = `${width}px`;
+      await new Promise((frame) => requestAnimationFrame(frame));
+    }
+  });
+  await page.waitForTimeout(600);
+
+  const during = claims.length - opening;
+  // Before this was split, a fifty-frame drag sent fifty. Heights pass through
+  // as they happen and the width lands once, so a purely horizontal drag like
+  // this one settles on a single ask.
+  expect(during, `sent ${during} geometries for a 50-frame drag`).toBeLessThanOrEqual(3);
+
+  // And the last thing it asked for is the size it ended at, so the session is
+  // not left reflowed to something the panel no longer is.
+  const settled = JSON.parse(claims.at(-1)!);
+  const box = (await page.locator(".terminal-frame").boundingBox())!;
+  expect(settled.cols).toBeGreaterThan(0);
+  expect(box.width).toBeGreaterThan(0);
+  await expect(page.getByRole("dialog")).toContainText(`${settled.cols}×${settled.rows}`);
+});
+
 test("the terminal fits the panel and reflows to it", async ({ page }) => {
   // Scaling a fixed-size terminal to the panel meant getting a placement right
   // as well as a size, and the placement is what kept spilling off the edge. A
@@ -1346,12 +1408,19 @@ test("the terminal fits the panel and reflows to it", async ({ page }) => {
   const inside = async () => {
     const frame = (await page.locator(".terminal-frame").boundingBox())!;
     const screen = (await page.locator(".xterm-screen").boundingBox())!;
-    return (
+    const contained =
       screen.x >= frame.x - 1 &&
       screen.y >= frame.y - 1 &&
       screen.x + screen.width <= frame.x + frame.width + 1 &&
-      screen.y + screen.height <= frame.y + frame.height + 1
-    );
+      screen.y + screen.height <= frame.y + frame.height + 1;
+    // And fills it. Containment alone is not fitting: a terminal left at the
+    // 80x24 xterm opens with sits well inside a large panel without ever
+    // having measured it, which is exactly what a screen sized by its own
+    // content does. Most of the frame rather than all of it, because the
+    // scrollbar takes a strip and a partial column cannot be drawn.
+    const filled =
+      screen.width > frame.width * 0.9 && screen.height > frame.height * 0.9;
+    return contained && filled;
   };
   await expect.poll(inside, { timeout: 4000 }).toBe(true);
 
