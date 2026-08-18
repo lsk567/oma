@@ -1408,12 +1408,19 @@ test("the terminal fits the panel and reflows to it", async ({ page }) => {
   const inside = async () => {
     const frame = (await page.locator(".terminal-frame").boundingBox())!;
     const screen = (await page.locator(".xterm-screen").boundingBox())!;
-    return (
+    const contained =
       screen.x >= frame.x - 1 &&
       screen.y >= frame.y - 1 &&
       screen.x + screen.width <= frame.x + frame.width + 1 &&
-      screen.y + screen.height <= frame.y + frame.height + 1
-    );
+      screen.y + screen.height <= frame.y + frame.height + 1;
+    // And fills it. Containment alone is not fitting: a terminal left at the
+    // 80x24 xterm opens with sits well inside a large panel without ever
+    // having measured it, which is exactly what a screen sized by its own
+    // content does. Most of the frame rather than all of it, because the
+    // scrollbar takes a strip and a partial column cannot be drawn.
+    const filled =
+      screen.width > frame.width * 0.9 && screen.height > frame.height * 0.9;
+    return contained && filled;
   };
   await expect.poll(inside, { timeout: 4000 }).toBe(true);
 
