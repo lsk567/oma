@@ -1827,6 +1827,141 @@ fn precedence_layers(state: &VmState) -> Result<Vec<Vec<String>>> {
     Ok(layers)
 }
 
+/// One logical tag a program would pass through.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TimelineStep {
+    pub timestamp: u64,
+    pub microstep: u64,
+    /// Ports and timers carrying a value at this tag, in name order.
+    pub events: Vec<String>,
+    /// Reactions whose triggers are present, in the order they would run.
+    pub reactions: Vec<String>,
+}
+
+/// The tags a program would pass through, worked out without running it.
+///
+/// The determinism claim made visible: which tags a program reaches and what
+/// fires at each are decided by the program, not by what the agents happen to
+/// say. So they can be shown before anything is deployed.
+///
+/// `present` names the ports to treat as carrying a value at the first tag —
+/// the inputs a run would be admitted with. Timers are always seeded; they are
+/// what starts a program that starts itself. Presence is all that is needed:
+/// a reaction fires on a trigger being there, whatever it holds.
+///
+/// Values are not worked out, only presence — an agent's answer is the one
+/// thing here that is not determined. Two consequences worth knowing:
+///
+/// - a reaction whose contract offers alternatives (`-> (x|y)`) is shown as
+///   writing *both*, because which one it picks is the agent's to decide. This
+///   over-approximates, and never misses a step;
+/// - it cannot know a value that decides a delay, and nothing in the language
+///   has one, which is why this works at all.
+///
+/// Scheduling is not re-implemented here. `settle_connections`, `deliver` and
+/// `precedence_layers` are the same ones the event loop walks, so what settles
+/// at a tag — and which tag it settles at — cannot drift between what is shown
+/// and what runs.
+pub fn timeline(
+    state: &VmState,
+    present: &BTreeSet<String>,
+    max_steps: usize,
+) -> (Vec<TimelineStep>, bool) {
+    let seed: BTreeMap<String, Value> = present
+        .iter()
+        .filter(|name| state.ports.contains_key(*name))
+        .map(|name| (name.clone(), Value::Null))
+        .collect();
+    let mut queue = BTreeMap::from([(Tag::START, seed)]);
+    for (name, timer) in &state.timers {
+        queue
+            .entry(Tag {
+                timestamp: timer.offset,
+                microstep: 0,
+            })
+            .or_default()
+            .insert(name.clone(), Value::Null);
+    }
+
+    // A program with a causality loop has no order to project; `verify` refuses
+    // it before a run, and there is nothing to show for one here either.
+    let Ok(layers) = precedence_layers(state) else {
+        return (Vec::new(), false);
+    };
+
+    let mut steps = Vec::new();
+    while let Some((tag, events)) = queue.pop_first() {
+        if events.is_empty() {
+            continue;
+        }
+        if steps.len() >= max_steps {
+            return (steps, true);
+        }
+
+        let mut events = events;
+        let mut carried = BTreeSet::new();
+        let _ = settle_connections(state, &mut events, &mut queue, tag, &mut carried);
+
+        for (name, timer) in &state.timers {
+            if timer.period > 0 && events.contains_key(name) {
+                let Some(next) = tag.timestamp.checked_add(timer.period) else {
+                    continue;
+                };
+                queue
+                    .entry(Tag {
+                        timestamp: next,
+                        microstep: 0,
+                    })
+                    .or_default()
+                    .insert(name.clone(), Value::Null);
+            }
+        }
+
+        // The same walk down the precedence order the event loop makes, with
+        // every effect taken rather than the one an agent would have picked.
+        let mut fired = Vec::new();
+        for layer in &layers {
+            let mut enabled: Vec<_> = layer
+                .iter()
+                .filter_map(|id| state.reactions.get_key_value(id))
+                .filter(|(_, reaction)| {
+                    reaction
+                        .triggers
+                        .iter()
+                        .any(|trigger| events.contains_key(trigger))
+                })
+                .collect();
+            if enabled.is_empty() {
+                continue;
+            }
+            enabled.sort_by_key(|(_, reaction)| reaction.order);
+            for (id, reaction) in &enabled {
+                fired.push((*id).clone());
+                for effect in &reaction.effects {
+                    let _ = deliver(
+                        state,
+                        &mut events,
+                        &mut queue,
+                        tag,
+                        effect,
+                        Value::Null,
+                        Delay::INSTANT,
+                    );
+                }
+            }
+            let _ = settle_connections(state, &mut events, &mut queue, tag, &mut carried);
+        }
+
+        steps.push(TimelineStep {
+            timestamp: tag.timestamp,
+            microstep: tag.microstep,
+            events: events.keys().cloned().collect(),
+            reactions: fired,
+        });
+    }
+    (steps, false)
+}
+
 /// How a run's logical clock is held against the wall clock.
 ///
 /// Real time by default: a tag at logical timestamp T does not run before T has
@@ -1886,6 +2021,16 @@ fn run_event_loop_observed<E: ReactionExecutor>(
     let layers = precedence_layers(state)?;
 
     while let Some((tag, events)) = queue.pop_first() {
+        // A tag nothing is present at is not a moment the run passed through.
+        // No reaction can fire at one -- enabling asks whether any trigger is
+        // in `events`, which is false for every reaction when it is empty --
+        // and no connection, output or timer can move either. Announcing it
+        // would tell a client the run had advanced when nothing had. The only
+        // way to reach one is a program admitted with no inputs, which seeds
+        // the start tag with an empty map.
+        if events.is_empty() {
+            continue;
+        }
         // Everything this tag knows. It grows as the tag settles: an
         // instantaneous connection or a reaction's effect joins it rather than
         // landing on a later tag, and the reactions downstream read it before
@@ -2793,6 +2938,131 @@ mod tests {
         assert!(outputs.is_empty(), "nothing downstream ran: {outputs:?}");
     }
 
+    /// A two-input program with nothing feeding it: exactly the shape that has
+    /// to sit still until the operator sends something.
+    fn open_input_bytecode() -> Bytecode {
+        serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Desk",
+              "instructions": [
+                {"op":"begin_plan","team":"Desk"},
+                {"op":"spawn_agent","name":"clerk","backend":"Codex"},
+                {"op":"define_port","kind":"input","name":"topic","type":"string"},
+                {"op":"define_port","kind":"input","name":"depth","type":"int"},
+                {"op":"define_port","kind":"output","name":"memo","type":"string"},
+                {"op":"install_reaction","id":"reaction.0","agent":"clerk",
+                 "triggers":["topic","depth"],"effects":["memo"],
+                 "contract":"memo","prompt":"p"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap()
+    }
+
+    /// Records the tags a run actually passed through, so a projection can be
+    /// held against the thing it claims to predict.
+    struct RunTags {
+        tags: Mutex<Vec<(u64, u64)>>,
+    }
+
+    impl TopologyObserver for RunTags {
+        fn tag_advanced(
+            &self,
+            timestamp: u64,
+            microstep: u64,
+            _lag: u64,
+            _ports: &BTreeMap<String, Value>,
+        ) {
+            self.tags.lock().unwrap().push((timestamp, microstep));
+        }
+    }
+
+    fn tags_of_a_real_run<E: ReactionExecutor>(
+        state: &VmState,
+        inputs: BTreeMap<String, Value>,
+        executor: &E,
+    ) -> Vec<(u64, u64)> {
+        let observer = RunTags {
+            tags: Mutex::new(Vec::new()),
+        };
+        // Fast: this compares the tags a run passes through against the
+        // projection of them, and waiting out real delays would say nothing
+        // more about whether the two agree.
+        run_event_loop_observed(state, inputs, executor, &observer, Pace::Fast).unwrap();
+        let tags = observer.tags.lock().unwrap().clone();
+        tags
+    }
+
+    fn timeline_tags(state: &VmState, present: &[&str]) -> Vec<(u64, u64)> {
+        let present = present.iter().map(|name| name.to_string()).collect();
+        let (steps, truncated) = timeline(state, &present, 256);
+        assert!(!truncated, "the timeline ran out of room");
+        steps
+            .iter()
+            .map(|step| (step.timestamp, step.microstep))
+            .collect()
+    }
+
+    #[test]
+    fn a_run_nothing_can_start_reaches_no_tag_at_all() {
+        // The counterpart to the timeline showing nothing: a tag nothing is
+        // present at is not a moment the run passed through, so the run does
+        // not announce one. It used to announce (0, 0) — the start tag, seeded
+        // whether or not anything was supplied — which told a client the run
+        // had advanced when nothing had.
+        let state = verify(&open_input_bytecode()).unwrap();
+        let observer = RunTags {
+            tags: Mutex::new(Vec::new()),
+        };
+        let outputs = run_event_loop_observed(
+            &state,
+            BTreeMap::new(),
+            &SilentExecutor,
+            &observer,
+            Pace::Fast,
+        )
+        .unwrap();
+        assert!(observer.tags.lock().unwrap().is_empty(), "announced a tag");
+        assert!(outputs.is_empty());
+    }
+
+    #[test]
+    fn a_program_nothing_can_start_shows_nothing() {
+        // No timer, and every input dangling: there is nothing to begin it, so
+        // the timeline is empty rather than guessing at a first tag.
+        let state = verify(&open_input_bytecode()).unwrap();
+        let (steps, truncated) = timeline(&state, &BTreeSet::new(), 256);
+        assert!(steps.is_empty(), "{steps:?}");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn the_timeline_hits_the_tags_the_run_does() {
+        // The claim it makes: what a program does is decided by the program. If
+        // these disagree, one of them is lying to the operator. A timer starts
+        // both, which is the only thing that can start either.
+        let state = verify(&timer_bytecode(3, 0)).unwrap();
+        let executor = TimerExecutor {
+            fired: Mutex::new(Vec::new()),
+            stop_after: 0,
+        };
+        let real = tags_of_a_real_run(&state, BTreeMap::new(), &executor);
+        assert!(!real.is_empty(), "the run reached no tags");
+        assert_eq!(timeline_tags(&state, &[]), real);
+    }
+
+    #[test]
+    fn a_periodic_projection_stops_rather_than_running_forever() {
+        // A periodic timer has no end. A preview has to have one.
+        let state = verify(&timer_bytecode(0, 10)).unwrap();
+        let (steps, truncated) = timeline(&state, &BTreeSet::new(), 8);
+        assert!(truncated);
+        assert_eq!(steps.len(), 8);
+        assert_eq!(steps[0].timestamp, 0);
+    }
+
     #[test]
     fn a_client_is_a_backend_however_it_is_spelled() {
         assert!(is_web_backend("Web"));
@@ -3664,6 +3934,19 @@ mod tests {
             *executor.calls.lock().unwrap(),
             vec!["reaction.0", "reaction.1", "reaction.2"]
         );
+
+        // Delays are where a re-implementation would drift first: a fixed port
+        // delay and a connection delay both move a tag, and the projection has
+        // to move it the same way. It shares `enqueue_event` with the loop so
+        // that it cannot, and this is what says so.
+        let real = tags_of_a_real_run(
+            &state,
+            BTreeMap::from([("start".into(), json!(7))]),
+            &SuperdenseExecutor {
+                calls: Mutex::new(Vec::new()),
+            },
+        );
+        assert_eq!(timeline_tags(&state, &["start"]), real);
     }
 
     struct OrTriggerExecutor {

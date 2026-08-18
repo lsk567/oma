@@ -237,6 +237,42 @@ test("a web component's panel opens from the diagram, and answers it", async ({
   await expect(panel).toBeHidden();
 });
 
+test("a delayed connection is solid, with its delay in a break in the line", async ({
+  page,
+}) => {
+  // Captured from a real compile of tests/topology/src/PortManager.omar, whose
+  // feedback carries a period so the loop closes over a tick.
+  await fake.close();
+  fake = (await startFakeServe({
+    stepMs: 30,
+    port: FAKE_SERVE_PORT,
+    snapshot: "diagram-delay.v1.json",
+  })) as FakeServe;
+  await useFakeServe(page);
+  await draftUntilProposed(page);
+
+  // Both connections cost something, and each says what. `after 30s` is a
+  // duration; `after 0` costs a microstep, which is a step in order rather
+  // than in time and so is named instead of measured.
+  const label = page.locator(".omar-edge-delay");
+  await expect(label).toHaveCount(2);
+  await expect(label).toHaveText(["\u03bcstep", "30s"]);
+
+  // Solid, like any other connection: a stroke that could only say "some
+  // delay" and never which is not worth spending the stroke on.
+  const dashes = await page
+    .locator(".omar-edge.connection")
+    .first()
+    .evaluate((node) => getComputedStyle(node).strokeDasharray);
+  expect(["none", ""]).toContain(dashes);
+
+  // The line breaks around the number rather than running through it, so a
+  // connection carrying one is drawn as two paths where a plain one is drawn
+  // as a single path. Both of these carry one.
+  const connections = await page.locator(".omar-edge.connection").count();
+  expect(connections).toBe(4);
+});
+
 test("Enter sends, modified Enter writes a new line", async ({ page }) => {
   await useFakeServe(page);
   const composer = page.getByLabel("Describe a workflow");
@@ -1188,6 +1224,37 @@ test("an edge into a reaction actually reaches it", async ({ page }) => {
       expect(line.y).toBeLessThanOrEqual(box.y + box.height + 2);
     }
   }
+});
+
+test("the timeline projects a program before anything is deployed", async ({
+  page,
+}) => {
+  // The determinism claim, made checkable: what a program will do is decided
+  // by the program, so it can be shown before it has done it.
+  await useFakeServe(page);
+  await draftUntilProposed(page);
+
+  await page.getByRole("button", { name: "▲ Timeline" }).click();
+  const timeline = page.getByLabel("Logical timeline");
+  await expect(timeline).toBeVisible();
+
+  // Nothing has run, and the tags are there anyway.
+  await expect(timeline).toContainText("projected");
+  await expect(timeline.locator(".timeline-tag")).toHaveText(/^\d+:\d+$/);
+
+  // Stepping moves through tags, and the diagram marks what each one touches.
+  const scrubber = timeline.getByLabel("Logical tag");
+  await expect(scrubber).toHaveValue("0");
+  await expect(page.locator(".omar-reaction.at-tag").first()).toBeVisible();
+  await expect(page.locator(".off-tag").first()).toBeVisible();
+
+  await timeline.getByRole("button", { name: "Next tag" }).click();
+  await expect(scrubber).toHaveValue("1");
+  await timeline.getByRole("button", { name: "Previous tag" }).click();
+  await expect(scrubber).toHaveValue("0");
+
+  await timeline.getByRole("button", { name: "Hide" }).click();
+  await expect(timeline).toBeHidden();
 });
 
 test("the assistant's terminal opens from the wait, not from a menu", async ({

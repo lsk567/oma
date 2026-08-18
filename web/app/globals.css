@@ -1007,9 +1007,24 @@ h2 {
   stroke-linecap: round;
 }
 
-.omar-edge.delayed {
-  stroke: #7b648f;
-  stroke-dasharray: 5 4;
+/* A delayed connection is a connection: solid, like any other. What it carries
+   is the same, and only the when differs — so the when is written on it rather
+   than encoded in the stroke, which could only ever say "some delay" and never
+   which. The line breaks around the number instead of running through it. */
+.omar-edge-delay {
+  fill: #5f5c66;
+  font: 9px ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* Triggers and effects are a reaction's own wiring, not a path a value travels
+   between ports. Solid is reserved for connections, which are the edges that
+   move something from one place to another. */
+.omar-edge.trigger,
+.omar-edge.effect {
+  stroke-dasharray: 3 3;
+  opacity: 0.75;
 }
 
 
@@ -1734,6 +1749,270 @@ h2 {
 
 /* A terminal attached to a running agent. It sits over the studio rather than
    in a separate window so the diagram stays behind it for context. */
+/* The logical timeline: every tag the program passes through.
+
+   Sits under the diagram because it is the same thing on another axis — the
+   drawing is what exists, this is when it happens. */
+.timeline {
+  flex: none;
+  border-top: 1px solid var(--line);
+  background: var(--panel-2);
+  padding: 10px 14px;
+}
+
+.timeline-handle {
+  flex: none;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 6px 14px;
+  text-align: left;
+}
+
+.timeline-handle:hover {
+  color: #d8caff;
+}
+
+.timeline-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.timeline-controls button {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1;
+  padding: 4px 9px;
+}
+
+.timeline-controls button:disabled {
+  opacity: 0.35;
+}
+
+.timeline-controls input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--purple);
+}
+
+.timeline-close {
+  font-size: 11px !important;
+}
+
+.timeline-readout {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.timeline-tag {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-bright, #f5f2fa);
+}
+
+.timeline-mode {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+  letter-spacing: 0.04em;
+}
+
+/* Following a run rather than predicting one. */
+.timeline-mode.live {
+  border-color: var(--purple);
+  color: #d8caff;
+}
+
+.timeline-detail,
+.timeline-idle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-truncated {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* What the tag being shown touches, and what it does not. Dimming the rest is
+   what makes a tag legible on a diagram of any size. */
+.at-tag .omar-port,
+.at-tag .omar-action,
+.at-tag .omar-reaction-body {
+  stroke: var(--purple);
+  stroke-width: 1.6;
+}
+
+.off-tag {
+  opacity: 0.32;
+}
+
+/* Set values for open input ports.
+
+   Slides in over the diagram rather than replacing it: the operator picked
+   these ports by clicking them, and a list of qualified names is much easier to
+   place when the drawing is still behind it. */
+.input-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 35;
+  width: min(420px, 92vw);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  box-shadow: -24px 0 60px rgba(0, 0, 0, 0.5);
+  animation: input-panel-in 160ms ease-out;
+}
+
+@keyframes input-panel-in {
+  from {
+    transform: translateX(16px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .input-panel {
+    animation: none;
+  }
+}
+
+.input-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.input-panel-head h2 {
+  margin: 2px 0 0;
+  font-size: 15px;
+}
+
+.input-panel-close {
+  border: 0;
+  background: transparent;
+  color: #9d97a8;
+  font-size: 11px;
+  text-decoration: underline;
+}
+
+.input-panel-close:hover {
+  color: #d8caff;
+}
+
+.input-panel-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* Scrolls on its own: a program can have more open inputs than fit. */
+.input-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.input-port {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+/* The one the operator clicked on the diagram. */
+.input-port.focused {
+  border-color: var(--purple);
+  box-shadow: 0 0 0 1px var(--purple-soft);
+}
+
+.input-port-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.input-port-type {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.input-port input {
+  grid-column: 1 / -1;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.input-port input:focus {
+  outline: none;
+  border-color: var(--purple);
+}
+
+/* Typed text that cannot be read as the port's type. Caught here rather than
+   by the run refusing the batch. */
+.input-port.invalid input {
+  border-color: #c2607a;
+}
+
+.input-port-problem {
+  grid-column: 1 / -1;
+  color: #d98aa0;
+  font-size: 11px;
+}
+
+.input-panel-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* An open input is the operator's to set, so it reads as actionable rather
+   than as one more thing the drawing happens to contain. */
+.omar-port-group.open-input {
+  cursor: pointer;
+}
+
+.omar-port-group.open-input .omar-port {
+  stroke: var(--purple);
+  stroke-width: 1.5;
+}
+
+.omar-port-group.open-input:hover .omar-port {
+  fill: var(--purple);
+}
+
 .terminal-overlay {
   position: fixed;
   inset: 0;

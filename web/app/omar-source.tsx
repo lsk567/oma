@@ -102,6 +102,23 @@ export function OmarEditor({
           spellCheck={false}
           aria-label="OMAR program"
           onChange={(event) => onSourceChange(event.target.value)}
+          onKeyDown={(event) => {
+            // A textarea gives Tab to the browser, which moves focus out of
+            // the editor mid-word. In a code pane it indents.
+            if (event.key !== "Tab" || event.metaKey || event.ctrlKey) return;
+            event.preventDefault();
+            const field = event.currentTarget;
+            const { selectionStart, selectionEnd, value } = field;
+            const indent = "    ";
+            const next = value.slice(0, selectionStart) + indent + value.slice(selectionEnd);
+            onSourceChange(next);
+            // Put the caret after what was inserted; React re-renders from the
+            // value, so this has to happen once that has landed.
+            requestAnimationFrame(() => {
+              field.selectionStart = selectionStart + indent.length;
+              field.selectionEnd = field.selectionStart;
+            });
+          }}
           onScroll={(event) => {
             const pre = behind.current;
             if (!pre) return;

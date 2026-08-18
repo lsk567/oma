@@ -307,6 +307,46 @@ describe("wire conformance between the fake and the real daemon", { skip: WIRE_S
     }
   });
 
+  test("a timeline is what the run then does, and is asked for", async () => {
+    // The timeline's whole claim. If it and the run disagree, the operator is
+    // being shown a prediction of a different program.
+    const check = async (body) =>
+      (
+        await fetch(`${real.url}/v1/programs/check`, {
+          ...post({ program: STUB_FLOW, filename: "StubFlow.omar", ...body }),
+        })
+      ).json();
+
+    // Validity alone. A caller that did not ask for a timeline is not handed
+    // one to ignore.
+    const plain = await check({});
+    assert.equal(plain.ok, true, JSON.stringify(plain));
+    assert.deepEqual(plain.open_inputs, ["flow.topic"]);
+    assert.equal(plain.steps, undefined);
+    assert.equal(plain.truncated, undefined);
+
+    // Nothing set: the program does not move, and says so rather than
+    // pretending it would.
+    const idle = await check({ timeline: true, present: [] });
+    assert.deepEqual(idle.steps, []);
+
+    const drawn = await check({ timeline: true, present: ["flow.topic"] });
+    assert.equal(drawn.truncated, false);
+    assert.ok(drawn.steps.length >= 2, JSON.stringify(drawn.steps));
+    assert.deepEqual(drawn.steps[0].events, ["flow.topic"]);
+
+    // A program that does not compile is reported, not drawn.
+    const broken = await (
+      await fetch(`${real.url}/v1/programs/check`, {
+        ...post({ program: "team Broken {", filename: "Broken.omar", timeline: true }),
+      })
+    ).json();
+    assert.equal(broken.ok, false);
+    assert.match(broken.errors[0], /Broken\.omar/);
+    // The scratch path it was compiled at is not the operator's business.
+    assert.doesNotMatch(broken.errors[0], /omar-check-/);
+  });
+
   test("a real proposal compiles and carries a snapshot the client accepts", async () => {
     // `--no-ea` still writes the context, so the harness can stand in for the
     // assistant without an agent process existing.

@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatMessage as ChatMessageView } from "./chat-message";
 import { AgentTerminal } from "./agent-terminal";
+import { Timeline } from "./timeline";
 import { BackendMenu } from "./backend-menu";
 import { DiagramCanvas } from "./diagram/diagram-canvas";
 import { OmarEditor } from "./omar-source";
@@ -19,6 +20,7 @@ import {
   applyDiagramEvent,
   formatDuration,
   isRunFinished,
+  openInputs,
   type ChatMessage,
   type DiagramEvent,
   type DiagramSnapshot,
@@ -26,15 +28,16 @@ import {
   type ProposedDesign,
   type RunRecord,
 } from "./lib/protocol";
+import type { TimelineStep } from "./lib/runtime-client";
 import {
   answerPanel,
   ASSISTANT,
-  checkProgram,
   checkServeHealth,
   diagramUrlFor,
   fetchDiagram,
   fetchPanel,
   fetchRun,
+  checkProgram,
   startRun,
   subscribeToDiagram,
 } from "./lib/runtime-client";
@@ -97,7 +100,14 @@ export function Studio({
   /** What the compiler said about the source as it stands. */
   const [sourceErrors, setSourceErrors] = useState<string[]>([]);
   const [checking, setChecking] = useState(false);
-  // Chat gets the whole width until there is a design to look at. The operator
+  /** Every tag the program passes through, projected or observed. */
+  const [steps, setSteps] = useState<TimelineStep[]>([]);
+  const [truncated, setTruncated] = useState(false);
+  const [stepIndex, setStepIndex] = useState(0);
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  /** Following the run rather than being scrubbed by hand. */
+  const [following, setFollowing] = useState(true);
+  /** Ports the operator has set on the live run. */
   // can flip back and forth once there is.
   const [tab, setTab] = useState<"source" | "events">("source");
   /** What the run's web agents are waiting to be given. */
@@ -131,6 +141,62 @@ export function Studio({
       each with its own ports and prompts, so this names one rather than
       merging them into a shared view. */
   const [panelAgent, setPanelAgent] = useState<string | null>(null);
+
+  /**
+   * Which inputs the projection should treat as arriving.
+   *
+   * A closed loop has none, and `project` seeds every timer regardless — so a
+   * timer-driven program projects correctly from an empty set. What is left
+   * here is the dangling case: a port nothing writes would never arrive on its
+   * own, and the question the timeline answers is what the program would do if
+   * it did.
+   */
+  const present = useMemo(
+    () => (snapshot ? openInputs(snapshot).map((port) => port.name) : []),
+    [snapshot],
+  );
+  /**
+   * The same list as a value rather than an identity.
+   *
+   * `present` is derived from the snapshot, and the projection sets the
+   * snapshot — so depending on the array itself means every projection asks
+   * for another one, forever. What matters is which ports are in it.
+   */
+  const presentKey = present.join("\u0000");
+  /**
+   * Which check is the current one.
+   *
+   * Aborting a request tells the network to stop; it does not decide whether a
+   * reply that already arrived is still wanted. A reply is applied when it is
+   * the newest one asked for, which is the actual question.
+   */
+  const checkTokenRef = useRef(0);
+
+  /**
+   * What the tag being shown touches: the ports carrying a value and the
+   * reactions firing. Ids, because that is what the drawing is keyed by.
+   */
+  const highlighted = useMemo(() => {
+    const step = steps[stepIndex];
+    if (!step || !snapshot) return new Set<string>();
+    // Looked up rather than built: an id is not its name with a prefix on it —
+    // a reaction's id carries the instance its name may not — and guessing the
+    // shape would light nothing while looking like it worked.
+    const lit = new Set<string>();
+    const mark = (
+      entities: { id: string; name: string }[],
+      names: string[],
+    ) => {
+      for (const name of names) {
+        const found = entities.find((entity) => entity.name === name);
+        if (found) lit.add(found.id);
+      }
+    };
+    mark(snapshot.ports, step.events);
+    mark(snapshot.timers, step.events);
+    mark(snapshot.reactions, step.reactions);
+    return lit;
+  }, [steps, stepIndex, snapshot]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [events, setEvents] = useState<DiagramEvent[]>([]);
   const disconnectRef = useRef<null | (() => void)>(null);
@@ -308,6 +374,21 @@ export function Studio({
         diagramUrl,
         (event) => {
           setEvents((current) => [event, ...current].slice(0, 8));
+          // A live run walks the same list the projection drew. Matched on the
+          // tag rather than counted, so a run that reaches a tag the projection
+          // did not expect leaves the strip where it was rather than lying
+          // about where the run is.
+          if (event.kind === "tag_advanced" && event.tag) {
+            const tag = event.tag;
+            setSteps((current) => {
+              const at = current.findIndex(
+                (step) =>
+                  step.timestamp === tag.timestamp && step.microstep === tag.microstep,
+              );
+              if (at >= 0) setStepIndex(at);
+              return current;
+            });
+          }
           // Apply first, then refetch. The diagram server shuts down with the
           // run, so the fetch that follows the closing events often loses and
           // the picture would otherwise keep a reaction painted as running.
@@ -408,6 +489,8 @@ export function Studio({
   // stale answer cannot land after a newer one.
   useEffect(() => {
     const abort = new AbortController();
+    const token = ++checkTokenRef.current;
+    const current = () => checkTokenRef.current === token;
     const timer = setTimeout(() => {
       // Nothing to check against, or nothing to check: clear rather than leave
       // an error standing for text that is gone.
@@ -416,21 +499,43 @@ export function Studio({
         return;
       }
       setChecking(true);
-      checkProgram(serveUrl, source, filename, abort.signal)
-        .then((result) => setSourceErrors(result.ok ? [] : (result.errors ?? [])))
+      // Checking and projecting are the same question asked twice — is this a
+      // program, and what would it do — so they are asked together.
+      // The timeline is asked for because the editor draws it. Both answers
+      // come off one compile, so they cannot disagree about which text they
+      // are describing.
+      checkProgram(
+        serveUrl,
+        source,
+        filename,
+        {
+          timeline: true,
+          present: presentKey ? presentKey.split("\u0000") : [],
+        },
+        abort.signal,
+      )
+        .then((result) => {
+          if (!current()) return;
+          setSourceErrors(result.ok ? [] : (result.errors ?? []));
+          setSteps(result.steps ?? []);
+          setTruncated(result.truncated ?? false);
+          // A recomputed projection replaces the tail, so a hand-held position
+          // past its end would be pointing at nothing.
+          setStepIndex((current) => Math.min(current, Math.max(0, (result.steps?.length ?? 1) - 1)));
+        })
         .catch((cause) => {
-          if (abort.signal.aborted) return;
+          if (!current() || abort.signal.aborted) return;
           setSourceErrors([cause instanceof Error ? cause.message : String(cause)]);
         })
         .finally(() => {
-          if (!abort.signal.aborted) setChecking(false);
+          if (current()) setChecking(false);
         });
     }, 400);
     return () => {
       clearTimeout(timer);
       abort.abort();
     };
-  }, [source, filename, serveUrl, canRun]);
+  }, [source, filename, serveUrl, canRun, presentKey]);
 
   const isDeployed = run !== null;
 
@@ -687,11 +792,35 @@ export function Studio({
             onToggleComponent={toggleComponent}
             // Agents outlive the run that spawned them, so a finished run can
             // still be opened; before a run there is nothing behind the node.
+            highlight={timelineOpen ? highlighted : undefined}
             onOpenTerminal={canRun && run ? setTerminalAgent : undefined}
             // A web agent has no pane; double-clicking it opens the panel it is
             // answered through instead, which is the only thing there is.
             onOpenPanel={run ? setPanelAgent : undefined}
           />
+          {timelineOpen ? (
+            <Timeline
+              steps={steps}
+              index={stepIndex}
+              live={following && phase === "observing"}
+              truncated={truncated}
+              onScrub={(next) => {
+                // Scrubbing takes the strip off the run: the operator is
+                // looking at a tag, not at where execution has reached.
+                setFollowing(false);
+                setStepIndex(next);
+              }}
+              onClose={() => setTimelineOpen(false)}
+            />
+          ) : (
+            <button
+              type="button"
+              className="timeline-handle"
+              onClick={() => setTimelineOpen(true)}
+            >
+              ▲ Timeline
+            </button>
+          )}
         </section>
         ) : null}
 

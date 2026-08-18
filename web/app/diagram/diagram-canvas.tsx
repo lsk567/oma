@@ -146,8 +146,11 @@ type ReactionView = {
 type EdgeView = {
   id: string;
   kind: string;
-  delayed: boolean;
   path: string;
+  /** The rest of the line, when a delay label breaks it. */
+  tail: string | null;
+  /** The delay, drawn in the break. Null when there is none. */
+  delay: { text: string; at: Point; horizontal: boolean } | null;
 };
 
 type ContainerView = {
@@ -197,6 +200,54 @@ function chevronPoints(width: number, height: number): string {
     `0,${height}`,
     `${CHEVRON_NOTCH},${mid}`,
   ].join(" ");
+}
+
+
+/**
+ * Break a polyline so a label can sit in the gap.
+ *
+ * The alternative is drawing the number over the line and hiding what is behind
+ * it, which needs to know the colour there — and an edge crosses both the
+ * canvas and the containers it passes through, which are different. A real gap
+ * shows whatever is actually behind.
+ *
+ * Broken on the longest segment: the most room, and never on a corner.
+ */
+function breakForLabel(
+  points: Point[],
+  gap: number,
+): { before: Point[]; after: Point[]; at: Point; horizontal: boolean } | null {
+  let index = -1;
+  let longest = -1;
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const length =
+      Math.abs(points[i + 1].x - points[i].x) + Math.abs(points[i + 1].y - points[i].y);
+    if (length > longest) {
+      longest = length;
+      index = i;
+    }
+  }
+  // Not enough line to take a bite out of and still read as a line.
+  if (index < 0 || longest < gap + 20) return null;
+
+  const a = points[index];
+  const b = points[index + 1];
+  const horizontal = Math.abs(b.x - a.x) >= Math.abs(b.y - a.y);
+  const at = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  const half = gap / 2;
+  const step = horizontal ? Math.sign(b.x - a.x) : Math.sign(b.y - a.y);
+  const stop = horizontal
+    ? { x: at.x - step * half, y: at.y }
+    : { x: at.x, y: at.y - step * half };
+  const resume = horizontal
+    ? { x: at.x + step * half, y: at.y }
+    : { x: at.x, y: at.y + step * half };
+  return {
+    before: [...points.slice(0, index + 1), stop],
+    after: [resume, ...points.slice(index + 1)],
+    at,
+    horizontal,
+  };
 }
 
 /** Right-pointing port triangle, centred on the container boundary. */
@@ -877,12 +928,31 @@ function buildLayout(
 
     const start = sourcePort ? 8 : 0;
     const end = targetPort ? 9 : reactionIds.has(edge.target) ? -CHEVRON_NOTCH : 0;
+    const drawn = adjustEnds(squareOff(routed), start, end);
+    // A delay is a fact about the connection, so it is written on it. Only for
+    // connections: a trigger or an effect is a reaction's own wiring and has
+    // no delay to state.
+    //
+    // A plain connection costs nothing and so says nothing. `after 0` costs a
+    // microstep -- a step in order rather than in time -- which no duration can
+    // spell, so it is named instead of measured.
+    const text =
+      edge.kind !== "connection" || edge.delay === null
+        ? null
+        : edge.delay === 0
+          ? "\u03bcstep"
+          : formatDuration(edge.delay);
+    const split = text ? breakForLabel(drawn, textWidth(text, 5.6) + 8) : null;
     return [
       {
         id: edge.id,
         kind: edge.kind,
-        delayed: edge.delay !== null,
-        path: orthogonalPath(adjustEnds(squareOff(routed), start, end)),
+        path: orthogonalPath(split ? split.before : drawn),
+        tail: split ? orthogonalPath(split.after) : null,
+        delay:
+          text && split
+            ? { text, at: split.at, horizontal: split.horizontal }
+            : null,
       },
     ];
   });
@@ -1013,6 +1083,7 @@ export function DiagramCanvas({
   onToggleComponent,
   onOpenTerminal,
   onOpenPanel,
+  highlight,
 }: {
   snapshot: DiagramSnapshot;
   selection?: string[];
@@ -1021,6 +1092,12 @@ export function DiagramCanvas({
   onOpenTerminal?: (agent: string) => void;
   /** A web agent has no pane, so its double-click opens its panel instead. */
   onOpenPanel?: (agent: string) => void;
+  /**
+   * Ids the timeline is pointing at: what carries a value and what fires at
+   * the tag being shown. Separate from selection, which is what the operator
+   * has picked out to talk about.
+   */
+  highlight?: ReadonlySet<string>;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [layout, setLayout] = useState<Layout | null>(null);
@@ -1043,10 +1120,13 @@ export function DiagramCanvas({
 
   /** Props that make a node selectable, or just its class when selection is off. */
   function selectable(id: string, base: string) {
-    if (!onToggleComponent) return { className: base };
+    // Dimming is a property of the drawing, not of selection, so it applies
+    // whether or not anything is selectable.
+    const lit = highlight ? (highlight.has(id) ? " at-tag" : " off-tag") : "";
+    if (!onToggleComponent) return { className: `${base}${lit}` };
     const component = componentName(id);
     return {
-      className: `${base}${selected.has(component) ? " selected" : ""}`,
+      className: `${base}${lit}${selected.has(component) ? " selected" : ""}`,
       onClick: () => handleNodeClick(component),
       // The canvas resets the view on double click; a node has its own meaning.
       onDoubleClick: (event: { stopPropagation: () => void }) =>
@@ -1295,14 +1375,28 @@ export function DiagramCanvas({
 
             <g className="omar-edges">
               {layout.edges.map((edge) => (
-                <path
-                  key={edge.id}
-                  data-id={edge.id}
-                  className={`omar-edge ${edge.kind}${edge.delayed ? " delayed" : ""}`}
-                  // No arrowhead: the port triangles already point the way,
-                  // and a head on the line repeats it.
-                  d={edge.path}
-                />
+                <g key={edge.id}>
+                  <path
+                    data-id={edge.id}
+                    className={`omar-edge ${edge.kind}`}
+                    // No arrowhead: the port triangles already point the way,
+                    // and a head on the line repeats it.
+                    d={edge.path}
+                  />
+                  {edge.tail ? (
+                    <path className={`omar-edge ${edge.kind}`} d={edge.tail} />
+                  ) : null}
+                  {edge.delay ? (
+                    <text
+                      className="omar-edge-delay"
+                      x={edge.delay.at.x}
+                      y={edge.delay.at.y + (edge.delay.horizontal ? 3 : 3.5)}
+                      textAnchor="middle"
+                    >
+                      {edge.delay.text}
+                    </text>
+                  ) : null}
+                </g>
               ))}
             </g>
 

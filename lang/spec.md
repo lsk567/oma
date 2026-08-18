@@ -189,7 +189,16 @@ begin at `(0, 0)`. Every hop costs one of three things:
 This is Lingua Franca's rule: ports do not introduce delays. What a tag decides,
 it decides completely.
 
+<<<<<<< HEAD
 ### 4.0 Fixpoint at a tag
+=======
+A tag is a moment something is present at. One with no events is not reached:
+no reaction can be enabled there, and no connection, output or timer can move,
+so announcing it would report an advance that did not happen. A program admitted
+with no inputs and no timer therefore passes through no tags at all.
+
+At each tag, the runtime:
+>>>>>>> 26214fc (Do not announce a tag nothing is present at)
 
 A reaction fires at most once per tag, and only once the presence of every one
 of its triggers is decided. Ordering is not something a program asks for; it

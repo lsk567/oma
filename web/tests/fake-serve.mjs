@@ -383,7 +383,39 @@ export async function startFakeServe({
         ],
       });
     }
-    return json(response, 200, { ok: true, team: "ReviewFlow", open_inputs: [] });
+    const answer = {
+      ok: true,
+      team: golden.team,
+      open_inputs: openInputsOf(golden).map((port) => port.name),
+      preview: structuredClone(golden),
+    };
+    // Only when asked, as the daemon does: a caller that wants validity alone
+    // gets no timeline, and a client that reads one it did not ask for would
+    // pass here and fail against the real thing.
+    if (request.timeline) {
+      // A timeline the shape of the real one: one tag per reaction, in the
+      // order the captured topology has them. The real scheduling is the
+      // runtime's, and the conformance suite is what checks it.
+      const steps = golden.reactions.map((reaction, index) => ({
+        timestamp: 0,
+        microstep: index,
+        events: reaction.triggers.map((id) => id.replace(/^(port|timer)::/, "")),
+        reactions: [reaction.name],
+      }));
+      // Nothing set means nothing moves, which is the state the timeline has
+      // to be able to show.
+      answer.steps = (request.present ?? []).length > 0 ? steps : [];
+      answer.truncated = false;
+    }
+    return json(response, 200, answer);
+  }
+
+  /** Inputs nothing in the topology writes to: a diagnostic, as on the daemon. */
+  function openInputsOf(snapshot) {
+    const fed = new Set(
+      snapshot.edges.filter((edge) => edge.kind === "connection").map((edge) => edge.target),
+    );
+    return snapshot.ports.filter((port) => port.kind === "input" && !fed.has(port.id));
   }
 
   /** One pending invocation per reaction whose agent is on the `web` backend. */

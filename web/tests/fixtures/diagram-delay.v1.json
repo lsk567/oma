@@ -1,0 +1,176 @@
+{
+  "agents": [
+    {
+      "backend": "ClaudeCode",
+      "id": "agent::gauge.sensor",
+      "instance": "gauge",
+      "name": "gauge.sensor"
+    },
+    {
+      "backend": "Web",
+      "id": "agent::pm.panel",
+      "instance": "pm",
+      "name": "pm.panel"
+    }
+  ],
+  "current_tag": null,
+  "edges": [
+    {
+      "delay": 0,
+      "id": "connection::gauge.reading::pm.reading",
+      "kind": "connection",
+      "source": "port::gauge.reading",
+      "target": "port::pm.reading"
+    },
+    {
+      "delay": 30000000000,
+      "id": "connection::pm.setpoint::gauge.setpoint",
+      "kind": "connection",
+      "source": "port::pm.setpoint",
+      "target": "port::gauge.setpoint"
+    },
+    {
+      "delay": null,
+      "id": "trigger::gauge.beat::gauge.reaction.0",
+      "kind": "trigger",
+      "source": "timer::gauge.beat",
+      "target": "reaction::gauge.reaction.0"
+    },
+    {
+      "delay": null,
+      "id": "trigger::gauge.setpoint::gauge.reaction.0",
+      "kind": "trigger",
+      "source": "port::gauge.setpoint",
+      "target": "reaction::gauge.reaction.0"
+    },
+    {
+      "delay": null,
+      "id": "effect::gauge.reaction.0::gauge.reading",
+      "kind": "effect",
+      "source": "reaction::gauge.reaction.0",
+      "target": "port::gauge.reading"
+    },
+    {
+      "delay": null,
+      "id": "trigger::pm.reading::pm.reaction.0",
+      "kind": "trigger",
+      "source": "port::pm.reading",
+      "target": "reaction::pm.reaction.0"
+    },
+    {
+      "delay": null,
+      "id": "effect::pm.reaction.0::pm.setpoint",
+      "kind": "effect",
+      "source": "reaction::pm.reaction.0",
+      "target": "port::pm.setpoint"
+    }
+  ],
+  "instances": [
+    {
+      "id": "instance::gauge",
+      "name": "gauge",
+      "parent": "",
+      "team": "Gauge"
+    },
+    {
+      "id": "instance::pm",
+      "name": "pm",
+      "parent": "",
+      "team": "PortManager"
+    }
+  ],
+  "lag": null,
+  "ports": [
+    {
+      "delay": null,
+      "id": "port::gauge.reading",
+      "instance": "gauge",
+      "kind": "output",
+      "last_tag": null,
+      "name": "gauge.reading",
+      "type": "string",
+      "value": null
+    },
+    {
+      "delay": null,
+      "id": "port::gauge.setpoint",
+      "instance": "gauge",
+      "kind": "input",
+      "last_tag": null,
+      "name": "gauge.setpoint",
+      "type": "int",
+      "value": null
+    },
+    {
+      "delay": null,
+      "id": "port::pm.reading",
+      "instance": "pm",
+      "kind": "input",
+      "last_tag": null,
+      "name": "pm.reading",
+      "type": "string",
+      "value": null
+    },
+    {
+      "delay": null,
+      "id": "port::pm.setpoint",
+      "instance": "pm",
+      "kind": "output",
+      "last_tag": null,
+      "name": "pm.setpoint",
+      "type": "int",
+      "value": null
+    }
+  ],
+  "protocol_version": 1,
+  "reactions": [
+    {
+      "agent": "agent::gauge.sensor",
+      "contract": "gauge.reading",
+      "effects": [
+        "port::gauge.reading"
+      ],
+      "id": "reaction::gauge.reaction.0",
+      "instance": "gauge",
+      "invocation_id": null,
+      "name": "gauge.reaction.0",
+      "order": 0,
+      "status": "idle",
+      "triggers": [
+        "timer::gauge.beat",
+        "port::gauge.setpoint"
+      ],
+      "within": null
+    },
+    {
+      "agent": "agent::pm.panel",
+      "contract": "pm.setpoint",
+      "effects": [
+        "port::pm.setpoint"
+      ],
+      "id": "reaction::pm.reaction.0",
+      "instance": "pm",
+      "invocation_id": null,
+      "name": "pm.reaction.0",
+      "order": 1,
+      "status": "idle",
+      "triggers": [
+        "port::pm.reading"
+      ],
+      "within": 600000000000
+    }
+  ],
+  "sequence": 0,
+  "status": "ready",
+  "team": "WebPanel",
+  "timers": [
+    {
+      "id": "timer::gauge.beat",
+      "instance": "gauge",
+      "last_tag": null,
+      "name": "gauge.beat",
+      "offset": 0,
+      "period": 30000000000
+    }
+  ]
+}

@@ -1103,6 +1103,13 @@ fn start_run(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     }
 }
 
+/// How many tags a timeline will show before it gives up.
+///
+/// A periodic timer has no end, so a preview has to have one. Large enough that
+/// no terminating program reaches it, small enough to draw.
+const MAX_TIMELINE_STEPS: usize = 128;
+
+/// A program to check, and how much to say about it.
 #[derive(Debug, Deserialize)]
 struct CheckRequest {
     program: String,
@@ -1110,64 +1117,121 @@ struct CheckRequest {
     /// Must end in `.omar`, which is the compiler's own rule.
     #[serde(default)]
     filename: Option<String>,
+    /// Whether to work out the tags the program would pass through.
+    ///
+    /// Off by default: a caller that only wants to know whether a program holds
+    /// together should not be handed a timeline to ignore. The editor asks for
+    /// one, because it draws it.
+    #[serde(default)]
+    timeline: bool,
+    /// Ports to treat as carrying a value at the first tag: the inputs a run
+    /// would be admitted with. Timers are seeded regardless — they are what
+    /// starts a program that starts itself. Only read when `timeline` is set.
+    #[serde(default)]
+    present: Vec<String>,
 }
 
 /// Compile a program and say whether it holds together, without running it.
 ///
 /// The runtime's own compiler and verifier, so a program this calls valid is one
 /// the daemon accepts — there is no second opinion to keep in step.
+///
+/// With `timeline`, it also says what the program would do. That is a second
+/// question, which is why it is asked for rather than assumed — but it is asked
+/// of the same compile, because an editor wants both on the same keystroke and
+/// two round trips would let the answers disagree about which text they are
+/// about.
 fn check_program(body: &[u8]) -> (u16, Value) {
     let request: CheckRequest = match serde_json::from_slice(body) {
         Ok(request) => request,
         Err(error) => return (400, json!({"error": format!("invalid request: {error}")})),
     };
 
-    let name = request.filename.as_deref().unwrap_or("program.omar");
-    // The compiler rejects any other extension, and doing that here names the
-    // problem as the filename rather than as a compile failure.
+    let staged = match stage_program(&request.program, request.filename.as_deref()) {
+        Ok(staged) => staged,
+        Err(problem) => return problem,
+    };
+    let outcome =
+        topology::load_program(&staged.path).and_then(|bytecode| topology::verify(&bytecode));
+
+    match staged.finish(outcome) {
+        Ok(state) => {
+            let mut answer = json!({
+                "ok": true,
+                "team": state.team,
+                // A diagnostic: a program that closes its loop has none.
+                "open_inputs": topology::open_inputs(&state),
+                // The topology as edited. An editor whose diagram lags the text
+                // is showing a program that no longer exists, and the client has
+                // no compiler of its own to build one with.
+                "preview": crate::diagram::DiagramSnapshot::from_vm_state(&state),
+            });
+            if request.timeline {
+                let present = request.present.into_iter().collect();
+                let (steps, truncated) = topology::timeline(&state, &present, MAX_TIMELINE_STEPS);
+                answer["steps"] = json!(steps);
+                // Said rather than implied: a timeline that stops is not the
+                // same as a program that does.
+                answer["truncated"] = json!(truncated);
+            }
+            (200, answer)
+        }
+        Err(message) => (200, json!({"ok": false, "errors": [message]})),
+    }
+}
+
+/// A program written where the compiler can be pointed at it.
+///
+/// Its own directory per request, so the file can carry the operator's name
+/// without two of them colliding over it.
+struct StagedProgram {
+    directory: PathBuf,
+    path: PathBuf,
+}
+
+impl StagedProgram {
+    /// Clean up, and say what went wrong in terms of the operator's file.
+    ///
+    /// The compiler names the path it was given, which is a scratch directory
+    /// nobody asked about.
+    fn finish<T>(self, outcome: Result<T>) -> Result<T, String> {
+        let _ = fs::remove_dir_all(&self.directory);
+        outcome.map_err(|error| {
+            format!("{error:#}").replace(&format!("{}/", self.directory.display()), "")
+        })
+    }
+}
+
+/// Write a program out under the name the operator gave it.
+fn stage_program(
+    program: &str,
+    filename: Option<&str>,
+) -> std::result::Result<StagedProgram, (u16, Value)> {
+    let name = filename.unwrap_or("program.omar");
+    // The compiler rejects any other extension, and saying so here names the
+    // problem as the file name rather than as a compile failure.
     if !name.ends_with(".omar") || name.contains('/') || name.contains('\\') {
-        return (
+        return Err((
             200,
-            json!({"ok": false, "errors": [format!("'{name}' is not a program file name: it must be a plain name ending in .omar")]}),
-        );
+            json!({"ok": false, "errors": [format!(
+                "'{name}' is not a program file name: it must be a plain name ending in .omar"
+            )]}),
+        ));
     }
 
-    // Its own directory per check, so the file can carry the operator's name
-    // without two checks colliding over it. Removed on the way out.
     let directory = match crate::paths::private_temp_dir()
         .map(|root| root.join(format!("omar-check-{}", Uuid::new_v4())))
         .and_then(|directory| fs::create_dir_all(&directory).map(|_| directory))
     {
         Ok(directory) => directory,
-        Err(error) => return (500, json!({"error": format!("{error}")})),
+        Err(error) => return Err((500, json!({"error": format!("{error}")}))),
     };
     let path = directory.join(name);
-    if let Err(error) = fs::write(&path, &request.program) {
+    if let Err(error) = fs::write(&path, program) {
         let _ = fs::remove_dir_all(&directory);
-        return (500, json!({"error": format!("{error}")}));
+        return Err((500, json!({"error": format!("{error}")})));
     }
-
-    // Compiling is half of it: `verify` is what catches a program that parses
-    // and still cannot run, which is most of what an editor should say early.
-    let outcome = topology::load_program(&path).and_then(|bytecode| topology::verify(&bytecode));
-    let _ = fs::remove_dir_all(&directory);
-    match outcome {
-        Ok(state) => (
-            200,
-            json!({
-                "ok": true,
-                "team": state.team,
-                // A diagnostic: a program that closes its loop has none.
-                "open_inputs": topology::open_inputs(&state),
-            }),
-        ),
-        Err(error) => {
-            // The compiler names the file it was given, which is a scratch path
-            // nobody asked about. Say the name the operator is looking at.
-            let message = format!("{error:#}").replace(&format!("{}/", directory.display()), "");
-            (200, json!({"ok": false, "errors": [message]}))
-        }
-    }
+    Ok(StagedProgram { directory, path })
 }
 
 #[derive(Debug, Deserialize)]

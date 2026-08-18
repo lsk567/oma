@@ -159,6 +159,21 @@ export type PendingInvocation = {
 };
 
 /**
+ * Inputs nothing inside the topology writes to.
+ *
+ * A diagnostic, matching the daemon's own. A program that closes its loop has
+ * none; one that has some has a port nothing will ever drive. The projection
+ * treats them as arriving, because the question it answers is what the program
+ * would do if they did.
+ */
+export function openInputs(snapshot: DiagramSnapshot): DiagramPort[] {
+  const fed = new Set(
+    snapshot.edges.filter((edge) => edge.kind === "connection").map((edge) => edge.target),
+  );
+  return snapshot.ports.filter((port) => port.kind === "input" && !fed.has(port.id));
+}
+
+/**
  * Turn what an operator typed into a value of the port's type.
  *
  * The runtime checks a value against its port before it reaches the run, and it
