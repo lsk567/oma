@@ -77,28 +77,28 @@
       "kind": "trigger",
       "source": "port::flow.start",
       "target": "reaction::flow.reaction.0",
-      "delay": 0
+      "delay": null
     },
     {
       "id": "trigger::flow.next::flow.reaction.0",
       "kind": "trigger",
       "source": "port::flow.next",
       "target": "reaction::flow.reaction.0",
-      "delay": 0
+      "delay": null
     },
     {
       "id": "effect::reaction.0::next",
       "kind": "effect",
       "source": "reaction::flow.reaction.0",
       "target": "port::flow.next",
-      "delay": 0
+      "delay": null
     },
     {
       "id": "effect::reaction.0::result",
       "kind": "effect",
       "source": "reaction::flow.reaction.0",
       "target": "port::flow.result",
-      "delay": 0
+      "delay": null
     }
   ]
 }

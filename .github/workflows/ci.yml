@@ -167,7 +167,7 @@ jobs:
               "op", "instance", "id", "agent", "triggers", "effects",
               "contract", "prompt"
           ]
-          connection_order = ["op", "source", "target", "delay"]
+          connection_order = ["op", "source", "target"]
           bytecodes = glob.glob("/tmp/omar-topology-suite/*.json")
           assert bytecodes, "topology compiler produced no bytecode"
           for path in bytecodes:
@@ -194,7 +194,11 @@ jobs:
                   if instruction["op"] in ("spawn_agent", "define_port", "install_reaction"):
                       assert instruction["instance"], (path, instruction)
                   if instruction["op"] == "connect_ports":
-                      assert keys == connection_order, (path, keys)
+                      # `after` is what buys a delay. A plain connection has
+                      # none and says so by leaving the field out.
+                      assert keys in (
+                          connection_order, connection_order + ["delay"]
+                      ), (path, keys)
                   if instruction["op"] == "install_reaction":
                       # `within` is a deadline the reaction set for itself, and
                       # is absent when it set none.

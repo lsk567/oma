@@ -101,7 +101,11 @@ pub struct DiagramEdge {
     pub kind: String,
     pub source: String,
     pub target: String,
-    pub delay: u64,
+    /// Null when the hop costs nothing. `0` is `after 0`, which costs a
+    /// microstep; larger values are nanoseconds. Trigger and effect edges
+    /// carry no delay of their own and are always null.
+    #[serde(default)]
+    pub delay: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,7 +234,7 @@ impl DiagramSnapshot {
                     kind: "trigger".to_string(),
                     source: trigger_id(trigger),
                     target: reaction_id(name),
-                    delay: 0,
+                    delay: None,
                 });
             }
             for effect in &reaction.effects {
@@ -239,7 +243,7 @@ impl DiagramSnapshot {
                     kind: "effect".to_string(),
                     source: reaction_id(name),
                     target: port_id(effect),
-                    delay: 0,
+                    delay: None,
                 });
             }
         }
@@ -762,7 +766,7 @@ mod tests {
             connections: vec![ConnectionState {
                 source: "request".to_string(),
                 target: "answer".to_string(),
-                delay: 1,
+                delay: Some(1),
             }],
             reactions: BTreeMap::from([(
                 "respond".to_string(),

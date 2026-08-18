@@ -14,6 +14,9 @@ Coverage:
   offer/ack synchronization at D, and iterative final-delivery QA.
 - `FanOutFanIn.omar`: parallel fan-out, tag barrier, and fan-in.
 - `OrTriggers.omar`: LF-style OR triggers, different microsteps, absent values.
+- `Depths.omar`: a watcher whose two inputs sit one and three hops from the
+  same source. Plain connections cost nothing, so both are decided at one tag
+  and it fires once. Stub.
 - `EffectContracts.omar`: alternatives, optional groups, signals, constants.
 - `OrderedWrites.omar`: shared-effect ordering, optional writes, last writer wins.
 - `Recurrence.omar`: self-triggered action flow across logical microsteps.

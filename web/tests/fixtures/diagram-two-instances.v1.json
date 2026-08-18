@@ -118,35 +118,35 @@
       "kind": "connection",
       "source": "port::producer.draft",
       "target": "port::checker.draft",
-      "delay": 0
+      "delay": null
     },
     {
       "id": "trigger::checker.draft::checker.reaction.0",
       "kind": "trigger",
       "source": "port::checker.draft",
       "target": "reaction::checker.reaction.0",
-      "delay": 0
+      "delay": null
     },
     {
       "id": "effect::checker.reaction.0::checker.result",
       "kind": "effect",
       "source": "reaction::checker.reaction.0",
       "target": "port::checker.result",
-      "delay": 0
+      "delay": null
     },
     {
       "id": "trigger::producer.request::producer.reaction.0",
       "kind": "trigger",
       "source": "port::producer.request",
       "target": "reaction::producer.reaction.0",
-      "delay": 0
+      "delay": null
     },
     {
       "id": "effect::producer.reaction.0::producer.draft",
       "kind": "effect",
       "source": "reaction::producer.reaction.0",
       "target": "port::producer.draft",
-      "delay": 0
+      "delay": null
     }
   ]
 }

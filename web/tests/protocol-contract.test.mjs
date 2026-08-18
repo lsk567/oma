@@ -66,7 +66,9 @@ test("every edge endpoint resolves to a node the diagram draws", () => {
       ["connection", "trigger", "effect"].includes(edge.kind),
       `edge kind ${edge.kind} is known`,
     );
-    assert.equal(typeof edge.delay, "number");
+    // Null is a plain connection, which costs nothing; a number is what
+    // `after` bought, with 0 meaning a microstep.
+    assert.ok(edge.delay === null || typeof edge.delay === "number");
   }
   const agentIds = new Set(golden.agents.map((agent) => agent.id));
   for (const reaction of golden.reactions) {

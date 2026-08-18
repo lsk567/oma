@@ -124,42 +124,42 @@
       "kind": "trigger",
       "source": "port::flow.request",
       "target": "reaction::flow.reaction.0",
-      "delay": 0
+      "delay": null
     },
     {
       "id": "effect::reaction.0::plan",
       "kind": "effect",
       "source": "reaction::flow.reaction.0",
       "target": "port::flow.plan",
-      "delay": 0
+      "delay": null
     },
     {
       "id": "trigger::flow.plan::flow.reaction.1",
       "kind": "trigger",
       "source": "port::flow.plan",
       "target": "reaction::flow.reaction.1",
-      "delay": 0
+      "delay": null
     },
     {
       "id": "effect::reaction.1::critique",
       "kind": "effect",
       "source": "reaction::flow.reaction.1",
       "target": "port::flow.critique",
-      "delay": 0
+      "delay": null
     },
     {
       "id": "trigger::flow.critique::flow.reaction.2",
       "kind": "trigger",
       "source": "port::flow.critique",
       "target": "reaction::flow.reaction.2",
-      "delay": 0
+      "delay": null
     },
     {
       "id": "effect::reaction.2::result",
       "kind": "effect",
       "source": "reaction::flow.reaction.2",
       "target": "port::flow.result",
-      "delay": 0
+      "delay": null
     }
   ]
 }

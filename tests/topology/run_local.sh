@@ -290,6 +290,9 @@ run_case OrTriggers OrTriggers triggers.observation \
   --input triggers.request='compare the fast and slow paths'
 run_case OrderedWrites OrderedWrites writes.result \
   --input writes.request='declaration order'
+# A watcher one hop and three hops from the same source. It should be invoked
+# once, holding both -- so the run completing at all is the assertion.
+run_case Depths Depths watch.verdict --input src.go=1
 run_case Recurrence Recurrence rec.result --input rec.start=0
 # Three instances wired into a ring. Only the seed is supplied; the other two
 # inputs come off the ring itself.

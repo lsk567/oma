@@ -137,7 +137,10 @@ structure Timer where
 structure Connection where
   source : String
   target : String
-  delay : Nat
+  /-- `none` is a plain connection: instantaneous, the value present at the tag
+      it was written. `some 0` is `after 0`, which costs a microstep — the way
+      to close a loop without letting time pass. `some n` is n nanoseconds. -/
+  delay : Option Nat
   deriving Repr
 
 structure Reaction where
@@ -195,7 +198,7 @@ structure InstanceConnection where
   sourcePort : String
   targetInstance : String
   targetPort : String
-  delay : Nat
+  delay : Option Nat
   deriving Repr
 
 structure Main where
@@ -466,11 +469,13 @@ private partial def parseDeclarations
       let (_, rest) ← expectSym "->" rest
       let (target, rest) ← word rest
       let (target, rest) ← qualifiedTail target rest
-      -- `after` is optional, matching main: a connection with no delay still
-      -- lands on the next microstep.
+      -- Written or not written are different things. No `after` is a plain
+      -- connection and costs nothing; `after 0` costs a microstep.
       let (delay, rest) ← match rest with
-        | Token.word "after" :: tail => delayValue tail
-        | _ => pure (0, rest)
+        | Token.word "after" :: tail => do
+            let (value, tail) ← delayValue tail
+            pure (some value, tail)
+        | _ => pure (none, rest)
       parseDeclarations reactionIndex ports timers (connections.push { source, target, delay }) reactions instances rest
   | token :: _ => throw s!"unexpected token in team body: {reprStr token}"
   | [] => throw "unterminated team body"
@@ -513,11 +518,14 @@ private partial def parseMainBody
       let (targetInstance, rest) ← word rest
       let (_, rest) ← expectSym "." rest
       let (targetPort, rest) ← word rest
-      -- `after` is optional here. A connection with no delay still lands on
-      -- the next microstep, so a feedback loop through instances progresses.
+      -- As in a team body: no `after` is instantaneous, `after 0` is a
+      -- microstep, which is the only way to close a loop between instances
+      -- without letting time pass.
       let (delay, rest) ← match rest with
-        | Token.word "after" :: tail => delayValue tail
-        | _ => pure (0, rest)
+        | Token.word "after" :: tail => do
+            let (value, tail) ← delayValue tail
+            pure (some value, tail)
+        | _ => pure (none, rest)
       let connection :=
         { sourceInstance, sourcePort, targetInstance, targetPort, delay : InstanceConnection }
       parseMainBody instances (connections.push connection) rest
@@ -803,11 +811,13 @@ def compile (program : Program) : String :=
       ("period", toJson timer.period)
     ]
   let connections := program.connections.map fun connection =>
-    instruction "connect_ports" [
+    let fields := [
       ("source", toJson connection.source),
-      ("target", toJson connection.target),
-      ("delay", toJson connection.delay)
-    ]
+      ("target", toJson connection.target)
+    ] ++ match connection.delay with
+      | some delay => [("delay", toJson delay)]
+      | none => []
+    instruction "connect_ports" fields
   let reactions := program.reactions.map fun reaction =>
     let fields := [
       ("instance", toJson reaction.instance_),
