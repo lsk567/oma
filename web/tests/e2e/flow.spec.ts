@@ -1257,6 +1257,51 @@ test("the timeline projects a program before anything is deployed", async ({
   await expect(timeline).toBeHidden();
 });
 
+test("the diagram follows the text", async ({ page }) => {
+  // An editor whose drawing lags the text is showing a program that no longer
+  // exists. The client has no compiler, so the drawing is the one the daemon
+  // compiles from what has been typed.
+  await useFakeServe(page);
+  await draftUntilProposed(page);
+
+  const title = page.locator(".diagram-heading h2");
+  await expect(title).toHaveText("ReviewFlow");
+
+  await page.getByRole("button", { name: "Show the source pane" }).click();
+  const editor = page.getByLabel("OMAR program");
+  await expect(editor).toBeVisible();
+  const source = await editor.inputValue();
+  await editor.fill(source.replace(/\bmain\b/, "main Renamed"));
+
+  // No deploy, no reload: the drawing is recompiled from the text on the pause
+  // in typing, and says so.
+  await expect(title).toHaveText("Renamed");
+
+  // A half-typed program has no topology to draw. The last good drawing stays
+  // rather than the diagram blanking for the whole of an edit.
+  await editor.fill("team Broken {");
+  await expect(page.locator(".source-errors")).toBeVisible();
+  await expect(title).toHaveText("Renamed");
+
+  // Once a run exists the drawing belongs to it. Deploying happens moments
+  // after the last edit, so a check can still be in flight when it does -- and
+  // an answer that lands afterwards describes text, not the run. Held open here
+  // to make that ordering certain rather than lucky.
+  await page.route("**/v1/programs/check", async (route) => {
+    await new Promise((resume) => setTimeout(resume, 2000));
+    await route.continue();
+  });
+  await editor.fill(source.replace(/\bmain\b/, "main Stale"));
+  await deploy(page);
+
+  const stats = page.locator(".run-stats");
+  await expect(stats).toContainText(/running|completed/);
+  // Past when the held-open check resolves. The run is what is drawn.
+  await page.waitForTimeout(3000);
+  await expect(title).not.toHaveText("Stale");
+  await expect(stats).not.toContainText("ready");
+});
+
 test("the assistant's terminal opens from the wait, not from a menu", async ({
   page,
 }) => {

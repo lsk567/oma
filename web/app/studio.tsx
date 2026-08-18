@@ -171,6 +171,11 @@ export function Studio({
    * the newest one asked for, which is the actual question.
    */
   const checkTokenRef = useRef(0);
+  // Read by the check, which must not re-run every time a run advances.
+  const runRef = useRef<RunRecord | null>(null);
+  useEffect(() => {
+    runRef.current = run;
+  }, [run]);
 
   /**
    * What the tag being shown touches: the ports carrying a value and the
@@ -517,6 +522,14 @@ export function Studio({
         .then((result) => {
           if (!current()) return;
           setSourceErrors(result.ok ? [] : (result.errors ?? []));
+          // The drawing follows the text. Only while the program compiles: a
+          // half-typed one has no topology to draw, and blanking the diagram on
+          // every transient error would make it flicker for the whole of an
+          // edit. And only until a run exists, after which the diagram belongs
+          // to what is running rather than to what has since been typed.
+          if (result.ok && result.preview && runRef.current === null) {
+            setSnapshot(result.preview);
+          }
           setSteps(result.steps ?? []);
           setTruncated(result.truncated ?? false);
           // A recomputed projection replaces the tail, so a hand-held position
