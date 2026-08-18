@@ -383,11 +383,18 @@ export async function startFakeServe({
         ],
       });
     }
+    // The daemon reports the team the program declares: the name on `main` when
+    // it carries one, and the file's own stem otherwise. Not a compiler, but
+    // enough of one that the answer depends on the text -- which is the whole
+    // of what a drawing following the editor relies on.
+    const declared =
+      request.program.match(/\bmain\s+([A-Za-z_]\w*)/)?.[1] ??
+      filename.replace(/\.omar$/, "");
     const answer = {
       ok: true,
-      team: golden.team,
+      team: declared,
       open_inputs: openInputsOf(golden).map((port) => port.name),
-      preview: structuredClone(golden),
+      preview: { ...structuredClone(golden), team: declared },
     };
     // Only when asked, as the daemon does: a caller that wants validity alone
     // gets no timeline, and a client that reads one it did not ask for would

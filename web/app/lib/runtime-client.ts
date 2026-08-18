@@ -214,7 +214,13 @@ export async function checkProgram(
   if (!response.ok) {
     throw new Error(await readError(response));
   }
-  return (await response.json()) as ProgramCheck;
+  const check = (await response.json()) as ProgramCheck;
+  // Normalised like any other snapshot. It arrives straight off the compiler
+  // rather than through the diagram endpoint, and a drawing that skipped the
+  // defaults would differ from the same program once it is deployed.
+  return check.preview
+    ? { ...check, preview: assertDiagramSnapshot(check.preview) }
+    : check;
 }
 
 export async function startRun(

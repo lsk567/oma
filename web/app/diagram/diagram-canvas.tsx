@@ -1027,44 +1027,80 @@ function fitScale(layout: Layout, size: Size): number {
 const WRAP_CANDIDATES = [3.0, 2.2, 1.6];
 const WRAP_GAIN = 1.08;
 
-async function computeLayout(
+/**
+ * Where everything sits, which is the expensive half of drawing.
+ *
+ * Kept apart from the drawing itself so it can be reused: ELK runs up to four
+ * times to pick a wrapping, and a snapshot whose shape has not changed deserves
+ * none of them.
+ */
+type Geometry = {
+  declared: ContainerView[];
+  elk: ElkNode;
+};
+
+async function computeGeometry(
   snapshot: DiagramSnapshot,
   size: Size,
-): Promise<Layout> {
+): Promise<Geometry> {
   const { default: ELK } = await import("elkjs/lib/elk.bundled.js");
   const factory = ELK as unknown as ElkFactory;
 
   const declared = containersOf(snapshot);
-  const single = buildLayout(
-    snapshot,
-    declared,
-    await runElk(factory, snapshot, declared, null),
-  );
+  const plain = await runElk(factory, snapshot, declared, null);
   const nodeCount = snapshot.reactions.length + snapshot.ports.length;
-  if (size.width === 0 || size.height === 0 || nodeCount < 4) return single;
+  if (size.width === 0 || size.height === 0 || nodeCount < 4) {
+    return { declared, elk: plain };
+  }
 
-  let best = single;
-  let bestScale = fitScale(single, size) * WRAP_GAIN;
+  let best = plain;
+  let bestScale = fitScale(buildLayout(snapshot, declared, plain), size) * WRAP_GAIN;
   for (const aspectRatio of WRAP_CANDIDATES) {
-    let candidate: Layout;
+    let candidate: ElkNode;
+    let scale: number;
     try {
-      candidate = buildLayout(
-        snapshot,
-        declared,
-        await runElk(factory, snapshot, declared, aspectRatio),
-      );
+      candidate = await runElk(factory, snapshot, declared, aspectRatio);
+      scale = fitScale(buildLayout(snapshot, declared, candidate), size);
     } catch {
       // Wrapping is an optimisation, and ELK throws on some graphs — cyclic
       // ones especially. Losing a candidate is fine; losing the diagram is not.
       continue;
     }
-    const scale = fitScale(candidate, size);
     if (scale > bestScale) {
       best = candidate;
       bestScale = scale;
     }
   }
-  return best;
+  return { declared, elk: best };
+}
+
+/**
+ * Everything the geometry depends on, and nothing that moves while a run does.
+ *
+ * A snapshot arrives on every event of a live run and on every keystroke once
+ * the editor feeds the diagram, but almost all of those carry the same drawing
+ * with different numbers in it. Laying that out again is pure waste, and enough
+ * of it to matter: this is what tells the two cases apart.
+ *
+ * Built by removing what is live rather than by listing what is structural, so
+ * a field added to the protocol counts until someone says otherwise.
+ */
+function layoutKey(snapshot: DiagramSnapshot): string {
+  return JSON.stringify({
+    team: snapshot.team,
+    instances: snapshot.instances ?? [],
+    agents: snapshot.agents,
+    timers: snapshot.timers ?? [],
+    edges: snapshot.edges,
+    // Blanked rather than dropped, so a field added to either later counts
+    // towards the shape until someone decides it is live too.
+    ports: snapshot.ports.map((port) => ({ ...port, value: null, last_tag: null })),
+    reactions: snapshot.reactions.map((reaction) => ({
+      ...reaction,
+      status: "",
+      invocation_id: null,
+    })),
+  });
 }
 
 /**
@@ -1141,17 +1177,38 @@ export function DiagramCanvas({
   // would yank the view out from under anyone who has zoomed in, so the fit is
   // only reclaimed when the topology itself changes.
   const structureRef = useRef<string | null>(null);
+  // ELK's answer for the shape currently drawn, and the shape it answers for.
+  // Distinct from `structureRef`, which is coarser on purpose: it asks whether
+  // the view should be refitted, and a rename is not worth yanking the view for
+  // even though it does move the boxes.
+  const geometryRef = useRef<{ key: string; geometry: Geometry } | null>(null);
   const sizeBucket =
     size.width && size.height
       ? `${Math.round(size.width / 80)}x${Math.round(size.height / 80)}`
       : "";
+  const shape = `${layoutKey(snapshot)}|${sizeBucket}`;
 
   useEffect(() => {
     let cancelled = false;
-    computeLayout(snapshot, sizeRef.current)
-      .then((next) => {
+
+    // Same shape as what is already drawn: the values moved and nothing else,
+    // so redraw from the geometry in hand rather than asking ELK for it again.
+    const drawn = geometryRef.current;
+    if (drawn?.key === shape) {
+      try {
+        setLayout(buildLayout(snapshot, drawn.geometry.declared, drawn.geometry.elk));
+        setError(null);
+      } catch (cause: unknown) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+      return;
+    }
+
+    computeGeometry(snapshot, sizeRef.current)
+      .then((geometry) => {
         if (cancelled) return;
-        setLayout(next);
+        geometryRef.current = { key: shape, geometry };
+        setLayout(buildLayout(snapshot, geometry.declared, geometry.elk));
         const structure = structureKey(snapshot);
         if (structureRef.current !== structure) {
           structureRef.current = structure;
@@ -1166,7 +1223,7 @@ export function DiagramCanvas({
     return () => {
       cancelled = true;
     };
-  }, [snapshot, sizeBucket]);
+  }, [snapshot, shape]);
 
   useEffect(() => {
     const host = hostRef.current;
