@@ -31,6 +31,7 @@ jobs:
             target: x86_64-apple-darwin
             suffix: darwin-amd64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -50,7 +51,7 @@ jobs:
 
       - name: Install tmux (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y tmux
+        run: .github/scripts/install-packages.sh tmux
 
       # Mission Control is embedded in the binary, so it is built before the
       # runtime that carries it. Without this the release ships an `omar` whose
@@ -99,6 +100,7 @@ jobs:
     name: Publish Release
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/download-artifact@v4
 
@@ -121,6 +123,7 @@ jobs:
     name: Update Homebrew Formula
     needs: release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/download-artifact@v4
 

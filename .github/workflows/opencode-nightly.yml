@@ -30,7 +30,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux curl
+        run: .github/scripts/install-packages.sh tmux curl
 
       - name: Cache cargo registry
         uses: actions/cache@v4
