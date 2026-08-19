@@ -32,6 +32,9 @@ if [ ${#missing[@]} -eq 0 ]; then
 fi
 
 echo "installing: ${missing[*]}"
+# One definition of the bound, applied to every apt on this runner rather than
+# only the two below.
+"$(dirname "$0")/bound-apt.sh"
 export DEBIAN_FRONTEND=noninteractive
-sudo apt-get -o DPkg::Lock::Timeout=120 update
-sudo apt-get -o DPkg::Lock::Timeout=120 install -y "${missing[@]}"
+sudo apt-get update
+sudo apt-get install -y "${missing[@]}"
