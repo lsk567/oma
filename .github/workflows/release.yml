@@ -182,5 +182,22 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/omar.rb
+
+          TAP="https://x-access-token:${GH_TOKEN}@github.com/omar-os/homebrew-omar.git"
+          if git diff --cached --quiet; then
+            # The formula already says this. A re-run of the job, or a release
+            # whose tap someone updated by hand. `git commit` fails on an empty
+            # commit, which reads as a broken release rather than as nothing to
+            # do -- and under `set -e` takes the job with it.
+            #
+            # Still reach the remote, because "nothing to push" must not become
+            # the one case that never checks the credential. Ref discovery
+            # authenticates, so a dead token fails here rather than silently
+            # holding the tap a version back until someone runs `brew`.
+            echo "formula already at ${VERSION}"
+            git push --dry-run "$TAP" HEAD:main
+            exit 0
+          fi
+
           git commit -m "update omar to ${VERSION}"
-          git push "https://x-access-token:${GH_TOKEN}@github.com/omar-os/homebrew-omar.git" HEAD:main
+          git push "$TAP" HEAD:main
