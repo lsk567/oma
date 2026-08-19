@@ -110,6 +110,18 @@ jobs:
       - name: Build the runtime with the UI in it
         run: cargo build --bin omar --features ui
         working-directory: .
+      # `--with-deps` shells out to apt for the browser's shared libraries, and
+      # that apt is the one that has hung this job to its ceiling twice. It
+      # takes no flags from us, so the bound goes on the runner.
+      - name: Bound apt's wait for the dpkg lock
+        run: .github/scripts/bound-apt.sh
+        working-directory: .
+      # The browser is ~150MB from a CDN and changes only when Playwright does.
+      - name: Cache the browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
       - run: npx playwright install --with-deps chromium
       - run: npm run test:serve-ui
 
@@ -125,6 +137,18 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
+      # `--with-deps` shells out to apt for the browser's shared libraries, and
+      # that apt is the one that has hung this job to its ceiling twice. It
+      # takes no flags from us, so the bound goes on the runner.
+      - name: Bound apt's wait for the dpkg lock
+        run: .github/scripts/bound-apt.sh
+        working-directory: .
+      # The browser is ~150MB from a CDN and changes only when Playwright does.
+      - name: Cache the browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
       - run: npx playwright install --with-deps chromium
       # Drives prompt -> design -> confirm -> spawn -> finished against a fake
       # `omar serve`. No model, no Lean toolchain, no tmux.
