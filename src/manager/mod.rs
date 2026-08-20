@@ -474,6 +474,223 @@ fn codex_mcp_overrides(context: &McpLaunchContext) -> Option<String> {
     ))
 }
 
+/// The longest `sun_path` a Unix socket may have. macOS allows 104 bytes
+/// including the terminator; a per-pane codex home longer than that leaves the
+/// app-server unable to bind, so OMAR declines the side channel instead.
+const SUN_PATH_MAX: usize = 104;
+
+/// A codex home of OMAR's own, one per launched pane.
+///
+/// codex's TUI only attaches to an app-server when it is started with no
+/// config overrides at all, so everything OMAR needs to configure — the
+/// developer instructions, the OMAR MCP server, the directory trust record —
+/// has to be a `config.toml` rather than the `-c` flags it used to be. That
+/// file is per-pane because the MCP context file it names is per-agent, so the
+/// home holding it is per-pane too.
+///
+/// The name is a fresh id rather than anything derived from the pane: sibling
+/// workers under one EA share an MCP context, and two panes sharing one home
+/// would share one app-server and one ambiguous thread list.
+fn codex_home_dir(context: &McpLaunchContext) -> Option<PathBuf> {
+    // Short by design: `<home>/app-server-control/app-server-control.sock` has
+    // to fit in `sun_path`, and a session-shaped name would not.
+    let id = Uuid::new_v4().simple().to_string();
+    let dir = context.omar_dir.join("codex").join(&id[..12]);
+    let socket = crate::channel::codex_socket_path(&dir);
+    if socket.as_os_str().len() >= SUN_PATH_MAX {
+        return None;
+    }
+    prune_stale_codex_homes(&context.omar_dir.join("codex"));
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// Drop the codex homes — and the app-servers — of panes that are gone.
+///
+/// Each launch makes a new home, and codex fills it with several megabytes of
+/// state, so without this they accumulate for the life of the machine. The
+/// server matters more than the disk: `tmux kill-session` closes the pane's
+/// terminal without signalling anything in it, so the shell's own trap only
+/// fires when the TUI notices and exits, and an app-server can outlive its
+/// pane indefinitely.
+///
+/// A home is finished when the pane named in it is no longer a tmux session.
+/// One that names no pane yet is mid-launch, and is left alone until it is old
+/// enough that it plainly never got one.
+fn prune_stale_codex_homes(root: &Path) {
+    const GRACE: Duration = Duration::from_secs(3600);
+    let client = TmuxClient::new("");
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let pane = std::fs::read_to_string(path.join(CODEX_HOME_SESSION_FILE));
+        let finished = match &pane {
+            Ok(session) => !client.has_session(session.trim()).unwrap_or(true),
+            Err(_) => entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .map(|modified| modified.elapsed().unwrap_or_default() >= GRACE)
+                .unwrap_or(false),
+        };
+        if !finished {
+            continue;
+        }
+        kill_codex_app_server(&path);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+}
+
+/// Where the pane's shell records its app-server, and where provisioning
+/// records which tmux session the home belongs to.
+const CODEX_HOME_PID_FILE: &str = "app-server.pid";
+pub(crate) const CODEX_HOME_SESSION_FILE: &str = "omar-session";
+
+/// Stop the app-server a finished home left running.
+///
+/// The recorded pid is checked against what is actually running first: pids
+/// are reused, and killing whatever inherited this one would be far worse than
+/// leaving a server up.
+fn kill_codex_app_server(home: &Path) {
+    let Ok(pid) = std::fs::read_to_string(home.join(CODEX_HOME_PID_FILE)) else {
+        return;
+    };
+    let pid = pid.trim();
+    if pid.is_empty() || pid.parse::<u32>().is_err() {
+        return;
+    }
+    let running = std::process::Command::new("ps")
+        .args(["-p", pid, "-o", "command="])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).contains("app-server"))
+        .unwrap_or(false);
+    if running {
+        let _ = std::process::Command::new("kill").arg(pid).status();
+    }
+}
+
+/// The `config.toml` for a per-pane codex home.
+///
+/// The operator's own `~/.codex/config.toml` is the base, so their model,
+/// plugins and the rest still apply — minus `projects`, whose trust records
+/// the pane appends for its own working directory and which must not appear
+/// twice in one file.
+fn codex_config_toml(
+    user_config: &str,
+    developer_instructions: &str,
+    server_exe: &Path,
+    context_file: &Path,
+) -> String {
+    let mut config: toml::Table = toml::from_str(user_config).unwrap_or_default();
+    config.remove("projects");
+    config.insert(
+        "developer_instructions".to_string(),
+        developer_instructions.into(),
+    );
+    if let Some(features) = config
+        .entry("features")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+    {
+        features.insert("scheduled_tasks".to_string(), false.into());
+    }
+    let mut omar = toml::Table::new();
+    omar.insert(
+        "command".to_string(),
+        server_exe.display().to_string().into(),
+    );
+    omar.insert(
+        "args".to_string(),
+        toml::Value::Array(vec![
+            "mcp-server".into(),
+            "--context-file".into(),
+            context_file.display().to_string().into(),
+        ]),
+    );
+    if let Some(servers) = config
+        .entry("mcp_servers")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+    {
+        servers.insert("omar".to_string(), toml::Value::Table(omar));
+    }
+    config.to_string()
+}
+
+/// Fill a per-pane codex home and return where it is.
+///
+/// Returns `None` on any IO failure, and the caller then launches codex the
+/// old way — with `-c` overrides and no side channel. A pane that comes up
+/// without a channel still works; one that does not come up at all does not.
+fn codex_home_launch(context: &McpLaunchContext, developer_instructions: &str) -> Option<PathBuf> {
+    let server_exe = omar_server_exe()?;
+    let context_file = materialize_mcp_context_file(context)?;
+    let home = codex_home_dir(context)?;
+    let user_codex = dirs::home_dir()?.join(".codex");
+
+    let config = codex_config_toml(
+        &std::fs::read_to_string(user_codex.join("config.toml")).unwrap_or_default(),
+        developer_instructions,
+        &server_exe,
+        &context_file,
+    );
+    write_private_file(&home.join("config.toml"), config.as_bytes()).ok()?;
+
+    // Symlinked, not copied: the token is refreshed in place, and a pane
+    // holding a stale copy would be logged out mid-run.
+    let _ = std::os::unix::fs::symlink(user_codex.join("auth.json"), home.join("auth.json"));
+    // A home that has never seen an update check opens the release prompt over
+    // the TUI and waits for a keypress that never comes. Carrying the
+    // operator's own answer across means the pane starts where they left off.
+    let _ = std::fs::copy(user_codex.join("version.json"), home.join("version.json"));
+
+    Some(home)
+}
+
+/// Launch codex in a per-pane home, with an app-server the pane owns.
+///
+/// Three things happen before the TUI starts, all in the pane's own shell:
+///
+/// 1. The pane's working directory is recorded as trusted. Only the shell
+///    knows it — `pwd -P` resolves it the same way codex does — and without
+///    the record a fresh home opens a "do you trust this directory?" prompt
+///    the agent never answers. Appended only if it is not already there: the
+///    same table twice is a parse error, and codex refuses to start on one.
+/// 2. An app-server is started on the home's socket. The TUI attaches to it on
+///    its way up, which is what gives OMAR somewhere to inject events. A trap
+///    kills it when the shell exits, and its pid is written down so that
+///    `prune_stale_codex_homes` can finish the job when the shell does not —
+///    `tmux kill-session` signals nothing inside the pane.
+/// 3. The TUI waits for the socket. A brand-new home has no state database
+///    yet, and a server and a TUI creating it at the same moment collide on
+///    the migration — codex then refuses to start with a "local database
+///    appears to be damaged". Waiting for the socket means the server has
+///    finished. The wait is bounded: past it the TUI starts anyway, with no
+///    channel, which is the ordinary fallback.
+///
+/// The TUI itself is launched with no `-c` and no `--profile`: any of those
+/// makes codex refuse to attach, which is the whole reason the configuration
+/// moved into the home's `config.toml`.
+fn codex_home_command(home: &Path, tui_command: &str) -> String {
+    let home = shell_single_quote(&home.display().to_string());
+    let socket = "\"$CODEX_HOME/app-server-control/app-server-control.sock\"";
+    format!(
+        "export CODEX_HOME={home}; \
+         omar_cwd=\"$(pwd -P)\"; \
+         grep -qF \"[projects.\\\"$omar_cwd\\\"]\" \"$CODEX_HOME/config.toml\" || \
+         printf '\\n[projects.\"%s\"]\\ntrust_level = \"trusted\"\\n' \"$omar_cwd\" \
+         >> \"$CODEX_HOME/config.toml\"; \
+         codex app-server --listen unix:// >/dev/null 2>&1 & \
+         echo $! > \"$CODEX_HOME/{CODEX_HOME_PID_FILE}\"; \
+         trap \"kill $! 2>/dev/null\" EXIT HUP TERM; \
+         omar_waited=0; \
+         while [ ! -S {socket} ] && [ \"$omar_waited\" -lt 100 ]; \
+         do sleep 0.2; omar_waited=$((omar_waited+1)); done; \
+         {tui_command}"
+    )
+}
+
 fn opencode_config_env(context: &McpLaunchContext) -> Option<String> {
     let server_exe = omar_server_exe()?;
     let context_file = materialize_mcp_context_file(context)?;
@@ -838,6 +1055,22 @@ pub fn build_agent_command(
             ),
         },
         Some(BackendKind::Codex) => {
+            // Preferred: everything in a per-pane home's `config.toml`, so the
+            // TUI carries no `-c` and will attach to an app-server OMAR can
+            // reach. Falls back to the flags if the home cannot be written.
+            let instructions = std::fs::read_to_string(prompt_file).map(|body| {
+                substitutions
+                    .iter()
+                    .fold(body, |body, (pattern, replacement)| {
+                        body.replace(pattern, replacement)
+                    })
+            });
+            if let Some(home) = instructions
+                .ok()
+                .and_then(|instructions| codex_home_launch(mcp_context, &instructions))
+            {
+                return codex_home_command(&home, &base_command);
+            }
             let mut cmd = format!(
                 "{} -c \"developer_instructions='''{}'''\"",
                 base_command, shell_expr
@@ -1683,26 +1916,179 @@ mod tests {
         }
     }
 
+    /// A tempdir short enough that a codex home under it can still bind a
+    /// Unix socket. The default one lives under a long `/var/folders/...`
+    /// path on macOS, which is over the `sun_path` limit before codex has
+    /// added a single character of its own.
+    fn short_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("omar-test-")
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
     #[test]
     fn test_build_agent_command_codex() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir();
+        let prompt = dir.path().join("ea.md");
+        std::fs::write(&prompt, "be helpful, {{EA_NAME}}").unwrap();
         let cmd = build_agent_command(
             "codex --no-alt-screen",
-            Path::new("/tmp/prompts/ea.md"),
-            &[],
+            &prompt,
+            &[("{{EA_NAME}}", "CapX")],
             &test_mcp_context(dir.path()),
         );
-        assert!(cmd.starts_with(
-            "codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox -c \"developer_instructions='''$(cat '/tmp/prompts/ea.md')'''\""
-        ));
+
+        // Nothing on codex's disqualifier list may reach the TUI, or it
+        // refuses to attach to the app-server and there is no side channel.
+        assert!(
+            cmd.ends_with("codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox"),
+            "the TUI must be launched bare: {cmd}"
+        );
+        assert!(
+            !cmd.contains(" -c "),
+            "no config override may survive: {cmd}"
+        );
+        assert!(cmd.contains("export CODEX_HOME="), "{cmd}");
+        assert!(
+            cmd.contains("codex app-server --listen unix://"),
+            "the pane must own an app-server: {cmd}"
+        );
+        assert!(cmd.contains("trap \"kill $!"), "and must kill it: {cmd}");
+        assert!(
+            cmd.contains(
+                "while [ ! -S \"$CODEX_HOME/app-server-control/app-server-control.sock\" ]"
+            ),
+            "the TUI must wait for the server, or they race on a fresh home's \
+             state database and codex refuses to start: {cmd}"
+        );
+        assert!(
+            cmd.contains("trust_level = \"trusted\"") && cmd.contains("$(pwd -P)"),
+            "the launch cwd must be trusted or codex blocks on a prompt: {cmd}"
+        );
+
+        // The configuration the flags used to carry now lives in the home.
+        let home = crate::channel::codex_home(&cmd).expect("command names a codex home");
+        let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(config.contains("be helpful, CapX"), "{config}");
+        assert!(config.contains("scheduled_tasks = false"), "{config}");
+        assert!(config.contains("[mcp_servers.omar]"), "{config}");
+        assert!(config.contains("mcp-server"), "{config}");
+    }
+
+    #[test]
+    fn a_codex_home_too_deep_for_a_socket_falls_back_to_the_flags() {
+        // `sun_path` is 104 bytes. A pane whose home cannot hold a socket gets
+        // no side channel — but it must still launch, with the configuration
+        // it always had.
+        let dir = short_tempdir();
+        let deep = dir.path().join("d".repeat(90));
+        std::fs::create_dir_all(&deep).unwrap();
+        let prompt = deep.join("ea.md");
+        std::fs::write(&prompt, "be helpful").unwrap();
+        let cmd = build_agent_command(
+            "codex --no-alt-screen",
+            &prompt,
+            &[],
+            &test_mcp_context(&deep),
+        );
+        assert!(
+            cmd.starts_with(
+                "codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox \
+                 -c \"developer_instructions='''$(cat '"
+            ),
+            "unexpected fallback command: {cmd}"
+        );
         assert!(cmd.contains("mcp_servers.omar.command"));
         assert!(cmd.contains("mcp_servers.omar.args"));
         assert!(cmd.contains("-c features.scheduled_tasks=false"));
     }
 
     #[test]
+    fn a_codex_home_outlives_its_pane_only_until_the_next_launch() {
+        // `tmux kill-session` signals nothing inside the pane, so the shell's
+        // own trap cannot be relied on to take the app-server down with it.
+        let dir = short_tempdir();
+        let root = dir.path();
+
+        let finished = root.join("finished");
+        std::fs::create_dir_all(&finished).unwrap();
+        std::fs::write(
+            finished.join(CODEX_HOME_SESSION_FILE),
+            "omar-agent-no-such-session-1a2b3c",
+        )
+        .unwrap();
+
+        // Written by the pane's shell before OMAR knows the session name.
+        let launching = root.join("launching");
+        std::fs::create_dir_all(&launching).unwrap();
+
+        prune_stale_codex_homes(root);
+
+        assert!(!finished.exists(), "a home whose pane is gone must go");
+        assert!(
+            launching.exists(),
+            "a home that has not been claimed yet is mid-launch"
+        );
+    }
+
+    #[test]
+    fn a_codex_config_keeps_the_operators_own_settings_but_not_their_trust_records() {
+        let config = codex_config_toml(
+            "model = \"gpt-5.6-terra\"\n\
+             [features]\n\
+             web_search = true\n\
+             [projects.\"/somewhere/else\"]\n\
+             trust_level = \"trusted\"\n",
+            "be helpful",
+            Path::new("/usr/local/bin/omar"),
+            Path::new("/home/ea/context.json"),
+        );
+        let parsed: toml::Table = toml::from_str(&config).expect("valid toml");
+
+        assert_eq!(parsed["model"].as_str(), Some("gpt-5.6-terra"));
+        assert_eq!(parsed["features"]["web_search"].as_bool(), Some(true));
+        assert_eq!(parsed["features"]["scheduled_tasks"].as_bool(), Some(false));
+        assert_eq!(
+            parsed["developer_instructions"].as_str(),
+            Some("be helpful")
+        );
+        assert_eq!(
+            parsed["mcp_servers"]["omar"]["command"].as_str(),
+            Some("/usr/local/bin/omar")
+        );
+        // The pane appends its own working directory as a trusted project.
+        // Carrying the operator's table across could name that directory too,
+        // and a table declared twice makes codex refuse to start at all.
+        assert!(
+            parsed.get("projects").is_none(),
+            "trust records must not be carried over: {config}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_codex_config_still_yields_a_usable_one() {
+        // The operator may have no `~/.codex/config.toml` at all, and a
+        // damaged one must not take the pane down with it.
+        for base in ["", "this is not toml [[["] {
+            let config = codex_config_toml(
+                base,
+                "be helpful",
+                Path::new("/usr/local/bin/omar"),
+                Path::new("/home/ea/context.json"),
+            );
+            let parsed: toml::Table = toml::from_str(&config).expect("valid toml");
+            assert_eq!(
+                parsed["developer_instructions"].as_str(),
+                Some("be helpful")
+            );
+            assert!(parsed["mcp_servers"]["omar"]["args"].is_array());
+        }
+    }
+
+    #[test]
     fn test_build_ea_command_codex() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir();
         let omar_dir = dir.path();
         let state_dir = ea::ea_state_dir(3, omar_dir);
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -1713,21 +2099,24 @@ mod tests {
             omar_dir,
             &test_mcp_context(omar_dir),
         );
-        // codex stays on the inline path: its `AGENTS.md` auto-discovery
-        // is anchored at the agent's working root (`-C`), not the launch
-        // cwd, so a workspace-dir launch would either load the wrong
-        // `AGENTS.md` or force the manager to operate outside the user's
-        // project. The truncation cap in memory.rs keeps the inlined
-        // prompt under MAX_ARG_STRLEN even with large notes/memory.
+        // codex keeps launching in the user's own project directory: its
+        // `AGENTS.md` auto-discovery is anchored at the agent's working root
+        // (`-C`), not the launch cwd, so a workspace-dir launch would either
+        // load the wrong `AGENTS.md` or force the manager to operate outside
+        // the user's project.
         assert!(
-            cmd.starts_with("codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox -c \"developer_instructions='''"),
-            "unexpected codex manager command prefix: {cmd}"
+            cmd.ends_with("codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox"),
+            "unexpected codex manager command: {cmd}"
         );
-        assert!(cmd.contains("mcp_servers.omar.command="));
-        assert!(cmd.contains("mcp_servers.omar.args="));
-        assert!(cmd.contains("\"mcp-server\""));
-        assert!(cmd.contains("-c features.scheduled_tasks=false"));
-        assert!(cmd.contains("CapX"));
+        let home = crate::channel::codex_home(&cmd).expect("command names a codex home");
+        let config = std::fs::read_to_string(home.join("config.toml"))
+            .unwrap_or_else(|err| panic!("no config at {}: {err} ({cmd})", home.display()));
+        assert!(config.contains("[mcp_servers.omar]"), "{config}");
+        assert!(config.contains("mcp-server"), "{config}");
+        assert!(config.contains("scheduled_tasks = false"), "{config}");
+        // The EA's own name is substituted into the prompt before it lands in
+        // the config rather than by a `sed` at launch.
+        assert!(config.contains("CapX"), "{config}");
         assert!(
             workspace.is_none(),
             "codex manager must not override the launch cwd"
