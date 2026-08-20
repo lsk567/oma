@@ -448,24 +448,32 @@ impl Scheduler {
                         }
                     };
 
-                    if !clear_pane_input(base_prefix, &receiver, ea_id, &target) {
-                        // The box still holds text. Put back whatever we took
-                        // and retry later rather than deliver into it.
-                        if let Some(draft) = &draft {
-                            let _ = crate::tmux::TmuxClient::new("").paste_text(&target, draft);
+                    match clear_pane_input(base_prefix, &receiver, ea_id, &target) {
+                        Cleared::Empty => {
+                            restore_input = draft.filter(|draft| !draft.trim().is_empty())
                         }
-                        defer_batch(
-                            batch,
-                            &mut remaining,
-                            &mut deliveries,
-                            receiver,
-                            ea_id,
-                            earliest_ts,
-                        );
-                        continue;
+                        state => {
+                            // `Partial` means keys landed and the box still
+                            // holds part of the draft, so put back what was
+                            // taken. `Untouched` means nothing was sent and the
+                            // draft is whole — pasting then would duplicate it.
+                            if state == Cleared::Partial {
+                                if let Some(draft) = &draft {
+                                    let _ =
+                                        crate::tmux::TmuxClient::new("").paste_text(&target, draft);
+                                }
+                            }
+                            defer_batch(
+                                batch,
+                                &mut remaining,
+                                &mut deliveries,
+                                receiver,
+                                ea_id,
+                                earliest_ts,
+                            );
+                            continue;
+                        }
                     }
-
-                    restore_input = draft.filter(|draft| !draft.trim().is_empty());
                 }
 
                 let remaining_quota = MAX_EVENTS_PER_EA_PER_TICK - delivered_so_far;
@@ -577,25 +585,46 @@ fn get_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId) -> pane_in
 /// one on others — so the count needed varies with the draft. Rather than
 /// guess, press and re-check until the box reads empty. Returns `false` if it
 /// never does, so the caller can put the draft back and defer.
-fn clear_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId, target: &str) -> bool {
+/// What emptying the input box achieved.
+#[derive(Debug, PartialEq, Eq)]
+enum Cleared {
+    /// The box is empty.
+    Empty,
+    /// Nothing was sent, so whatever was there is untouched.
+    Untouched,
+    /// Keys were sent and the box still holds text — it is damaged now.
+    Partial,
+}
+
+fn clear_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId, target: &str) -> Cleared {
     const MAX_CLEAR_PRESSES: usize = 40;
     let client = crate::tmux::TmuxClient::new("");
+    let mut pressed = false;
 
     for _ in 0..MAX_CLEAR_PRESSES {
         match get_pane_input(base_prefix, receiver, ea_id) {
-            pane_input::PaneInput::Empty => return true,
-            // Never keep hammering a pane we cannot read.
-            pane_input::PaneInput::Unknown(_) => return false,
+            pane_input::PaneInput::Empty => return Cleared::Empty,
+            // Never keep hammering a pane we cannot read. Whether the draft is
+            // still whole depends on how far we got, and the caller needs to
+            // know: putting it back on top of an intact draft duplicates it.
+            pane_input::PaneInput::Unknown(_) => {
+                return if pressed {
+                    Cleared::Partial
+                } else {
+                    Cleared::Untouched
+                };
+            }
             pane_input::PaneInput::Draft(_) => {}
         }
         let _ = client.send_keys(target, "C-u");
+        pressed = true;
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 
-    matches!(
-        get_pane_input(base_prefix, receiver, ea_id),
-        pane_input::PaneInput::Empty
-    )
+    match get_pane_input(base_prefix, receiver, ea_id) {
+        pane_input::PaneInput::Empty => Cleared::Empty,
+        _ => Cleared::Partial,
+    }
 }
 
 pub(crate) fn deliver_to_tmux(

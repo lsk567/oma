@@ -107,7 +107,7 @@ pub(crate) fn extract(
     // rows line up under it, which is what lets us find them without a
     // per-backend indent constant.
     let text_col = rows[start].text_col(&shape);
-    let end = find_end_row(&shape, &rows, start, text_col, caret);
+    let end = find_end_row(&shape, &rows, start, text_col);
 
     let mut lines = Vec::new();
     for (offset, row) in rows[start..=end].iter().enumerate() {
@@ -275,13 +275,7 @@ fn find_start_row(shape: &Shape, rows: &[Row], caret: Option<Caret>) -> Option<u
 }
 
 /// The last row of the draft: the caret row, or the last continuation row.
-fn find_end_row(
-    shape: &Shape,
-    rows: &[Row],
-    start: usize,
-    text_col: usize,
-    caret: Option<Caret>,
-) -> usize {
+fn find_end_row(shape: &Shape, rows: &[Row], start: usize, text_col: usize) -> usize {
     if shape.border.is_some() {
         let mut end = start;
         while end + 1 < rows.len() && rows[end + 1].holds_draft(shape) {
@@ -289,11 +283,10 @@ fn find_end_row(
         }
         return end;
     }
-    if let Some(caret) = caret {
-        if caret.row >= start && caret.row < rows.len() {
-            return caret.row;
-        }
-    }
+    // Deliberately structural, never the caret row. The caret is wherever the
+    // user is typing, which may be the middle of the draft — ending there
+    // would drop every line below it, and the box is cleared regardless, so
+    // those lines would be gone.
     let mut end = start;
     for (offset, row) in rows.iter().enumerate().skip(start + 1) {
         if row.is_continuation_at(text_col) {
@@ -461,8 +454,10 @@ impl Row {
         }
         let chars: Vec<char> = self.visible.chars().collect();
         if chars.iter().all(|c| is_blank(*c)) {
-            // A blank row is only part of the draft if more of it follows.
-            return true;
+            // A blank row ends the draft. Chrome below the box is separated
+            // from it by one, and several backends indent their status line to
+            // exactly the draft's column — without this they read as draft.
+            return false;
         }
         if chars.len() <= text_col {
             return false;
@@ -542,7 +537,10 @@ fn update_dim_state(params: &str, dimmed: &mut bool, reverse: &mut bool) {
     } else {
         params
             .split(';')
-            .map(|part| part.parse::<u16>().unwrap_or(0))
+            // An unparseable parameter must be ignored, not read as 0 — that
+            // is "reset all attributes", which would clear the dim state and
+            // let ghost text be captured as if the user had typed it.
+            .filter_map(|part| part.parse::<u16>().ok())
             .collect()
     };
 
@@ -676,6 +674,47 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn a_caret_parked_mid_draft_still_captures_the_lines_below_it() {
+        // The caret says where the user is typing, not where the draft ends.
+        // Ending at the caret row would drop everything under it — and the box
+        // is cleared either way, so those lines would be destroyed.
+        for (backend, capture, rows) in [
+            (
+                "claude",
+                include_str!("../../tests/fixtures/pane_input/claude/multi3.ansi.txt"),
+                [45usize, 46, 47],
+            ),
+            (
+                "codex",
+                include_str!("../../tests/fixtures/pane_input/codex/multi3.ansi.txt"),
+                [19, 20, 21],
+            ),
+        ] {
+            let shape = Shape::for_backend(backend).unwrap();
+            for row in rows {
+                assert_eq!(
+                    extract(shape, capture, Some(Caret { row, col: 2 }), Some(200)),
+                    PaneInput::Draft("line one\nline two\nline three".to_string()),
+                    "{backend}: caret on row {row} must not truncate the draft"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chrome_indented_like_the_draft_is_not_swallowed() {
+        // codex indents its status line to the same column the draft starts
+        // at; only the blank row between them tells the two apart.
+        let shape = Shape::for_backend("codex").unwrap();
+        let capture = include_str!("../../tests/fixtures/pane_input/codex/single.ansi.txt");
+        let got = extract(shape, capture, Some(Caret { row: 19, col: 20 }), Some(200));
+        assert_eq!(got, PaneInput::Draft("fix the parser bug".to_string()));
+        if let PaneInput::Draft(draft) = got {
+            assert!(!draft.contains('·'), "status line leaked in: {draft:?}");
+        }
     }
 
     #[test]

@@ -106,11 +106,11 @@ fn tail_pane_lines(output: String, lines: i32) -> String {
 /// that render into whatever they are handed — so without this every agent
 /// works in a pane narrower than its own output. Nothing resizes it afterwards
 /// because nothing attaches, so it has to be right at creation.
-/// Session-environment key holding the backend a session was launched with.
-const SESSION_BACKEND_VAR: &str = "OMAR_BACKEND";
-
 const AGENT_COLUMNS: &str = "200";
 const AGENT_ROWS: &str = "50";
+
+/// Session-environment key holding the backend a session was launched with.
+const SESSION_BACKEND_VAR: &str = "OMAR_BACKEND";
 
 #[derive(Debug, Clone)]
 pub struct TmuxClient {
