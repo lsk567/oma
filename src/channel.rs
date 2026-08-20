@@ -251,6 +251,10 @@ pub fn spool_path(session: &str) -> PathBuf {
         .join(format!("{}.jsonl", session))
 }
 
+/// The tail of the command OMAR installs, and the only thing it will replace
+/// when re-installing.
+const CURSOR_HOOK_ARGS: &str = "hook-drain --format cursor";
+
 /// Install OMAR's hook so cursor-agent will collect events mid-turn.
 ///
 /// The hook is one entry in the operator's own `~/.cursor/hooks.json`, added
@@ -276,7 +280,7 @@ pub fn install_cursor_hook() -> bool {
         return false;
     }
 
-    let command = format!("{} hook-drain --format cursor", exe.display());
+    let command = format!("{} {}", exe.display(), CURSOR_HOOK_ARGS);
     let entry = serde_json::json!({ "command": command });
     let hooks = config
         .as_object_mut()
@@ -303,7 +307,10 @@ pub fn install_cursor_hook() -> bool {
                 !hook
                     .get("command")
                     .and_then(|command| command.as_str())
-                    .is_some_and(|command| command.contains("hook-drain"))
+                    // Match our own entry precisely. A bare "hook-drain"
+                    // would also drop an operator hook that merely mentions
+                    // it — theirs is not ours to remove.
+                    .is_some_and(|command| command.ends_with(CURSOR_HOOK_ARGS))
             })
             .collect();
         kept.push(entry.clone());
@@ -888,6 +895,43 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(strays.is_empty(), "temp file left behind");
+    }
+
+    #[test]
+    fn an_operator_hook_that_merely_mentions_hook_drain_is_left_alone() {
+        let _guard = crate::test_env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+
+        let path = home.path().join(".cursor").join("hooks.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Theirs mentions the subcommand but is not ours.
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"postToolUse":[{"command":"log 'omar hook-drain ran'"}]}}"#,
+        )
+        .unwrap();
+
+        assert!(install_cursor_hook());
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let commands: Vec<&str> = config["hooks"]["postToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hook| hook["command"].as_str().unwrap())
+            .collect();
+        assert!(
+            commands.iter().any(|c| c.contains("log '")),
+            "the operator's hook must survive: {commands:?}"
+        );
+        assert_eq!(commands.len(), 2, "ours is added, theirs is kept");
+
+        match previous {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]
