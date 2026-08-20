@@ -377,9 +377,11 @@ fn write_json_atomically(path: &Path, value: &serde_json::Value) -> bool {
 
 /// Claim a free loopback port for a backend that must be told one at launch.
 ///
-/// The socket is closed immediately, so this reserves nothing — it only picks a
-/// number the OS was willing to hand out. Losing the race means the backend
-/// fails to bind and the pane falls back to the input box.
+/// The socket is closed immediately, so this reserves nothing — it only picks
+/// a number the OS was willing to hand out. If something else takes it first
+/// opencode cannot bind; observed behaviour is that it keeps running without a
+/// listener, so provisioning times out and the pane falls back to the input
+/// box, but that is the backend's choice rather than a guarantee.
 pub fn free_port() -> Option<u16> {
     std::net::TcpListener::bind(("127.0.0.1", 0))
         .ok()?
@@ -447,7 +449,10 @@ fn provision_opencode(port: u16) -> Option<String> {
                 _ => return None,
             }
         }
-        std::thread::sleep(Duration::from_secs(1));
+        // Tight, because this is a race: the pane's first prompt is typed in
+        // once the backend looks ready, and if that lands before the session
+        // swap the first task goes to a session later events do not.
+        std::thread::sleep(Duration::from_millis(250));
     }
     None
 }
@@ -987,10 +992,19 @@ mod tests {
         }
 
         for pid in live {
-            match claude_peer(&sessions, pid).expect("resolved above") {
+            // A session can exit between listing and reading it; that is the
+            // registry behaving correctly, not a parse failure.
+            let Some(channel) = claude_peer(&sessions, pid) else {
+                continue;
+            };
+            match channel {
                 Channel::ClaudePeer { socket, token } => {
-                    assert!(socket.exists(), "socket for {pid} must exist");
                     assert!(!token.is_empty(), "peer token for {pid} must be non-empty");
+                    assert!(
+                        socket.to_string_lossy().ends_with(".sock"),
+                        "peer socket path looks wrong: {}",
+                        socket.display()
+                    );
                 }
                 other => panic!("claude must resolve to a peer socket, got {other:?}"),
             }

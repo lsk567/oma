@@ -378,11 +378,7 @@ impl Scheduler {
     fn next_timestamp(&self) -> Option<u64> {
         self.transaction(false, |queue| queue.peek().map(|event| event.timestamp))
     }
-    fn take_due_deliveries(
-        &self,
-        popup_receiver: &PopupReceiver,
-        base_prefix: &str,
-    ) -> Vec<DueDelivery> {
+    fn take_due_deliveries(&self, popup_receiver: &PopupReceiver) -> Vec<DueDelivery> {
         self.transaction(true, |queue| {
             let Some(earliest_ts) = queue.peek().map(|event| event.timestamp) else {
                 return Vec::new();
@@ -421,33 +417,13 @@ impl Scheduler {
                     continue;
                 }
 
-                let mut restore_input = None;
-                // A side channel hands the event straight to the backend, so
-                // the composer is never involved: nothing to capture, nothing
-                // to clear, and no reason to defer around a popup.
-                if should_defer_for_popup(popup_receiver, &receiver, ea_id)
-                    && side_channel(&receiver, ea_id, base_prefix).is_none()
-                {
-                    // Empty the box so the event does not land on top of what
-                    // the user is typing, and hold their draft to put back
-                    // afterwards. A pane that cannot be read or cannot be
-                    // cleared defers instead: a late event is recoverable, a
-                    // destroyed draft is not.
-                    match protect_draft(base_prefix, &receiver, ea_id) {
-                        Some(draft) => restore_input = draft,
-                        None => {
-                            defer_batch(
-                                batch,
-                                &mut remaining,
-                                &mut deliveries,
-                                receiver,
-                                ea_id,
-                                earliest_ts,
-                            );
-                            continue;
-                        }
-                    }
-                }
+                // Reading a pane means several tmux subprocesses, and emptying
+                // one can take seconds of polling. This runs inside the store
+                // transaction, which holds a cross-process lock that other
+                // writers give up on after 500ms — so decide here, and do it
+                // in the caller once the lock is gone.
+                let needs_draft_protection =
+                    should_defer_for_popup(popup_receiver, &receiver, ea_id);
 
                 let remaining_quota = MAX_EVENTS_PER_EA_PER_TICK - delivered_so_far;
                 let (batch, deferred_batch) = split_batch_for_quota(batch, remaining_quota);
@@ -479,8 +455,7 @@ impl Scheduler {
                     ea_id,
                     timestamp: earliest_ts,
                     batch,
-                    deferred_for_popup: false,
-                    restore_input,
+                    needs_draft_protection,
                 });
             }
 
@@ -490,31 +465,16 @@ impl Scheduler {
     }
 }
 
-/// Push a batch back onto the queue to be retried after the popup delay.
+/// Put a batch back on the queue to be retried after the popup delay.
 ///
 /// Used whenever the pane cannot be read or cannot be cleared: a late event is
 /// recoverable, a destroyed draft is not.
-fn defer_batch(
-    batch: Vec<ScheduledEvent>,
-    remaining: &mut BinaryHeap<ScheduledEvent>,
-    deliveries: &mut Vec<DueDelivery>,
-    receiver: String,
-    ea_id: ea::EaId,
-    earliest_ts: u64,
-) {
-    let defer_until = now_ns() + POPUP_DEFER_NS;
+fn requeue_batch(scheduler: &Scheduler, batch: Vec<ScheduledEvent>) {
+    let retry_at = now_ns() + POPUP_DEFER_NS;
     for mut event in batch {
-        event.timestamp = defer_until;
-        remaining.push(event);
+        event.timestamp = retry_at;
+        scheduler.insert(event);
     }
-    deliveries.push(DueDelivery {
-        receiver,
-        ea_id,
-        timestamp: earliest_ts,
-        batch: Vec::new(),
-        deferred_for_popup: true,
-        restore_input: None,
-    });
 }
 
 /// Build the tmux session name for a receiver.
@@ -782,8 +742,9 @@ struct DueDelivery {
     ea_id: u32,
     timestamp: u64,
     batch: Vec<ScheduledEvent>,
-    deferred_for_popup: bool,
-    restore_input: Option<String>,
+    /// The user has this pane's popup open, so the input box may hold a draft
+    /// that must be taken out of the way — done by the caller, off the lock.
+    needs_draft_protection: bool,
 }
 
 /// Decide whether to defer an event for `(receiver, ea_id)` because the user
@@ -855,21 +816,43 @@ pub async fn run_event_loop(
                     }
                 }
 
-                for delivery in scheduler.take_due_deliveries(&popup_receiver, &base_prefix) {
+                for delivery in scheduler.take_due_deliveries(&popup_receiver) {
                     let DueDelivery {
                         receiver,
                         ea_id,
                         timestamp,
                         batch,
-                        deferred_for_popup,
-                        restore_input,
+                        needs_draft_protection,
                     } = delivery;
-                    if deferred_for_popup {
-                        ticker.push(format!("deferred event(s) for {} (popup open)", receiver));
-                        continue;
-                    }
                     if batch.is_empty() {
                         continue;
+                    }
+
+                    // Off the store lock now, so this may take its time. A
+                    // side channel bypasses the input box entirely, so there
+                    // is nothing to protect in that case.
+                    let mut restore_input = None;
+                    if needs_draft_protection {
+                        let receiver_name = receiver.clone();
+                        let base_prefix_clone = base_prefix.clone();
+                        let protected = tokio::task::spawn_blocking(move || {
+                            if side_channel(&receiver_name, ea_id, &base_prefix_clone).is_some() {
+                                return Some(None);
+                            }
+                            protect_draft(&base_prefix_clone, &receiver_name, ea_id)
+                        })
+                        .await;
+                        match protected {
+                            Ok(Some(draft)) => restore_input = draft,
+                            _ => {
+                                ticker.push(format!(
+                                    "deferred event(s) for {} (popup open)",
+                                    receiver
+                                ));
+                                requeue_batch(&scheduler, batch);
+                                continue;
+                            }
+                        }
                     }
 
                     let message = format_delivery(&batch, timestamp);
@@ -890,11 +873,7 @@ pub async fn run_event_loop(
                     // The batch has already left the queue. If it never
                     // reached the agent, put it back rather than lose it.
                     if matches!(delivery_result, Ok(false)) {
-                        let retry_at = now_ns() + POPUP_DEFER_NS;
-                        for mut event in batch {
-                            event.timestamp = retry_at;
-                            scheduler.insert(event);
-                        }
+                        requeue_batch(&scheduler, batch);
                         continue;
                     }
                     if let Err(e) = delivery_result {

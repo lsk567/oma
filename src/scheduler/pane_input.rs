@@ -122,13 +122,22 @@ pub(crate) fn extract(
         if UNRECOVERABLE.iter().any(|token| text.contains(token)) {
             return PaneInput::Unknown("backend collapsed the draft to a summary token");
         }
+        // Also before stripping: the rows this stands for are off screen, and
+        // on some backends the marker itself is dimmed.
+        if text.trim_start().starts_with('↑') && text.contains(SCROLLED_MARKER) {
+            return PaneInput::Unknown("draft has scrolled inside the input box");
+        }
 
         // Ghost completions and inline argument hints trail the typed text,
         // dimmed. Drop them: the caret pins where typing stopped when the
         // backend leaves it visible, and the styling alone is enough when it
         // does not.
         let text = match caret {
-            Some(caret) if caret.row == start + offset => {
+            // tmux reports the caret in terminal cells. Those only line up
+            // with character offsets while the row is ASCII — a CJK character
+            // is two cells wide, a combining mark none — so anything else
+            // falls back to reading the styling, which needs no column.
+            Some(caret) if caret.row == start + offset && row.visible.is_ascii() => {
                 strip_ghost_after(row, &text, cut, caret.col)
             }
             _ => strip_trailing_dim(row, cut, &text),
@@ -142,13 +151,14 @@ pub(crate) fn extract(
     // new one; joining those with a newline would inject a break the user never
     // typed. Backends that re-flow at word boundaries (opencode) cannot be told
     // apart this way, so they keep the row split.
-    // A bordered composer is narrower than the pane, so its own widest row is
-    // the better estimate of where it wraps.
+    // A bordered composer is narrower than the pane. Measure it from the box
+    // itself — the rule closing it runs the full width — rather than from the
+    // draft, whose longest line says nothing about where text would wrap.
     let width = if shape.border.is_some() {
-        rows[start..=end]
+        rows[end..]
             .iter()
+            .find(|row| row.is_horizontal_border())
             .map(|row| row.visible.trim_end().chars().count())
-            .max()
     } else {
         pane_width
     };
@@ -157,9 +167,6 @@ pub(crate) fn extract(
 
     if UNRECOVERABLE.iter().any(|token| trimmed.contains(token)) {
         return PaneInput::Unknown("backend collapsed the draft to a summary token");
-    }
-    if trimmed.contains(SCROLLED_MARKER) && trimmed.starts_with('↑') {
-        return PaneInput::Unknown("draft has scrolled inside the input box");
     }
     if trimmed.is_empty() {
         return PaneInput::Empty;
@@ -184,12 +191,14 @@ fn join_wrapped(
     // `WRAP_SLACK` of the composer's width as a continuation — and require it
     // to be substantially long, so ordinary short lines are never merged.
     const WRAP_SLACK: usize = 24;
-    const MIN_WRAP_LEN: usize = 40;
 
     let Some(width) = pane_width else {
         return lines.join("\n");
     };
     let available = width.saturating_sub(text_col);
+    // Proportional, not absolute: on a narrow composer a 54-character line is
+    // an ordinary line, while on a wide one it is nowhere near the edge.
+    let nearly_full = available * 4 / 5;
 
     let mut out = String::new();
     for (index, line) in lines.iter().enumerate() {
@@ -203,7 +212,7 @@ fn join_wrapped(
                 .count()
                 .saturating_sub(text_col);
             let wrapped =
-                previous >= MIN_WRAP_LEN && previous >= available.saturating_sub(WRAP_SLACK);
+                previous >= nearly_full && previous >= available.saturating_sub(WRAP_SLACK);
             // Word wrapping ate the space that joined the two halves.
             out.push(if wrapped { ' ' } else { '\n' });
         }
@@ -715,6 +724,53 @@ mod tests {
         if let PaneInput::Draft(draft) = got {
             assert!(!draft.contains('·'), "status line leaked in: {draft:?}");
         }
+    }
+
+    #[test]
+    fn two_ordinary_lines_of_similar_length_are_not_read_as_one_wrapped_line() {
+        // The test for "this row ran off the edge" has to be proportional to
+        // the composer's width, or on a narrow pane every longish line merges
+        // with the next and the user's line breaks are lost on restore.
+        let line = "a".repeat(54);
+        let esc = "\u{1b}[39m";
+        let capture = format!("{esc}❯ {line}\n  {line}\n");
+        let shape = Shape::for_backend("claude").unwrap();
+        assert_eq!(
+            extract(shape, &capture, None, Some(80)),
+            PaneInput::Draft(format!("{line}\n{line}")),
+            "80-column pane: two 54-char lines are two lines"
+        );
+    }
+
+    #[test]
+    fn a_draft_that_scrolled_inside_the_box_is_never_restored_from_what_shows() {
+        // Only the tail is on screen; treating it as the whole draft and then
+        // clearing the box would throw the rest away.
+        let shape = Shape::for_backend("agy").unwrap();
+        for capture in [
+            "> \u{1b}[2m↑ 91 more lines\u{1b}[0m\n  the visible tail\n",
+            "> the visible head\n  ↑ 12 more lines\n",
+        ] {
+            assert!(
+                matches!(
+                    extract(shape, capture, None, Some(200)),
+                    PaneInput::Unknown(_)
+                ),
+                "a scrolled box must not be treated as a complete draft: {capture:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wide_character_row_falls_back_to_styling_rather_than_the_caret_column() {
+        // tmux counts the caret in cells; CJK is two cells per character, so
+        // using it as an index would cut the user's own text.
+        let shape = Shape::for_backend("claude").unwrap();
+        let capture = "\u{1b}[39m❯ 日本語のテキストです\n";
+        assert_eq!(
+            extract(shape, capture, Some(Caret { row: 0, col: 22 }), Some(200)),
+            PaneInput::Draft("日本語のテキストです".to_string())
+        );
     }
 
     #[test]
