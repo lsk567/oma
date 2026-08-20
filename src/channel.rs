@@ -506,8 +506,8 @@ const WS_NONCE: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 /// A JSON-RPC conversation with a codex app-server.
 ///
 /// The transport is a WebSocket over a Unix socket. The upgrade request is
-/// written by hand rather than through `tungstenite`'s client handshake, which
-/// is behind a feature this crate does not enable and which only speaks in
+/// written by hand rather than through `tungstenite::connect`, which is behind
+/// a feature this crate's own manifest turns off and which only speaks in
 /// terms of URLs — `src/serve.rs` answers the server half the same way.
 struct CodexSession {
     socket: tungstenite::WebSocket<UnixStream>,
