@@ -28,6 +28,10 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// opencode takes several seconds to boot; past this it is not coming up.
 const PROVISION_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// How long an event may sit in a spool before OMAR stops trusting the hook.
+/// A hook that is not firing would otherwise swallow every event silently.
+const SPOOL_STALE: Duration = Duration::from_secs(600);
+
 /// A side channel into a running agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Channel {
@@ -85,6 +89,27 @@ impl HookFormat {
     }
 }
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
+/// Has the oldest queued event been waiting longer than a working hook would
+/// ever leave it?
+fn spool_is_stale(path: &Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|event| event.get("at")?.as_u64())
+        .min()
+        .is_some_and(|oldest| now_secs().saturating_sub(oldest) > SPOOL_STALE.as_secs())
+}
+
 /// Take everything queued in a spool, leaving it empty.
 ///
 /// Truncating as we read is what keeps an event from being delivered twice
@@ -110,6 +135,14 @@ impl Channel {
         // A stamp is written when the backend needed provisioning at launch;
         // it names the port and session an event must be addressed to.
         if let Some(channel) = stamp.and_then(Channel::from_stamp) {
+            // A spool only works if the backend's hook is draining it. If the
+            // oldest event has been waiting too long it plainly is not, so
+            // stop feeding it and let delivery fall back to the input box.
+            if let Channel::Spool { path } = &channel {
+                if spool_is_stale(path) {
+                    return None;
+                }
+            }
             return Some(channel);
         }
         match backend {
@@ -176,7 +209,7 @@ impl Channel {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).context("create spool directory")?;
                 }
-                let line = serde_json::json!({ "text": text }).to_string();
+                let line = serde_json::json!({ "at": now_secs(), "text": text }).to_string();
                 let mut file = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -264,6 +297,48 @@ pub fn install_cursor_hook() -> bool {
         kept.push(entry.clone());
         hooks.insert(event.to_string(), serde_json::Value::Array(kept));
     }
+
+    if std::fs::create_dir_all(path.parent().expect("has a parent")).is_err() {
+        return false;
+    }
+    std::fs::write(&path, config.to_string()).is_ok()
+}
+
+/// Install OMAR's hook so antigravity will collect events before each turn.
+///
+/// Hooks are a map of named hooks that the CLI merges, so OMAR claims one name
+/// and leaves the rest of the file alone. `PreInvocation` runs just before the
+/// model is called, which is the moment queued events are worth handing over.
+///
+/// The file is the shared one under `~/.gemini/config`, not the per-workspace
+/// `.agents/hooks.json`: a workspace copy would leave an untracked file in the
+/// operator's repository, and the CLI does not read it in this version anyway.
+pub fn install_antigravity_hook() -> bool {
+    let Some(exe) = std::env::current_exe().ok() else {
+        return false;
+    };
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let path = home.join(".gemini").join("config").join("hooks.json");
+
+    let mut config: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|body| serde_json::from_str(&body).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let Some(hooks) = config.as_object_mut() else {
+        return false;
+    };
+
+    hooks.insert(
+        "omar".to_string(),
+        serde_json::json!({
+            "PreInvocation": [{
+                "type": "command",
+                "command": format!("{} hook-drain --format agy", exe.display()),
+            }]
+        }),
+    );
 
     if std::fs::create_dir_all(path.parent().expect("has a parent")).is_err() {
         return false;
@@ -652,6 +727,74 @@ mod tests {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    #[test]
+    fn installing_the_antigravity_hook_claims_one_name_and_leaves_the_rest() {
+        let _guard = crate::test_env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+        let path = home
+            .path()
+            .join(".gemini")
+            .join("config")
+            .join("hooks.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"safety-gate":{"enabled":false,"PreToolUse":[{"matcher":"run_command",
+                "hooks":[{"command":"./scripts/safety-check.sh"}]}]}}"#,
+        )
+        .unwrap();
+
+        assert!(install_antigravity_hook());
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        // Their named hook is untouched — the CLI merges names, so ours sits
+        // alongside rather than replacing the file.
+        assert_eq!(config["safety-gate"]["enabled"], false);
+        assert_eq!(
+            config["safety-gate"]["PreToolUse"][0]["matcher"],
+            "run_command"
+        );
+
+        let ours = &config["omar"]["PreInvocation"][0];
+        assert_eq!(ours["type"], "command");
+        assert!(ours["command"].as_str().unwrap().contains("hook-drain"));
+        assert!(ours["command"].as_str().unwrap().contains("--format agy"));
+
+        match previous {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn a_spool_nothing_is_draining_stops_being_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pane.jsonl");
+        let stamp = format!("spool:{}", path.display());
+
+        // Nothing queued: the hook has nothing to prove yet.
+        Channel::Spool { path: path.clone() }
+            .deliver("fresh")
+            .unwrap();
+        assert!(
+            Channel::resolve("cursor", 0, Some(&stamp)).is_some(),
+            "a spool with recent events is still usable"
+        );
+
+        // An event that has been sitting there far too long means the hook is
+        // not running, so delivery must go back through the input box.
+        let stale = serde_json::json!({ "at": 1_000, "text": "ancient" });
+        std::fs::write(&path, format!("{}\n", stale)).unwrap();
+        assert_eq!(
+            Channel::resolve("cursor", 0, Some(&stamp)),
+            None,
+            "a backed-up spool must not swallow further events"
+        );
     }
 
     #[test]

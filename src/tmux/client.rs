@@ -754,8 +754,12 @@ impl TmuxClient {
         // can hand context to the model. Point this pane at its own spool so
         // the hook knows whose events to collect.
         let backend = crate::manager::command_backend_name(command);
-        let spool = (backend == Some("cursor") && crate::channel::install_cursor_hook())
-            .then(|| crate::channel::spool_path(name));
+        let hooked = match backend {
+            Some("cursor") => crate::channel::install_cursor_hook(),
+            Some("agy") => crate::channel::install_antigravity_hook(),
+            _ => false,
+        };
+        let spool = hooked.then(|| crate::channel::spool_path(name));
         let spool_env = spool
             .as_ref()
             .map(|path| format!("OMAR_EVENT_SPOOL={}", path.display()));
