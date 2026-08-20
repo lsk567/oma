@@ -750,6 +750,19 @@ impl TmuxClient {
             args.extend(["-c", dir]);
         }
 
+        // cursor-agent takes no message from outside, but it runs hooks that
+        // can hand context to the model. Point this pane at its own spool so
+        // the hook knows whose events to collect.
+        let backend = crate::manager::command_backend_name(command);
+        let spool = (backend == Some("cursor") && crate::channel::install_cursor_hook())
+            .then(|| crate::channel::spool_path(name));
+        let spool_env = spool
+            .as_ref()
+            .map(|path| format!("OMAR_EVENT_SPOOL={}", path.display()));
+        if let Some(spool_env) = &spool_env {
+            args.extend(["-e", spool_env]);
+        }
+
         // Execute the provided command through a shell so the full string is
         // interpreted consistently (including quoted args and shell metacharacters)
         // instead of relying on tmux's shell-command parser heuristics.
@@ -760,8 +773,11 @@ impl TmuxClient {
         // later needs to know reads it back instead of guessing from the pane,
         // which cannot be done reliably: `#{pane_current_command}` is `node`
         // for any npm-installed backend, and banner text scrolls away.
-        if let Some(backend) = crate::manager::command_backend_name(command) {
+        if let Some(backend) = backend {
             let _ = self.set_session_backend(name, backend);
+        }
+        if let Some(spool) = &spool {
+            let _ = self.set_session_delivery(name, &format!("spool:{}", spool.display()));
         }
         // Some backends only offer a side channel once they are up and have
         // been given a session to talk about. That happens off the launch path.

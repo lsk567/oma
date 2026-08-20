@@ -39,6 +39,66 @@ pub enum Channel {
     /// model but not rendered in the transcript, and `noReply` seats it
     /// without starting a turn.
     OpencodeHttp { port: u16, session: String },
+    /// A file the backend's own hook drains into model context.
+    ///
+    /// cursor-agent and antigravity take no message from outside, but both run
+    /// hooks that may return extra context, and that context is attached to
+    /// the turn rather than rendered as something the user said. OMAR appends
+    /// events here and `omar hook-drain` hands them over when the hook fires.
+    ///
+    /// Unlike the other channels this one is reactive: an event waits in the
+    /// spool until the agent next runs a tool or the user next submits.
+    Spool { path: PathBuf },
+}
+
+/// How a backend expects a hook to hand back extra context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookFormat {
+    /// cursor-agent: `{"additional_context": "..."}`
+    Cursor,
+    /// antigravity: `{"injectSteps": [{"ephemeralMessage": "..."}]}`
+    Antigravity,
+}
+
+impl HookFormat {
+    pub fn parse(name: &str) -> Option<HookFormat> {
+        match name {
+            "cursor" => Some(HookFormat::Cursor),
+            "agy" | "antigravity" => Some(HookFormat::Antigravity),
+            _ => None,
+        }
+    }
+
+    /// Render pending events as the hook's reply. An empty spool must still
+    /// produce valid JSON, or the backend treats the hook as failed.
+    pub fn render(&self, events: &[String]) -> String {
+        if events.is_empty() {
+            return "{}".to_string();
+        }
+        let joined = events.join("\n\n");
+        match self {
+            HookFormat::Cursor => serde_json::json!({ "additional_context": joined }).to_string(),
+            HookFormat::Antigravity => {
+                serde_json::json!({ "injectSteps": [{ "ephemeralMessage": joined }] }).to_string()
+            }
+        }
+    }
+}
+
+/// Take everything queued in a spool, leaving it empty.
+///
+/// Truncating as we read is what keeps an event from being delivered twice
+/// when the hook fires again a moment later.
+pub fn drain_spool(path: &Path) -> Vec<String> {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let _ = std::fs::write(path, "");
+    contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|event| event.get("text")?.as_str().map(str::to_string))
+        .collect()
 }
 
 impl Channel {
@@ -74,6 +134,9 @@ impl Channel {
                     session: session.to_string(),
                 })
             }
+            "spool" => (!rest.is_empty()).then(|| Channel::Spool {
+                path: PathBuf::from(rest),
+            }),
             _ => None,
         }
     }
@@ -109,6 +172,19 @@ impl Channel {
                 }
                 Ok(())
             }
+            Channel::Spool { path } => {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).context("create spool directory")?;
+                }
+                let line = serde_json::json!({ "text": text }).to_string();
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .with_context(|| format!("open spool {}", path.display()))?;
+                writeln!(file, "{}", line).context("append to spool")?;
+                Ok(())
+            }
         }
     }
 
@@ -116,8 +192,83 @@ impl Channel {
         match self {
             Channel::ClaudePeer { .. } => "claude peer socket",
             Channel::OpencodeHttp { .. } => "opencode http api",
+            Channel::Spool { .. } => "hook spool",
         }
     }
+}
+
+/// Where a pane's pending events queue up, for backends reached by a hook.
+pub fn spool_path(session: &str) -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".omar")
+        .join("events")
+        .join(format!("{}.jsonl", session))
+}
+
+/// Install OMAR's hook so cursor-agent will collect events mid-turn.
+///
+/// The hook is one entry in the operator's own `~/.cursor/hooks.json`, added
+/// without disturbing whatever else is in there. It runs for every pane and
+/// reads `$OMAR_EVENT_SPOOL`, so one entry serves them all.
+///
+/// Returns false if the file cannot be written — the caller must then leave
+/// the pane on the input box, because a spool nothing drains is a black hole.
+pub fn install_cursor_hook() -> bool {
+    let Some(exe) = std::env::current_exe().ok() else {
+        return false;
+    };
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let path = home.join(".cursor").join("hooks.json");
+
+    let mut config: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|body| serde_json::from_str(&body).ok())
+        .unwrap_or_else(|| serde_json::json!({ "version": 1 }));
+    if !config.is_object() {
+        return false;
+    }
+
+    let command = format!("{} hook-drain --format cursor", exe.display());
+    let entry = serde_json::json!({ "command": command });
+    let hooks = config
+        .as_object_mut()
+        .expect("checked above")
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(hooks) = hooks.as_object_mut() else {
+        return false;
+    };
+
+    // Two events: one fires while the agent works, the other when the user
+    // next submits. Between them an event is never left waiting on an agent
+    // that has gone quiet.
+    for event in ["postToolUse", "beforeSubmitPrompt"] {
+        let list = hooks
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let mut kept: Vec<serde_json::Value> = list
+            .into_iter()
+            .filter(|hook| {
+                !hook
+                    .get("command")
+                    .and_then(|command| command.as_str())
+                    .is_some_and(|command| command.contains("hook-drain"))
+            })
+            .collect();
+        kept.push(entry.clone());
+        hooks.insert(event.to_string(), serde_json::Value::Array(kept));
+    }
+
+    if std::fs::create_dir_all(path.parent().expect("has a parent")).is_err() {
+        return false;
+    }
+    std::fs::write(&path, config.to_string()).is_ok()
 }
 
 /// Claim a free loopback port for a backend that must be told one at launch.
@@ -386,6 +537,132 @@ mod tests {
             split_response("HTTP/1.1 404 Not Found\r\n\r\n").map(|(status, _)| status),
             Some(404)
         );
+    }
+
+    #[test]
+    fn a_hook_reply_carries_every_queued_event_in_the_backends_own_shape() {
+        let events = vec!["standup in 5".to_string(), "CI went red".to_string()];
+
+        let cursor: serde_json::Value =
+            serde_json::from_str(&HookFormat::Cursor.render(&events)).unwrap();
+        assert_eq!(cursor["additional_context"], "standup in 5\n\nCI went red");
+
+        let agy: serde_json::Value =
+            serde_json::from_str(&HookFormat::Antigravity.render(&events)).unwrap();
+        assert_eq!(
+            agy["injectSteps"][0]["ephemeralMessage"],
+            "standup in 5\n\nCI went red"
+        );
+    }
+
+    #[test]
+    fn an_empty_spool_still_answers_with_valid_json() {
+        // A hook that prints nothing reads as a failure to the backend.
+        for format in [HookFormat::Cursor, HookFormat::Antigravity] {
+            let reply = format.render(&[]);
+            serde_json::from_str::<serde_json::Value>(&reply)
+                .unwrap_or_else(|_| panic!("{format:?} must render JSON, got {reply:?}"));
+        }
+        assert_eq!(HookFormat::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn a_spool_hands_over_each_event_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pane.jsonl");
+        let channel = Channel::Spool { path: path.clone() };
+
+        channel.deliver("first").unwrap();
+        channel.deliver("second").unwrap();
+        assert_eq!(drain_spool(&path), vec!["first", "second"]);
+
+        // Draining empties it, so the next hook call does not repeat them.
+        assert!(drain_spool(&path).is_empty());
+
+        channel.deliver("third").unwrap();
+        assert_eq!(drain_spool(&path), vec!["third"]);
+    }
+
+    #[test]
+    fn an_event_with_newlines_survives_the_spool() {
+        // Events are one JSON object per line; a multi-line event must not
+        // become several events.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pane.jsonl");
+        Channel::Spool { path: path.clone() }
+            .deliver("line one\nline two")
+            .unwrap();
+        assert_eq!(drain_spool(&path), vec!["line one\nline two"]);
+    }
+
+    #[test]
+    fn installing_the_cursor_hook_keeps_the_operators_own_hooks() {
+        let _guard = crate::test_env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+
+        let path = home.path().join(".cursor").join("hooks.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"version":1,"hooks":{"postToolUse":[{"command":"their-own-linter"}],
+                "beforeShellExecution":[{"command":"their-audit"}]}}"#,
+        )
+        .unwrap();
+
+        assert!(install_cursor_hook());
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        let commands = |event: &str| -> Vec<String> {
+            config["hooks"][event]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|hook| hook["command"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // Theirs survives, on the event they put it on and on ours.
+        assert!(commands("postToolUse")
+            .iter()
+            .any(|c| c == "their-own-linter"));
+        assert_eq!(commands("beforeShellExecution"), vec!["their-audit"]);
+        for event in ["postToolUse", "beforeSubmitPrompt"] {
+            assert!(
+                commands(event).iter().any(|c| c.contains("hook-drain")),
+                "{event} must call OMAR"
+            );
+        }
+
+        // Installing again must not stack up duplicates.
+        assert!(install_cursor_hook());
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let drains = config["hooks"]["postToolUse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|hook| hook["command"].as_str().unwrap().contains("hook-drain"))
+            .count();
+        assert_eq!(drains, 1, "reinstalling must replace, not append");
+
+        match previous {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn a_spool_stamp_round_trips() {
+        assert_eq!(
+            Channel::from_stamp("spool:/tmp/omar/events/pane.jsonl"),
+            Some(Channel::Spool {
+                path: PathBuf::from("/tmp/omar/events/pane.jsonl")
+            })
+        );
+        assert_eq!(Channel::from_stamp("spool:"), None);
     }
 
     #[test]
