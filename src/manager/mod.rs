@@ -178,7 +178,9 @@ fn detect_backend_token(token: &str) -> Option<BackendKind> {
 
     match executable {
         "agy" => Some(BackendKind::Agy),
-        "claude" => Some(BackendKind::Claude),
+        // Homebrew ships Claude Code as a single-file executable named
+        // `claude.exe`, which is what the pane reports it is running.
+        "claude" | "claude.exe" => Some(BackendKind::Claude),
         "codex" => Some(BackendKind::Codex),
         "cursor" => Some(BackendKind::Cursor),
         "opencode" => Some(BackendKind::Opencode),
@@ -204,6 +206,17 @@ pub enum ManagerEnsureResult {
     Started,
     ReplacedBackend,
 }
+
+/// Let OMAR deliver events over Claude Code's cross-session peer socket.
+///
+/// Without this the session holds an inbound message behind an approval
+/// dialog — OMAR does not attest a permission mode, and an agent launched with
+/// `--dangerously-skip-permissions` distrusts a sender that has not. The dialog
+/// covers the composer, so the held message is worse than no channel at all.
+///
+/// `--settings` loads *additional* settings, so the operator's own settings
+/// files still apply.
+const CLAUDE_INBOUND_SETTINGS: &str = "--settings '{\"crossSessionInbound\":\"accept\"}'";
 
 fn ensure_codex_runtime_flags(base_command: &str) -> String {
     if detect_backend(base_command) != Some(BackendKind::Codex) {
@@ -793,13 +806,17 @@ pub fn build_agent_command(
         }
         Some(BackendKind::Claude) => match materialize_claude_mcp_config(mcp_context) {
             Some(mcp_config) => format!(
-                "{} --system-prompt \"{}\" --mcp-config {} --disallowedTools {}",
+                "{} --system-prompt \"{}\" --mcp-config {} --disallowedTools {} {}",
                 base_command,
                 shell_expr,
                 shell_single_quote(&mcp_config.display().to_string()),
-                shell_single_quote(&backend_native_disallowed_tools_csv())
+                shell_single_quote(&backend_native_disallowed_tools_csv()),
+                CLAUDE_INBOUND_SETTINGS
             ),
-            None => format!("{} --system-prompt \"{}\"", base_command, shell_expr),
+            None => format!(
+                "{} --system-prompt \"{}\" {}",
+                base_command, shell_expr, CLAUDE_INBOUND_SETTINGS
+            ),
         },
         Some(BackendKind::Codex) => {
             let mut cmd = format!(
@@ -1581,6 +1598,49 @@ mod tests {
             "claude --disallowedTools must include the built-in Task tool: {cmd}"
         );
         assert!(cmd.contains("dispatch_agent"));
+    }
+
+    #[test]
+    fn a_claude_session_accepts_events_from_omar_over_its_peer_socket() {
+        // Without this the session holds OMAR's messages behind an approval
+        // dialog that covers the composer, and no event is ever delivered.
+        let dir = tempfile::tempdir().unwrap();
+        for base in ["claude --dangerously-skip-permissions", "claude"] {
+            let cmd = build_agent_command(
+                base,
+                Path::new("/tmp/prompts/ea.md"),
+                &[],
+                &test_mcp_context(dir.path()),
+            );
+            assert!(
+                cmd.contains(r#"--settings '{"crossSessionInbound":"accept"}'"#),
+                "claude must opt in to inbound peer messages: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_claude_is_told_about_inbound_peer_messages() {
+        // The flag is Claude Code's; handing it to another backend would be an
+        // unrecognised argument at launch.
+        let dir = tempfile::tempdir().unwrap();
+        for base in [
+            "codex --no-alt-screen",
+            "opencode",
+            "cursor agent --yolo",
+            "agy --dangerously-skip-permissions",
+        ] {
+            let cmd = build_agent_command(
+                base,
+                Path::new("/tmp/prompts/ea.md"),
+                &[],
+                &test_mcp_context(dir.path()),
+            );
+            assert!(
+                !cmd.contains("crossSessionInbound"),
+                "{base} must not receive a Claude-only flag: {cmd}"
+            );
+        }
     }
 
     #[test]

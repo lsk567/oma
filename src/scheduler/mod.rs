@@ -1,3 +1,4 @@
+mod channel;
 pub mod event;
 mod pane_input;
 
@@ -422,7 +423,11 @@ impl Scheduler {
                 }
 
                 let mut restore_input = None;
-                if should_defer_for_popup(popup_receiver, &receiver, ea_id) {
+                // A side channel hands the event straight to the backend, so
+                // the composer is never involved: nothing to capture, nothing
+                // to clear, and no reason to defer around a popup.
+                let has_side_channel = side_channel(&receiver, ea_id, base_prefix).is_some();
+                if !has_side_channel && should_defer_for_popup(popup_receiver, &receiver, ea_id) {
                     // Preserve a draft across delivery: capture it, clear the
                     // box, let the normal path submit the event, then paste the
                     // draft back.
@@ -627,6 +632,15 @@ fn clear_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId, target: 
     }
 }
 
+/// The side channel for a receiver's pane, if its backend offers one.
+fn side_channel(receiver: &str, ea_id: ea::EaId, base_prefix: &str) -> Option<channel::Channel> {
+    let target = pane_target_name(receiver, ea_id, base_prefix);
+    let client = crate::tmux::TmuxClient::new("");
+    let backend = client.session_backend(&target)?;
+    let pane_pid = client.get_pane_pid(&target).ok()?;
+    channel::Channel::resolve(&backend, pane_pid)
+}
+
 pub(crate) fn deliver_to_tmux(
     ea_id: u32,
     receiver: &str,
@@ -635,6 +649,30 @@ pub(crate) fn deliver_to_tmux(
     ticker: &TickerBuffer,
     restore_input: Option<&str>,
 ) {
+    // Prefer handing the event to the backend directly. It reaches the model
+    // without going through the input box, so a draft the user is typing is
+    // never touched and the event does not read as something they said.
+    if let Some(channel) = side_channel(receiver, ea_id, base_prefix) {
+        match channel.deliver(message) {
+            Ok(()) => {
+                ticker.push(format!(
+                    "delivered event(s) to {} via {}",
+                    receiver,
+                    channel.describe()
+                ));
+                return;
+            }
+            Err(e) => {
+                // Fall through to the input box: a delivered event beats a
+                // lost one, and that path knows how to protect a draft.
+                ticker.push(format!(
+                    "side channel for {} failed ({}); using the input box",
+                    receiver, e
+                ));
+            }
+        }
+    }
+
     let target = pane_target_name(receiver, ea_id, base_prefix);
     let client = crate::tmux::TmuxClient::new("");
     let opts = DeliveryOptions::default();
