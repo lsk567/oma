@@ -649,7 +649,7 @@ pub(crate) fn deliver_to_tmux(
     base_prefix: &str,
     ticker: &TickerBuffer,
     restore_input: Option<&str>,
-) {
+) -> bool {
     // Set when the input box had to be emptied on the fallback path.
     let mut rescued = None;
 
@@ -659,12 +659,25 @@ pub(crate) fn deliver_to_tmux(
     if let Some(channel) = side_channel(receiver, ea_id, base_prefix) {
         match channel.deliver(message) {
             Ok(()) => {
+                // A channel can appear between capture and delivery — a spool
+                // drained, a port finished provisioning — in which case the
+                // caller has already emptied the box and is holding the draft.
+                // Returning without putting it back would destroy it.
+                if let Some(draft) = restore_input.filter(|draft| !draft.is_empty()) {
+                    let target = pane_target_name(receiver, ea_id, base_prefix);
+                    if crate::tmux::TmuxClient::new("")
+                        .paste_text(&target, draft)
+                        .is_err()
+                    {
+                        ticker.push(format!("tmux input restore failed for {}", receiver));
+                    }
+                }
                 ticker.push(format!(
                     "delivered event(s) to {} via {}",
                     receiver,
                     channel.describe()
                 ));
-                return;
+                return true;
             }
             Err(e) => {
                 ticker.push(format!(
@@ -681,10 +694,10 @@ pub(crate) fn deliver_to_tmux(
                         // Unreadable or unclearable: leave the pane alone.
                         // Losing one event beats destroying a draft.
                         ticker.push(format!(
-                            "skipped event(s) for {}: could not clear the input box",
+                            "could not clear the input box for {}; retrying later",
                             receiver
                         ));
-                        return;
+                        return false;
                     }
                 }
             }
@@ -696,17 +709,19 @@ pub(crate) fn deliver_to_tmux(
     let opts = DeliveryOptions::default();
     if let Err(e) = client.deliver_prompt(&target, message, &opts) {
         ticker.push(format!("tmux prompt delivery failed for {}: {}", target, e));
-        return;
+        return false;
     }
     let restore_input = restore_input.or(rescued.as_deref());
     if let Some(input) = restore_input.filter(|input| !input.is_empty()) {
         if let Err(e) = client.paste_text(&target, input) {
             ticker.push(format!("tmux input restore failed for {}: {}", target, e));
-            return;
+            // The event itself did land; only putting the draft back failed.
+            return true;
         }
         ticker.push(format!("restored draft input for {}", receiver));
     }
     ticker.push(format!("delivered event(s) to {}", receiver));
+    true
 }
 
 fn format_delivery(events: &[ScheduledEvent], timestamp: u64) -> String {
@@ -869,9 +884,19 @@ pub async fn run_event_loop(
                             &base_prefix_clone,
                             &ticker_clone,
                             restore_input.as_deref(),
-                        );
+                        )
                     })
                     .await;
+                    // The batch has already left the queue. If it never
+                    // reached the agent, put it back rather than lose it.
+                    if matches!(delivery_result, Ok(false)) {
+                        let retry_at = now_ns() + POPUP_DEFER_NS;
+                        for mut event in batch {
+                            event.timestamp = retry_at;
+                            scheduler.insert(event);
+                        }
+                        continue;
+                    }
                     if let Err(e) = delivery_result {
                         ticker.push(format!(
                             "delivery task failed for {} (ea {}): {}",

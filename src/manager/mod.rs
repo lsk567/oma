@@ -119,7 +119,7 @@ fn sed_escape(s: &str) -> String {
         .replace('\'', "'\\''")
 }
 
-fn shell_single_quote(s: &str) -> String {
+pub(crate) fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -973,16 +973,18 @@ pub fn build_ea_command(
             let base_command = ensure_codex_runtime_flags(base_command);
             let cmd = match materialize_claude_mcp_config(mcp_context) {
                 Some(mcp_config) => format!(
-                    "{} --system-prompt-file {} --mcp-config {} --disallowedTools {}",
+                    "{} --system-prompt-file {} --mcp-config {} --disallowedTools {} {}",
                     base_command,
                     shell_single_quote(&combined_path.display().to_string()),
                     shell_single_quote(&mcp_config.display().to_string()),
-                    shell_single_quote(&backend_native_disallowed_tools_csv())
+                    shell_single_quote(&backend_native_disallowed_tools_csv()),
+                    CLAUDE_INBOUND_SETTINGS
                 ),
                 None => format!(
-                    "{} --system-prompt-file {}",
+                    "{} --system-prompt-file {} {}",
                     base_command,
-                    shell_single_quote(&combined_path.display().to_string())
+                    shell_single_quote(&combined_path.display().to_string()),
+                    CLAUDE_INBOUND_SETTINGS
                 ),
             };
             (cmd, None)
@@ -1637,6 +1639,24 @@ mod tests {
                 "claude must opt in to inbound peer messages: {cmd}"
             );
         }
+    }
+
+    #[test]
+    fn the_ea_pane_accepts_events_from_omar_too() {
+        // The EA manager is the most common receiver of scheduled events, and
+        // it is built by a different function than the worker panes.
+        let dir = tempfile::tempdir().unwrap();
+        let (cmd, _) = build_ea_command(
+            "claude --dangerously-skip-permissions",
+            1,
+            "ea-one",
+            Path::new("/tmp/prompts/ea.md"),
+            &test_mcp_context(dir.path()),
+        );
+        assert!(
+            cmd.contains(r#"--settings '{"crossSessionInbound":"accept"}'"#),
+            "the EA pane must opt in to inbound peer messages: {cmd}"
+        );
     }
 
     #[test]

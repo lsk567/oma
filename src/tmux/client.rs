@@ -759,13 +759,22 @@ impl TmuxClient {
             Some("agy") => crate::channel::install_antigravity_hook(),
             _ => false,
         };
-        let spool = hooked.then(|| crate::channel::spool_path(name));
+        let spool = hooked.then(|| {
+            crate::channel::reset_spool(name);
+            crate::channel::spool_path(name)
+        });
 
         // Execute the provided command through a shell so the full string is
         // interpreted consistently (including quoted args and shell metacharacters)
         // instead of relying on tmux's shell-command parser heuristics.
         let command = match &spool {
-            Some(path) => &format!("OMAR_EVENT_SPOOL={} {}", path.display(), command),
+            // Quoted: a space anywhere in the path would otherwise split the
+            // assignment and take the rest of the launch line with it.
+            Some(path) => &format!(
+                "OMAR_EVENT_SPOOL={} {}",
+                crate::manager::shell_single_quote(&path.display().to_string()),
+                command
+            ),
             None => command,
         };
         args.extend(["sh", "-lc", command]);

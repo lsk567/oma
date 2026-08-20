@@ -236,6 +236,13 @@ impl Channel {
 }
 
 /// Where a pane's pending events queue up, for backends reached by a hook.
+pub fn reset_spool(session: &str) {
+    // Session names are reused when a pane is killed and recreated. Left
+    // alone, the new agent would be handed the old one's events, or find a
+    // backlog already old enough to be treated as a dead hook.
+    let _ = std::fs::remove_file(spool_path(session));
+}
+
 pub fn spool_path(session: &str) -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -303,10 +310,7 @@ pub fn install_cursor_hook() -> bool {
         hooks.insert(event.to_string(), serde_json::Value::Array(kept));
     }
 
-    if std::fs::create_dir_all(path.parent().expect("has a parent")).is_err() {
-        return false;
-    }
-    std::fs::write(&path, config.to_string()).is_ok()
+    write_json_atomically(&path, &config)
 }
 
 /// Install OMAR's hook so antigravity will collect events before each turn.
@@ -345,10 +349,30 @@ pub fn install_antigravity_hook() -> bool {
         }),
     );
 
-    if std::fs::create_dir_all(path.parent().expect("has a parent")).is_err() {
+    write_json_atomically(&path, &config)
+}
+
+/// Replace a file in one step.
+///
+/// These hook files are shared with the operator and with other panes: a
+/// half-written one reads as invalid JSON, and the next writer would treat it
+/// as absent and overwrite whatever the operator had configured.
+fn write_json_atomically(path: &Path, value: &serde_json::Value) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
         return false;
     }
-    std::fs::write(&path, config.to_string()).is_ok()
+    let temp = parent.join(format!(".omar-{}.tmp", std::process::id()));
+    if std::fs::write(&temp, value.to_string()).is_err() {
+        return false;
+    }
+    if std::fs::rename(&temp, path).is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return false;
+    }
+    true
 }
 
 /// Claim a free loopback port for a backend that must be told one at launch.
@@ -416,9 +440,12 @@ fn provision_opencode(port: u16) -> Option<String> {
                 .and_then(|value| value.get("id")?.as_str().map(str::to_string))?;
             let select = serde_json::json!({ "sessionID": session }).to_string();
             // Without this the pane keeps showing a different session and the
-            // user never sees what the agent was told.
-            http_json(port, "POST", "/tui/select-session", Some(&select)).ok()?;
-            return Some(format!("opencode:{}:{}", port, session));
+            // user never sees what the agent was told — so a refusal here must
+            // not be stamped as a working channel.
+            match http_json(port, "POST", "/tui/select-session", Some(&select)) {
+                Ok((200, _)) => return Some(format!("opencode:{}:{}", port, session)),
+                _ => return None,
+            }
         }
         std::thread::sleep(Duration::from_secs(1));
     }
@@ -807,6 +834,55 @@ mod tests {
             None,
             "a backed-up spool must not swallow further events"
         );
+    }
+
+    #[test]
+    fn a_reused_session_name_does_not_inherit_the_last_agents_events() {
+        let _guard = crate::test_env_lock();
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var("HOME").ok();
+        std::env::set_var("HOME", home.path());
+
+        let path = spool_path("omar-agent-1-work");
+        Channel::Spool { path: path.clone() }
+            .deliver("meant for the previous agent")
+            .unwrap();
+        assert!(!drain_spool(&path).is_empty() || path.exists());
+
+        Channel::Spool { path: path.clone() }
+            .deliver("still here")
+            .unwrap();
+        reset_spool("omar-agent-1-work");
+        assert!(drain_spool(&path).is_empty(), "a new pane starts clean");
+
+        match previous {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn a_half_written_hook_file_never_reaches_disk() {
+        // The file is shared with the operator; a truncated one reads as
+        // absent and the next writer would overwrite their configuration.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("hooks.json");
+        assert!(write_json_atomically(
+            &path,
+            &serde_json::json!({ "theirs": 1 })
+        ));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap())
+                .unwrap()["theirs"],
+            1
+        );
+        // No temp files left behind.
+        let strays: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "temp file left behind");
     }
 
     #[test]
