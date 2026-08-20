@@ -99,7 +99,13 @@ pub(crate) fn extract(
         return PaneInput::Unknown("empty capture");
     }
 
-    let Some(start) = find_start_row(&shape, &rows, caret) else {
+    // A bordered composer does not own the whole terminal row: opencode
+    // paints a working-directory indicator to its right, on the same rows,
+    // once the pane is wide enough. The rule that closes the box says where
+    // the box actually ends, and anything past that is somebody else's.
+    let right_edge = shape.border.and_then(|_| box_right_edge(&rows, caret));
+
+    let Some(start) = find_start_row(&shape, &rows, caret, right_edge) else {
         return PaneInput::Unknown("no input row found");
     };
 
@@ -107,12 +113,12 @@ pub(crate) fn extract(
     // rows line up under it, which is what lets us find them without a
     // per-backend indent constant.
     let text_col = text_column(&shape, &rows, start);
-    let end = find_end_row(&shape, &rows, start, text_col);
+    let end = find_end_row(&shape, &rows, start, text_col, right_edge);
 
     let mut lines = Vec::new();
     for (offset, row) in rows[start..=end].iter().enumerate() {
         let cut = text_col;
-        let text = row.after_col(cut);
+        let text = row.between(cut, right_edge);
 
         // Check before any styling is stripped: some backends render the
         // collapsed-paste token dimmed, which would otherwise erase the very
@@ -261,7 +267,21 @@ fn join_wrapped(
 /// With a visible caret this walks up from the caret row, so menus rendered
 /// below the box cannot be mistaken for input. Without one it falls back to
 /// the glyph, bounded by the box borders so the same menus stay out.
-fn find_start_row(shape: &Shape, rows: &[Row], caret: Option<Caret>) -> Option<usize> {
+fn box_right_edge(rows: &[Row], caret: Option<Caret>) -> Option<usize> {
+    let from = caret.map(|caret| caret.row).unwrap_or(0).min(rows.len());
+    rows[from..]
+        .iter()
+        .find(|row| row.is_horizontal_border())
+        .or_else(|| rows.iter().rev().find(|row| row.is_horizontal_border()))
+        .map(|row| row.visible.trim_end().chars().count())
+}
+
+fn find_start_row(
+    shape: &Shape,
+    rows: &[Row],
+    caret: Option<Caret>,
+    right_edge: Option<usize>,
+) -> Option<usize> {
     if let Some(caret) = caret {
         if caret.row < rows.len() {
             // A left border repeats on every row of the box, so it marks
@@ -273,13 +293,13 @@ fn find_start_row(shape: &Shape, rows: &[Row], caret: Option<Caret>) -> Option<u
                 // after a partial clear, for instance — so walk up through the
                 // box to the draft rather than giving up on the spot.
                 let mut row = caret.row;
-                while !rows[row].holds_draft(shape) {
+                while !rows[row].holds_draft(shape, right_edge) {
                     if row == 0 || !rows[row].starts_input(shape) {
                         return None;
                     }
                     row -= 1;
                 }
-                while row > 0 && rows[row - 1].holds_draft(shape) {
+                while row > 0 && rows[row - 1].holds_draft(shape, right_edge) {
                     row -= 1;
                 }
                 return Some(row);
@@ -319,10 +339,16 @@ fn find_start_row(shape: &Shape, rows: &[Row], caret: Option<Caret>) -> Option<u
 }
 
 /// The last row of the draft: the caret row, or the last continuation row.
-fn find_end_row(shape: &Shape, rows: &[Row], start: usize, text_col: usize) -> usize {
+fn find_end_row(
+    shape: &Shape,
+    rows: &[Row],
+    start: usize,
+    text_col: usize,
+    right_edge: Option<usize>,
+) -> usize {
     if shape.border.is_some() {
         let mut end = start;
-        while end + 1 < rows.len() && rows[end + 1].holds_draft(shape) {
+        while end + 1 < rows.len() && rows[end + 1].holds_draft(shape, right_edge) {
             end += 1;
         }
         return end;
@@ -511,12 +537,12 @@ impl Row {
 
     /// Is this a bordered row of the input box that actually carries text?
     /// Used for backends whose box repeats a left border on every row.
-    fn holds_draft(&self, shape: &Shape) -> bool {
+    fn holds_draft(&self, shape: &Shape, right_edge: Option<usize>) -> bool {
         if !self.starts_input(shape) {
             return false;
         }
         let col = self.text_col(shape);
-        self.visible.chars().skip(col).any(|c| !is_blank(c))
+        !self.between(col, right_edge).trim().is_empty()
     }
 
     fn is_horizontal_border(&self) -> bool {
@@ -530,10 +556,14 @@ impl Row {
         printed > 0 && border_count > printed / 2
     }
 
-    fn after_col(&self, col: usize) -> String {
-        // A row shorter than the text column holds nothing at it — an empty
-        // line in the draft, or a prompt row the user has just emptied.
-        self.visible.chars().skip(col).collect()
+    /// The row's text from `col` up to the box's right edge, if it has one. A
+    /// row shorter than `col` holds nothing there — an empty line in the
+    /// draft, or a prompt row the user has just emptied.
+    fn between(&self, col: usize, right_edge: Option<usize>) -> String {
+        let take = right_edge
+            .map(|edge| edge.saturating_sub(col))
+            .unwrap_or(usize::MAX);
+        self.visible.chars().skip(col).take(take).collect()
     }
 
     /// Is every printed cell from `col` onward dimmed?
@@ -694,6 +724,18 @@ mod tests {
         ("agy", "pastetoken", include_str!("../../tests/fixtures/pane_input/agy/pastetoken.ansi.txt"), Some(Caret { row: 12, col: 28 }), Expect::Unknown),
         ("agy", "single", include_str!("../../tests/fixtures/pane_input/agy/single.ansi.txt"), Some(Caret { row: 12, col: 20 }), Expect::Draft("fix the parser bug")),
         ("agy", "wrapped", include_str!("../../tests/fixtures/pane_input/agy/wrapped.ansi.txt"), Some(Caret { row: 13, col: 30 }), Expect::Draft("refactor the tokenizer so that it streams input instead of buffering the entire file in memory and also update the docs and the tests to match the new streaming behaviour without breaking the existing public api surface.")),
+            // A pane wide enough for opencode to paint its working-directory
+            // indicator to the RIGHT of the composer, on the same rows. Those
+            // cells are past the text column, so without bounding rows at the
+            // box's own edge they read as draft: an empty composer reports a
+            // draft, and a real one is glued to the chrome beside it.
+            (
+                "opencode",
+                "wide_pane_draft",
+                include_str!("../../tests/fixtures/pane_input/opencode/wide_pane_draft.ansi.txt"),
+                Some(Caret { row: 44, col: 23 }),
+                Expect::Draft("alpha line one\nbravo line two\ncharlie line three"),
+            ),
         ];
 
         let mut failures = Vec::new();
