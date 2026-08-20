@@ -326,9 +326,11 @@ pub fn install_cursor_hook() -> bool {
 /// and leaves the rest of the file alone. `PreInvocation` runs just before the
 /// model is called, which is the moment queued events are worth handing over.
 ///
-/// The file is the shared one under `~/.gemini/config`, not the per-workspace
-/// `.agents/hooks.json`: a workspace copy would leave an untracked file in the
-/// operator's repository, and the CLI does not read it in this version anyway.
+/// The file is the shared one under `~/.gemini/config` rather than the
+/// per-workspace `.agents/hooks.json`. Both are read — the workspace one on a
+/// second load, once the folder is resolved and trusted — but a copy per
+/// workspace would leave an untracked file in the operator's repository, and
+/// one shared entry already serves every pane.
 pub fn install_antigravity_hook() -> bool {
     let Some(exe) = std::env::current_exe().ok() else {
         return false;
