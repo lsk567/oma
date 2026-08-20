@@ -530,33 +530,61 @@ enum Cleared {
 }
 
 fn clear_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId, target: &str) -> Cleared {
-    const MAX_CLEAR_PRESSES: usize = 40;
+    const MAX_CLEAR_ROUNDS: usize = 40;
     let client = crate::tmux::TmuxClient::new("");
-    let mut pressed = false;
+    let mut last: Option<String> = None;
+    let mut removed = false;
+    let mut stalls = 0;
 
-    for _ in 0..MAX_CLEAR_PRESSES {
-        match get_pane_input(base_prefix, receiver, ea_id) {
+    for _ in 0..MAX_CLEAR_ROUNDS {
+        let current = match get_pane_input(base_prefix, receiver, ea_id) {
             pane_input::PaneInput::Empty => return Cleared::Empty,
             // Never keep hammering a pane we cannot read. Whether the draft is
             // still whole depends on how far we got, and the caller needs to
             // know: putting it back on top of an intact draft duplicates it.
             pane_input::PaneInput::Unknown(_) => {
-                return if pressed {
+                return if removed {
                     Cleared::Partial
                 } else {
                     Cleared::Untouched
                 };
             }
-            pane_input::PaneInput::Draft(_) => {}
+            pane_input::PaneInput::Draft(draft) => draft,
+        };
+
+        // Stop when the keys stop achieving anything, rather than pressing
+        // forty times and then reporting a box we damaged as merely stubborn.
+        if last.as_deref() == Some(current.as_str()) {
+            stalls += 1;
+            if stalls >= 2 {
+                return if removed {
+                    Cleared::Partial
+                } else {
+                    Cleared::Untouched
+                };
+            }
+        } else {
+            if last.is_some() {
+                removed = true;
+            }
+            stalls = 0;
         }
+        last = Some(current);
+
+        // `C-u` kills back to the start of the line — and at the start of the
+        // buffer it does nothing, forever, which leaves a draft the user is
+        // editing from the top permanently unclearable. `C-k` kills forward
+        // and takes the newline with it, so between them the box empties from
+        // wherever the caret happens to be.
         let _ = client.send_keys(target, "C-u");
-        pressed = true;
+        let _ = client.send_keys(target, "C-k");
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 
     match get_pane_input(base_prefix, receiver, ea_id) {
         pane_input::PaneInput::Empty => Cleared::Empty,
-        _ => Cleared::Partial,
+        _ if removed => Cleared::Partial,
+        _ => Cleared::Untouched,
     }
 }
 

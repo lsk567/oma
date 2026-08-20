@@ -106,15 +106,13 @@ pub(crate) fn extract(
     // Text begins one space past the glyph (or past the border). Continuation
     // rows line up under it, which is what lets us find them without a
     // per-backend indent constant.
-    let text_col = rows[start].text_col(&shape);
+    let text_col = text_column(&shape, &rows, start);
     let end = find_end_row(&shape, &rows, start, text_col);
 
     let mut lines = Vec::new();
     for (offset, row) in rows[start..=end].iter().enumerate() {
         let cut = text_col;
-        let Some(text) = row.after_col(cut) else {
-            return PaneInput::Unknown("input row shorter than its indent");
-        };
+        let text = row.after_col(cut);
 
         // Check before any styling is stripped: some backends render the
         // collapsed-paste token dimmed, which would otherwise erase the very
@@ -177,6 +175,43 @@ pub(crate) fn extract(
     }
 
     PaneInput::Draft(trim_trailing_blank_lines(&draft))
+}
+
+/// The column the draft's text starts at.
+///
+/// Normally the prompt row says: glyph, a space, then text. But that row can be
+/// emptied — `C-u` kills to the start of the line — while the rows below it
+/// still hold the rest of the draft, and tmux strips the row's trailing space,
+/// so the column it implies collapses by one. Every continuation row is then a
+/// column off and reads as chrome, and a box with text in it reports as empty.
+/// When the prompt row has nothing on it, take the column from the first row
+/// below that still does.
+fn text_column(shape: &Shape, rows: &[Row], start: usize) -> usize {
+    let col = rows[start].text_col(shape);
+    if rows[start].visible.chars().skip(col).any(|c| !is_blank(c)) {
+        return col;
+    }
+
+    let Some(next) = rows.get(start + 1) else {
+        return col;
+    };
+    if next.is_horizontal_border() || next.visible.trim().is_empty() {
+        return col;
+    }
+    match shape.border {
+        Some(_) if next.starts_input(shape) => next.text_col(shape),
+        Some(_) => col,
+        None => {
+            // A continuation row is padded out to the text column, so one that
+            // starts hard against the margin is chrome, not draft.
+            let indent = next.visible.chars().take_while(|c| is_blank(*c)).count();
+            if indent == 0 {
+                col
+            } else {
+                indent
+            }
+        }
+    }
 }
 
 /// Join rows, dropping the newline where one row simply ran off the edge.
@@ -495,17 +530,10 @@ impl Row {
         printed > 0 && border_count > printed / 2
     }
 
-    fn after_col(&self, col: usize) -> Option<String> {
-        let count = self.visible.chars().count();
-        if count < col {
-            // A blank row inside the draft is shorter than the indent.
-            return if self.visible.trim().is_empty() {
-                Some(String::new())
-            } else {
-                None
-            };
-        }
-        Some(self.visible.chars().skip(col).collect::<String>())
+    fn after_col(&self, col: usize) -> String {
+        // A row shorter than the text column holds nothing at it — an empty
+        // line in the draft, or a prompt row the user has just emptied.
+        self.visible.chars().skip(col).collect()
     }
 
     /// Is every printed cell from `col` onward dimmed?
@@ -770,6 +798,23 @@ mod tests {
         assert_eq!(
             extract(shape, capture, Some(Caret { row: 0, col: 22 }), Some(200)),
             PaneInput::Draft("日本語のテキストです".to_string())
+        );
+    }
+
+    #[test]
+    fn an_emptied_prompt_row_does_not_hide_the_lines_below_it() {
+        // `C-u` kills to the start of the line, so a user editing from the top
+        // of a draft empties the prompt row while the rest of the draft stays
+        // below. tmux strips that row's trailing space, so the column it
+        // implies collapses by one and every continuation row reads as chrome.
+        // Reporting that box as empty is what lets the surviving lines be
+        // typed into the event — past OMAR's own end-of-prompt sentinel.
+        let shape = Shape::for_backend("codex").unwrap();
+        let capture =
+            "\n\n\u{203a}\n  line two beta\n  line three gamma\n\n  gpt-5.5 medium \u{b7} ~/x\n";
+        assert_eq!(
+            extract(shape, capture, Some(Caret { row: 2, col: 2 }), Some(200)),
+            PaneInput::Draft("\nline two beta\nline three gamma".to_string())
         );
     }
 
