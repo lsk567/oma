@@ -425,48 +425,17 @@ impl Scheduler {
                 // A side channel hands the event straight to the backend, so
                 // the composer is never involved: nothing to capture, nothing
                 // to clear, and no reason to defer around a popup.
-                let has_side_channel = side_channel(&receiver, ea_id, base_prefix).is_some();
-                if !has_side_channel && should_defer_for_popup(popup_receiver, &receiver, ea_id) {
-                    // Preserve a draft across delivery: capture it, clear the
-                    // box, let the normal path submit the event, then paste the
-                    // draft back.
-                    //
-                    // Anything we cannot read, or cannot clear, defers instead.
-                    // Clearing input we are unable to restore loses the user's
-                    // work outright, which is worse than a late event.
-                    let target = pane_target_name(&receiver, ea_id, base_prefix);
-
-                    let draft = match get_pane_input(base_prefix, &receiver, ea_id) {
-                        pane_input::PaneInput::Empty => None,
-                        pane_input::PaneInput::Draft(draft) => Some(draft),
-                        pane_input::PaneInput::Unknown(_) => {
-                            defer_batch(
-                                batch,
-                                &mut remaining,
-                                &mut deliveries,
-                                receiver,
-                                ea_id,
-                                earliest_ts,
-                            );
-                            continue;
-                        }
-                    };
-
-                    match clear_pane_input(base_prefix, &receiver, ea_id, &target) {
-                        Cleared::Empty => {
-                            restore_input = draft.filter(|draft| !draft.trim().is_empty())
-                        }
-                        state => {
-                            // `Partial` means keys landed and the box still
-                            // holds part of the draft, so put back what was
-                            // taken. `Untouched` means nothing was sent and the
-                            // draft is whole — pasting then would duplicate it.
-                            if state == Cleared::Partial {
-                                if let Some(draft) = &draft {
-                                    let _ =
-                                        crate::tmux::TmuxClient::new("").paste_text(&target, draft);
-                                }
-                            }
+                if should_defer_for_popup(popup_receiver, &receiver, ea_id)
+                    && side_channel(&receiver, ea_id, base_prefix).is_none()
+                {
+                    // Empty the box so the event does not land on top of what
+                    // the user is typing, and hold their draft to put back
+                    // afterwards. A pane that cannot be read or cannot be
+                    // cleared defers instead: a late event is recoverable, a
+                    // destroyed draft is not.
+                    match protect_draft(base_prefix, &receiver, ea_id) {
+                        Some(draft) => restore_input = draft,
+                        None => {
                             defer_batch(
                                 batch,
                                 &mut remaining,
@@ -631,6 +600,34 @@ fn clear_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId, target: 
     }
 }
 
+/// Empty the input box, handing back whatever was in it so it can be put
+/// back afterwards. `None` means the pane could not be read or could not be
+/// cleared, and must not be typed into.
+fn protect_draft(base_prefix: &str, receiver: &str, ea_id: ea::EaId) -> Option<Option<String>> {
+    let draft = match get_pane_input(base_prefix, receiver, ea_id) {
+        pane_input::PaneInput::Empty => None,
+        pane_input::PaneInput::Draft(draft) => Some(draft),
+        // Unreadable: clearing what we cannot put back destroys the draft.
+        pane_input::PaneInput::Unknown(_) => return None,
+    };
+
+    let target = pane_target_name(receiver, ea_id, base_prefix);
+    match clear_pane_input(base_prefix, receiver, ea_id, &target) {
+        Cleared::Empty => Some(draft.filter(|draft| !draft.trim().is_empty())),
+        // Nothing was sent, so the draft is still whole. Pasting it back here
+        // would leave the user with two copies of what they were writing.
+        Cleared::Untouched => None,
+        Cleared::Partial => {
+            // Keys landed and the box still holds part of the draft. Put back
+            // what was taken, or the clearing itself is the damage.
+            if let Some(draft) = &draft {
+                let _ = crate::tmux::TmuxClient::new("").paste_text(&target, draft);
+            }
+            None
+        }
+    }
+}
+
 /// The side channel for a receiver's pane, if its backend offers one.
 fn side_channel(
     receiver: &str,
@@ -653,6 +650,9 @@ pub(crate) fn deliver_to_tmux(
     ticker: &TickerBuffer,
     restore_input: Option<&str>,
 ) {
+    // Set when the input box had to be emptied on the fallback path.
+    let mut rescued = None;
+
     // Prefer handing the event to the backend directly. It reaches the model
     // without going through the input box, so a draft the user is typing is
     // never touched and the event does not read as something they said.
@@ -667,12 +667,26 @@ pub(crate) fn deliver_to_tmux(
                 return;
             }
             Err(e) => {
-                // Fall through to the input box: a delivered event beats a
-                // lost one, and that path knows how to protect a draft.
                 ticker.push(format!(
                     "side channel for {} failed ({}); using the input box",
                     receiver, e
                 ));
+                // The caller skipped its capture because a channel looked
+                // available, so anything the user was typing is still in the
+                // box and nothing has been cleared. Do that here, or typing
+                // the event would land on top of their draft.
+                match protect_draft(base_prefix, receiver, ea_id) {
+                    Some(draft) => rescued = draft,
+                    None => {
+                        // Unreadable or unclearable: leave the pane alone.
+                        // Losing one event beats destroying a draft.
+                        ticker.push(format!(
+                            "skipped event(s) for {}: could not clear the input box",
+                            receiver
+                        ));
+                        return;
+                    }
+                }
             }
         }
     }
@@ -684,6 +698,7 @@ pub(crate) fn deliver_to_tmux(
         ticker.push(format!("tmux prompt delivery failed for {}: {}", target, e));
         return;
     }
+    let restore_input = restore_input.or(rescued.as_deref());
     if let Some(input) = restore_input.filter(|input| !input.is_empty()) {
         if let Err(e) = client.paste_text(&target, input) {
             ticker.push(format!("tmux input restore failed for {}: {}", target, e));

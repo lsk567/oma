@@ -760,16 +760,14 @@ impl TmuxClient {
             _ => false,
         };
         let spool = hooked.then(|| crate::channel::spool_path(name));
-        let spool_env = spool
-            .as_ref()
-            .map(|path| format!("OMAR_EVENT_SPOOL={}", path.display()));
-        if let Some(spool_env) = &spool_env {
-            args.extend(["-e", spool_env]);
-        }
 
         // Execute the provided command through a shell so the full string is
         // interpreted consistently (including quoted args and shell metacharacters)
         // instead of relying on tmux's shell-command parser heuristics.
+        let command = match &spool {
+            Some(path) => &format!("OMAR_EVENT_SPOOL={} {}", path.display(), command),
+            None => command,
+        };
         args.extend(["sh", "-lc", command]);
         self.run(&args)?;
         self.run(&["set-option", "-t", name, "history-limit", "10000"])?;
@@ -785,7 +783,7 @@ impl TmuxClient {
         }
         // Some backends only offer a side channel once they are up and have
         // been given a session to talk about. That happens off the launch path.
-        crate::channel::provision_in_background(name.to_string(), command.to_string());
+        crate::channel::provision_in_background(backend, name.to_string(), command.to_string());
         Ok(())
     }
 

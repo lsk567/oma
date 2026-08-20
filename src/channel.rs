@@ -115,10 +115,15 @@ fn spool_is_stale(path: &Path) -> bool {
 /// Truncating as we read is what keeps an event from being delivered twice
 /// when the hook fires again a moment later.
 pub fn drain_spool(path: &Path) -> Vec<String> {
-    let Ok(contents) = std::fs::read_to_string(path) else {
+    // Claim the queue by renaming it: cursor registers two hook events, and
+    // if both fire at once a read-then-truncate would hand the same events
+    // over twice. Only one rename can win.
+    let claimed = path.with_extension("draining");
+    let Ok(()) = std::fs::rename(path, &claimed) else {
         return Vec::new();
     };
-    let _ = std::fs::write(path, "");
+    let contents = std::fs::read_to_string(&claimed).unwrap_or_default();
+    let _ = std::fs::remove_file(&claimed);
     contents
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -364,7 +369,14 @@ pub fn free_port() -> Option<u16> {
 /// Runs in the background: opencode takes seconds to boot, and a launch must
 /// not block on it. Until the stamp lands, deliveries fall back to the input
 /// box, so being slow is safe and failing is safe.
-pub fn provision_in_background(session: String, command: String) {
+pub fn provision_in_background(backend: Option<&str>, session: String, command: String) {
+    // Gate on the backend, not on the flag: plenty of other things are
+    // launched with a `--port`, and polling one of those for 90 seconds — then
+    // stamping whatever answered as a delivery channel — would be worse than
+    // having no channel at all.
+    if backend != Some("opencode") {
+        return;
+    }
     let Some(port) = opencode_port(&command) else {
         return;
     };
@@ -806,6 +818,49 @@ mod tests {
             })
         );
         assert_eq!(Channel::from_stamp("spool:"), None);
+    }
+
+    #[test]
+    fn only_opencode_is_provisioned_however_the_command_is_written() {
+        // Plenty of things are launched with a `--port` — tunnels, notebook
+        // servers, tensorboard. Polling one of those and then stamping
+        // whatever answered as a delivery channel would send events into it.
+        assert_eq!(opencode_port("tensorboard --port 6006"), Some(6006));
+        for backend in [None, Some("claude"), Some("codex"), Some("cursor")] {
+            // Nothing is spawned and nothing is stamped: the guard is on the
+            // backend, and the flag alone must never be enough.
+            provision_in_background(
+                backend,
+                "unused-session".to_string(),
+                "tensorboard --port 6006".to_string(),
+            );
+        }
+    }
+
+    #[test]
+    fn taking_the_spool_twice_at_once_hands_each_event_over_once() {
+        // cursor registers two hook events; if both fire together a
+        // read-then-truncate would deliver the same events twice.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pane.jsonl");
+        let channel = Channel::Spool { path: path.clone() };
+        for event in ["one", "two", "three"] {
+            channel.deliver(event).unwrap();
+        }
+
+        let racers: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || drain_spool(&path))
+            })
+            .collect();
+
+        let mut seen: Vec<String> = racers
+            .into_iter()
+            .flat_map(|racer| racer.join().unwrap())
+            .collect();
+        seen.sort();
+        assert_eq!(seen, vec!["one", "three", "two"]);
     }
 
     #[test]
