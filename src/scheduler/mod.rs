@@ -529,9 +529,27 @@ enum Cleared {
     Partial,
 }
 
+/// A key that empties the whole composer at once, for backends that have one.
+///
+/// Only opencode is listed, and only because its binding was checked against a
+/// live pane: `ctrl+c` is registered as "clear input" while the composer holds
+/// text and as "quit" while it does not, so it is safe exactly when we use it —
+/// straight after a read that said there was a draft — and catastrophic
+/// otherwise. Everything else empties the box a line at a time, which is slower
+/// but has no way to kill the agent.
+fn whole_buffer_clear_key(backend: &str) -> Option<&'static str> {
+    match backend {
+        "opencode" => Some("C-c"),
+        _ => None,
+    }
+}
+
 fn clear_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId, target: &str) -> Cleared {
     const MAX_CLEAR_ROUNDS: usize = 40;
     let client = crate::tmux::TmuxClient::new("");
+    let clear_key = client
+        .session_backend(target)
+        .and_then(|backend| whole_buffer_clear_key(&backend));
     let mut last: Option<String> = None;
     let mut removed = false;
     let mut stalls = 0;
@@ -571,11 +589,20 @@ fn clear_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId, target: 
         }
         last = Some(current);
 
+        // The read above said there is a draft, which is the condition that
+        // makes this key mean "clear" rather than "quit".
+        if let Some(key) = clear_key {
+            let _ = client.send_keys(target, key);
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            continue;
+        }
+
         // `C-u` kills back to the start of the line — and at the start of the
         // buffer it does nothing, forever, which leaves a draft the user is
         // editing from the top permanently unclearable. `C-k` kills forward
         // and takes the newline with it, so between them the box empties from
-        // wherever the caret happens to be.
+        // wherever the caret happens to be. Lines below the caret still need
+        // the forward kill, which is why both are sent.
         let _ = client.send_keys(target, "C-u");
         let _ = client.send_keys(target, "C-k");
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -928,6 +955,23 @@ pub async fn run_event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_verified_clear_key_is_ever_sent() {
+        // `ctrl+c` means "clear the input" while opencode's composer holds
+        // text and "quit" while it does not, so it is only ever sent straight
+        // after a read that found a draft. No other backend gets one until its
+        // binding has been checked the same way against a live pane — a wrong
+        // guess here kills the user's agent.
+        assert_eq!(whole_buffer_clear_key("opencode"), Some("C-c"));
+        for backend in ["claude", "codex", "cursor", "agy", "stub", ""] {
+            assert_eq!(
+                whole_buffer_clear_key(backend),
+                None,
+                "{backend} must fall back to clearing a line at a time"
+            );
+        }
+    }
 
     fn make_event(receiver: &str, sender: &str, timestamp: u64, payload: &str) -> ScheduledEvent {
         ScheduledEvent {
