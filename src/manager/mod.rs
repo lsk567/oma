@@ -207,6 +207,25 @@ pub enum ManagerEnsureResult {
     ReplacedBackend,
 }
 
+/// Give opencode a port so OMAR can reach it without the input box.
+///
+/// opencode only listens when it is told a port: with none it talks to an
+/// in-process worker over a fake hostname, and there is nothing to connect to.
+/// Nothing is broken if the port cannot be claimed — the pane simply launches
+/// without a side channel and events go through the composer.
+fn with_opencode_port(base_command: &str) -> String {
+    if base_command
+        .split_whitespace()
+        .any(|token| token == "--port" || token.starts_with("--port=") || token == "--hostname")
+    {
+        return base_command.to_string();
+    }
+    match crate::channel::free_port() {
+        Some(port) => format!("{} --port {}", base_command, port),
+        None => base_command.to_string(),
+    }
+}
+
 /// Let OMAR deliver events over Claude Code's cross-session peer socket.
 ///
 /// Without this the session holds an inbound message behind an approval
@@ -862,13 +881,14 @@ pub fn build_agent_command(
             // descriptively and ask back "What is your agent name?" etc.
             // Spawn opencode bare and let `spawn_worker` deliver the prompt
             // via tmux as a single combined first user message.
+            let base_command = with_opencode_port(&base_command);
             match opencode_config_env(mcp_context) {
                 Some(config) => format!(
                     "OPENCODE_CONFIG_CONTENT={} {}",
                     shell_single_quote(&config),
                     base_command
                 ),
-                None => base_command.to_string(),
+                None => base_command,
             }
         }
         None => base_command.to_string(),
@@ -1844,9 +1864,37 @@ mod tests {
         // Subagent-dispatcher overlap with OMAR's spawn_agent.
         assert!(cmd.contains("\"Task\":false"));
         assert!(cmd.contains("\"dispatch_agent\":false"));
-        // opencode is spawned bare; the prompt is delivered via tmux after spawn.
+        // The prompt is still delivered via tmux after spawn, not as a flag.
         assert!(!cmd.contains("--prompt"));
-        assert!(cmd.trim_end().ends_with(" opencode"));
+        // ... but opencode is told a port, which is the only way it listens at
+        // all — without one it talks to an in-process worker OMAR cannot reach.
+        let port = cmd
+            .split_whitespace()
+            .skip_while(|token| *token != "--port")
+            .nth(1)
+            .expect("opencode must be given a port");
+        assert!(
+            port.parse::<u16>().is_ok_and(|port| port > 0),
+            "port must be a real number: {port}"
+        );
+    }
+
+    #[test]
+    fn an_operators_own_opencode_port_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        for base in ["opencode --port 4096", "opencode --hostname 0.0.0.0"] {
+            let cmd = build_agent_command(
+                base,
+                Path::new("/tmp/prompts/ea.md"),
+                &[],
+                &test_mcp_context(dir.path()),
+            );
+            assert_eq!(
+                cmd.matches("--port").count(),
+                usize::from(base.contains("--port")),
+                "must not add a second port to {base}: {cmd}"
+            );
+        }
     }
 
     #[test]

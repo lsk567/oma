@@ -1,4 +1,3 @@
-mod channel;
 pub mod event;
 mod pane_input;
 
@@ -633,12 +632,17 @@ fn clear_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId, target: 
 }
 
 /// The side channel for a receiver's pane, if its backend offers one.
-fn side_channel(receiver: &str, ea_id: ea::EaId, base_prefix: &str) -> Option<channel::Channel> {
+fn side_channel(
+    receiver: &str,
+    ea_id: ea::EaId,
+    base_prefix: &str,
+) -> Option<crate::channel::Channel> {
     let target = pane_target_name(receiver, ea_id, base_prefix);
     let client = crate::tmux::TmuxClient::new("");
     let backend = client.session_backend(&target)?;
     let pane_pid = client.get_pane_pid(&target).ok()?;
-    channel::Channel::resolve(&backend, pane_pid)
+    let stamp = client.session_delivery(&target);
+    crate::channel::Channel::resolve(&backend, pane_pid, stamp.as_deref())
 }
 
 pub(crate) fn deliver_to_tmux(

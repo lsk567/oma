@@ -21,13 +21,24 @@ use anyhow::{Context, Result};
 /// reading. Short: the fallback is a working delivery path, not an error.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Loopback HTTP is either immediate or wedged; nothing in between.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long to keep waiting for a freshly launched backend to open its port.
+/// opencode takes several seconds to boot; past this it is not coming up.
+const PROVISION_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// A side channel into a running agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Channel {
+pub enum Channel {
     /// Claude Code's cross-session peer socket. The message is appended to the
     /// session's command queue, which is a separate structure from the input
     /// buffer, so a draft in the composer is untouched.
     ClaudePeer { socket: PathBuf, token: String },
+    /// opencode's HTTP server. A `synthetic` message part is shown to the
+    /// model but not rendered in the transcript, and `noReply` seats it
+    /// without starting a turn.
+    OpencodeHttp { port: u16, session: String },
 }
 
 impl Channel {
@@ -35,7 +46,12 @@ impl Channel {
     ///
     /// `pane_pid` is the pane's own process. The backend may be a child of it
     /// when the pane runs a shell, so its children are checked too.
-    pub(crate) fn resolve(backend: &str, pane_pid: u32) -> Option<Channel> {
+    pub fn resolve(backend: &str, pane_pid: u32, stamp: Option<&str>) -> Option<Channel> {
+        // A stamp is written when the backend needed provisioning at launch;
+        // it names the port and session an event must be addressed to.
+        if let Some(channel) = stamp.and_then(Channel::from_stamp) {
+            return Some(channel);
+        }
         match backend {
             "claude" => {
                 let sessions = claude_sessions_dir()?;
@@ -47,8 +63,23 @@ impl Channel {
         }
     }
 
+    /// Parse a stamp written at launch, e.g. `opencode:47455:ses_abc`.
+    fn from_stamp(stamp: &str) -> Option<Channel> {
+        let (kind, rest) = stamp.split_once(':')?;
+        match kind {
+            "opencode" => {
+                let (port, session) = rest.split_once(':')?;
+                (!session.is_empty()).then_some(Channel::OpencodeHttp {
+                    port: port.parse().ok()?,
+                    session: session.to_string(),
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Hand the event to the agent. Errors are the caller's cue to fall back.
-    pub(crate) fn deliver(&self, text: &str) -> Result<()> {
+    pub fn deliver(&self, text: &str) -> Result<()> {
         match self {
             Channel::ClaudePeer { socket, token } => {
                 let mut stream = UnixStream::connect(socket)
@@ -60,14 +91,140 @@ impl Channel {
                 stream.flush().context("flush peer message")?;
                 Ok(())
             }
+            Channel::OpencodeHttp { port, session } => {
+                let body = serde_json::json!({
+                    "noReply": true,
+                    "parts": [{ "type": "text", "text": text, "synthetic": true }],
+                })
+                .to_string();
+                let (status, _) = http_json(
+                    *port,
+                    "POST",
+                    &format!("/session/{}/message", session),
+                    Some(&body),
+                )
+                .context("post message to opencode")?;
+                if status != 200 {
+                    anyhow::bail!("opencode answered {}", status);
+                }
+                Ok(())
+            }
         }
     }
 
-    pub(crate) fn describe(&self) -> &'static str {
+    pub fn describe(&self) -> &'static str {
         match self {
             Channel::ClaudePeer { .. } => "claude peer socket",
+            Channel::OpencodeHttp { .. } => "opencode http api",
         }
     }
+}
+
+/// Claim a free loopback port for a backend that must be told one at launch.
+///
+/// The socket is closed immediately, so this reserves nothing — it only picks a
+/// number the OS was willing to hand out. Losing the race means the backend
+/// fails to bind and the pane falls back to the input box.
+pub fn free_port() -> Option<u16> {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .ok()?
+        .local_addr()
+        .ok()
+        .map(|addr| addr.port())
+}
+
+/// Give a freshly launched pane a side channel, once its backend is listening.
+///
+/// Runs in the background: opencode takes seconds to boot, and a launch must
+/// not block on it. Until the stamp lands, deliveries fall back to the input
+/// box, so being slow is safe and failing is safe.
+pub fn provision_in_background(session: String, command: String) {
+    let Some(port) = opencode_port(&command) else {
+        return;
+    };
+    std::thread::spawn(move || {
+        if let Some(stamp) = provision_opencode(port) {
+            let _ = crate::tmux::TmuxClient::new("").set_session_delivery(&session, &stamp);
+        }
+    });
+}
+
+/// `--port N` as it appears in a launch command.
+fn opencode_port(command: &str) -> Option<u16> {
+    let mut tokens = command.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == "--port" {
+            return tokens.next()?.parse().ok();
+        }
+        if let Some(value) = token.strip_prefix("--port=") {
+            return value.parse().ok();
+        }
+    }
+    None
+}
+
+/// Create a session on a running opencode server and point its TUI at it.
+///
+/// opencode's API cannot say which session a given pane is showing, and a pane
+/// only creates one once the user speaks. So OMAR makes the session itself:
+/// the id it gets back is then unambiguously this pane's, even when several
+/// agents share a directory.
+fn provision_opencode(port: u16) -> Option<String> {
+    let deadline = std::time::Instant::now() + PROVISION_TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        if let Ok((200, body)) = http_json(port, "POST", "/session", Some("{}")) {
+            let session = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| value.get("id")?.as_str().map(str::to_string))?;
+            let select = serde_json::json!({ "sessionID": session }).to_string();
+            // Without this the pane keeps showing a different session and the
+            // user never sees what the agent was told.
+            http_json(port, "POST", "/tui/select-session", Some(&select)).ok()?;
+            return Some(format!("opencode:{}:{}", port, session));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    None
+}
+
+/// POST JSON to opencode's loopback server and return the status code.
+///
+/// Hand-rolled rather than pulling in an HTTP stack: the server is on
+/// 127.0.0.1, the request shape is fixed, and the response is discarded.
+fn http_json(port: u16, method: &str, path: &str, body: Option<&str>) -> Result<(u16, String)> {
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port))
+        .with_context(|| format!("connect to 127.0.0.1:{}", port))?;
+    stream.set_read_timeout(Some(HTTP_TIMEOUT))?;
+    stream.set_write_timeout(Some(HTTP_TIMEOUT))?;
+
+    let body = body.unwrap_or("");
+    let request = format!(
+        "{} {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+        method,
+        path,
+        port,
+        body.len(),
+        body
+    );
+    stream.write_all(request.as_bytes())?;
+    stream.flush()?;
+
+    let mut response = Vec::new();
+    std::io::Read::read_to_end(&mut stream, &mut response)?;
+    let response = String::from_utf8_lossy(&response).into_owned();
+    let (status, body) = split_response(&response).context("parse opencode response")?;
+    Ok((status, body))
+}
+
+/// Split an HTTP/1.x response into its status code and body.
+fn split_response(response: &str) -> Option<(u16, String)> {
+    let status = response.split_whitespace().nth(1)?.parse().ok()?;
+    let body = response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or_default();
+    Some((status, body))
 }
 
 /// The two newline-delimited JSON frames a peer sends: authenticate, then the
@@ -186,11 +343,57 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_stamp_names_the_port_and_session_to_address() {
+        assert_eq!(
+            Channel::from_stamp("opencode:47455:ses_abc"),
+            Some(Channel::OpencodeHttp {
+                port: 47455,
+                session: "ses_abc".to_string()
+            })
+        );
+        // A stamp wins over backend sniffing, so a malformed one must not be
+        // silently treated as a working channel.
+        for bad in [
+            "opencode:47455:",
+            "opencode:notaport:ses_abc",
+            "opencode:47455",
+            "something-else:1:2",
+            "",
+        ] {
+            assert_eq!(
+                Channel::from_stamp(bad),
+                None,
+                "stamp {bad:?} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn a_port_is_read_back_out_of_a_launch_command() {
+        assert_eq!(opencode_port("opencode --port 47455"), Some(47455));
+        assert_eq!(opencode_port("FOO=1 opencode --port=47455"), Some(47455));
+        assert_eq!(opencode_port("opencode"), None);
+        assert_eq!(opencode_port("opencode --port bogus"), None);
+    }
+
+    #[test]
+    fn an_http_response_yields_its_status_and_body() {
+        assert_eq!(
+            split_response("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"),
+            Some((200, "{}".to_string()))
+        );
+        assert_eq!(
+            split_response("HTTP/1.1 404 Not Found\r\n\r\n").map(|(status, _)| status),
+            Some(404)
+        );
+    }
+
+    #[test]
     fn a_backend_without_a_side_channel_resolves_to_nothing() {
         // The fallback is the input box, so "no channel" must be an ordinary
         // answer rather than an error.
         for backend in ["codex", "opencode", "cursor", "agy", "stub"] {
-            assert_eq!(Channel::resolve(backend, std::process::id()), None);
+            assert_eq!(Channel::resolve(backend, std::process::id(), None), None);
         }
     }
 
@@ -233,10 +436,13 @@ mod tests {
         }
 
         for pid in live {
-            let channel = claude_peer(&sessions, pid).expect("resolved above");
-            let Channel::ClaudePeer { socket, token } = channel;
-            assert!(socket.exists(), "socket for {pid} must exist");
-            assert!(!token.is_empty(), "peer token for {pid} must be non-empty");
+            match claude_peer(&sessions, pid).expect("resolved above") {
+                Channel::ClaudePeer { socket, token } => {
+                    assert!(socket.exists(), "socket for {pid} must exist");
+                    assert!(!token.is_empty(), "peer token for {pid} must be non-empty");
+                }
+                other => panic!("claude must resolve to a peer socket, got {other:?}"),
+            }
         }
     }
 

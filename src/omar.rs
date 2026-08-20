@@ -1,5 +1,6 @@
 mod app;
 mod backend_probe;
+mod channel;
 mod computer;
 mod config;
 mod diagram;
