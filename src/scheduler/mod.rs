@@ -597,14 +597,19 @@ fn clear_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId, target: 
             continue;
         }
 
-        // `C-u` kills back to the start of the line — and at the start of the
+        // `C-u` kills back to the start of the line. At the start of the
         // buffer it does nothing, forever, which leaves a draft the user is
-        // editing from the top permanently unclearable. `C-k` kills forward
-        // and takes the newline with it, so between them the box empties from
-        // wherever the caret happens to be. Lines below the caret still need
-        // the forward kill, which is why both are sent.
+        // editing from the top permanently unclearable — so when a press
+        // achieves nothing, add `C-k`, which kills forward and takes the
+        // newline with it.
+        //
+        // `C-k` is held back until then on purpose: antigravity binds it to
+        // approving a waiting subagent, and approving one on the user's behalf
+        // to tidy an input box is not a trade worth making routinely.
         let _ = client.send_keys(target, "C-u");
-        let _ = client.send_keys(target, "C-k");
+        if stalls > 0 {
+            let _ = client.send_keys(target, "C-k");
+        }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 

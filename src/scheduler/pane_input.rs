@@ -46,6 +46,10 @@ pub(crate) struct Shape {
     pub glyph: &'static str,
     /// Left box border, for backends that draw one instead of a bare glyph.
     pub border: Option<char>,
+    /// How many rows the composer shows before it starts scrolling without
+    /// saying so — no marker, no ellipsis, nothing. A draft this tall may have
+    /// more above or below that is simply not on screen.
+    pub scroll_cap: Option<usize>,
 }
 
 impl Shape {
@@ -54,25 +58,34 @@ impl Shape {
             "claude" => Shape {
                 glyph: "❯",
                 border: None,
+                scroll_cap: None,
             },
             "codex" => Shape {
                 glyph: "›",
                 border: None,
+                scroll_cap: None,
             },
             // The live TUI uses U+003E, not the `*` an earlier version of this
             // code assumed.
             "agy" => Shape {
                 glyph: ">",
                 border: None,
+                scroll_cap: None,
             },
+            // Its composer grows to six rows and then scrolls with nothing to
+            // show for it. Measured against a live pane, and unchanged at 20,
+            // 40 and 60 terminal rows — it is the composer's own limit, not
+            // the pane's.
             "cursor" => Shape {
                 glyph: "→",
                 border: None,
+                scroll_cap: Some(6),
             },
             // opencode draws a left-only box border and no prompt glyph.
             "opencode" => Shape {
                 glyph: "",
                 border: Some('┃'),
+                scroll_cap: None,
             },
             _ => return None,
         };
@@ -174,6 +187,11 @@ pub(crate) fn extract(
     }
     if trimmed.is_empty() {
         return PaneInput::Empty;
+    }
+    // Deferring a delivery is recoverable; handing back a draft with its first
+    // lines missing, and then clearing the box, is not.
+    if shape.scroll_cap.is_some_and(|cap| end - start + 1 >= cap) {
+        return PaneInput::Unknown("draft may have scrolled inside the composer");
     }
     // A wholly dimmed box is the backend's placeholder, not a draft.
     if rows[start..=end].iter().all(|row| row.is_all_dim(text_col)) {
@@ -858,6 +876,21 @@ mod tests {
             extract(shape, capture, Some(Caret { row: 2, col: 2 }), Some(200)),
             PaneInput::Draft("\nline two beta\nline three gamma".to_string())
         );
+    }
+
+    #[test]
+    fn a_draft_taller_than_cursors_composer_is_never_reported_whole() {
+        // cursor shows six rows and scrolls with no marker at all — no arrow,
+        // no ellipsis. An eight-line draft looks exactly like a six-line one,
+        // so reporting a Draft here hands back the user's text with lines
+        // missing and then empties the box. This capture is a real pane: eight
+        // lines were pasted and only lines three to eight are on screen.
+        let shape = Shape::for_backend("cursor").unwrap();
+        let capture = include_str!("../../tests/fixtures/pane_input/cursor/scrolled8.ansi.txt");
+        match extract(shape, capture, None, Some(120)) {
+            PaneInput::Unknown(_) => {}
+            other => panic!("a scrolled composer must not be read as a draft: {other:?}"),
+        }
     }
 
     #[test]
