@@ -507,6 +507,27 @@ const CODEX_NO_ATTACH_FLAGS: &[&str] = &[
 /// `spawn_agent` adds `-c model_reasoning_effort=…` for any agent given a
 /// reasoning effort, and an operator may have configured flags of their own,
 /// so this is a real case rather than a defensive one.
+/// Answer codex's directory-trust prompt before it is asked.
+///
+/// codex blocks on "Do you trust the contents of this directory?" the first
+/// time it runs anywhere new, and nothing in an agent pane ever answers it —
+/// the agent simply hangs. Saying yes is exactly this record appended to the
+/// config, which is what codex itself writes when a human clicks through, so
+/// OMAR writes it for the directory it chose for the agent.
+///
+/// `CODEX_HOME` may or may not be set: the side-channel launch points it at a
+/// per-pane home, and the fallback uses the operator's own.
+fn codex_trust_cwd() -> String {
+    "omar_home=\"${CODEX_HOME:-$HOME/.codex}\"; \
+     mkdir -p \"$omar_home\"; \
+     omar_cwd=\"$(pwd -P | sed 's/[\\\\\"]/\\\\&/g')\"; \
+     touch \"$omar_home/config.toml\"; \
+     grep -qF \"[projects.\\\"$omar_cwd\\\"]\" \"$omar_home/config.toml\" || \
+     printf '\\n[projects.\"%s\"]\\ntrust_level = \"trusted\"\\n' \"$omar_cwd\" \
+     >> \"$omar_home/config.toml\"; "
+        .to_string()
+}
+
 fn codex_refuses_to_attach(base_command: &str) -> bool {
     base_command.split_whitespace().any(|token| {
         let flag = token.split_once('=').map_or(token, |(flag, _)| flag);
@@ -1139,9 +1160,13 @@ pub fn build_agent_command(
                     return codex_home_command(&home, &base_command);
                 }
             }
+            // No channel here, but codex still refuses to start in a directory
+            // it has not been told to trust, and no agent answers that prompt.
             let mut cmd = format!(
-                "{} -c \"developer_instructions='''{}'''\"",
-                base_command, shell_expr
+                "{}{} -c \"developer_instructions='''{}'''\"",
+                codex_trust_cwd(),
+                base_command,
+                shell_expr
             );
             if let Some(overrides) = codex_mcp_overrides(mcp_context) {
                 cmd.push(' ');
@@ -2060,6 +2085,37 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_without_a_side_channel_still_trusts_its_own_directory() {
+        // codex blocks on "Do you trust the contents of this directory?" the
+        // first time it runs anywhere new, and no agent ever answers it. The
+        // side-channel launch writes the record into its own home; this path
+        // uses the operator's, and used to leave the pane hanging forever.
+        let dir = tempfile::tempdir().unwrap();
+        let prompt = dir.path().join("ea.md");
+        std::fs::write(&prompt, "be helpful").unwrap();
+        let cmd = build_agent_command(
+            // a disqualifying flag forces the fallback
+            "codex --no-alt-screen -c model_reasoning_effort='\"high\"'",
+            &prompt,
+            &[],
+            &test_mcp_context(dir.path()),
+        );
+
+        assert!(
+            !cmd.contains("export CODEX_HOME="),
+            "this must be the fallback, not the side-channel launch: {cmd}"
+        );
+        assert!(
+            cmd.contains("trust_level = \"trusted\"") && cmd.contains("$(pwd -P"),
+            "the launch cwd must be trusted or the pane hangs on a prompt: {cmd}"
+        );
+        assert!(
+            cmd.contains("${CODEX_HOME:-$HOME/.codex}"),
+            "with no per-pane home it must write the operator's own: {cmd}"
+        );
+    }
+
+    #[test]
     fn the_socket_bound_is_the_one_codex_enforces_not_the_kernel() {
         // Measured against codex 0.147.0: a 95-byte socket path binds, 96
         // fails with "path must be shorter than SUN_LEN". macOS itself would
@@ -2089,11 +2145,17 @@ mod tests {
             &test_mcp_context(&deep),
         );
         assert!(
-            cmd.starts_with(
+            cmd.contains(
                 "codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox \
                  -c \"developer_instructions='''$(cat '"
             ),
             "unexpected fallback command: {cmd}"
+        );
+        // The trust record is written first, so the pane does not stop on
+        // a prompt before it reaches codex at all.
+        assert!(
+            cmd.starts_with("omar_home=") && cmd.contains("trust_level = \"trusted\""),
+            "the fallback must trust its cwd before launching: {cmd}"
         );
         assert!(cmd.contains("mcp_servers.omar.command"));
         assert!(cmd.contains("mcp_servers.omar.args"));
