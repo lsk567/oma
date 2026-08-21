@@ -1390,7 +1390,8 @@ fn spawn_run_thread(
         if let Some(record) = runs.get_mut(&run_id) {
             record.finished_at = Some(now_unix());
             match outcome {
-                Ok(()) => record.status = "completed".to_string(),
+                Ok(topology::RunEnd::Completed) => record.status = "completed".to_string(),
+                Ok(topology::RunEnd::Stopped) => record.status = "stopped".to_string(),
                 Err(error) => {
                     record.status = "failed".to_string();
                     record.error = Some(format!("{error:#}"));
