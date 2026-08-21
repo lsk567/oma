@@ -2410,7 +2410,7 @@ fn ea_tool_definitions() -> Vec<Value> {
 /// so this avoids pulling in an HTTP client, matching how topology agents reach
 /// the invocation server over a raw socket.
 fn post_json(endpoint: &str, path: &str, body: &Value) -> Result<()> {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpStream;
     use std::time::Duration;
 
@@ -2427,12 +2427,42 @@ fn post_json(endpoint: &str, path: &str, body: &Value) -> Result<()> {
     stream.write_all(&payload)?;
     stream.flush()?;
 
+    let mut reader = BufReader::new(&mut stream);
     let mut status = String::new();
-    BufReader::new(&mut stream).read_line(&mut status)?;
-    if !status.contains(" 200") && !status.contains(" 201") && !status.contains(" 202") {
+    reader.read_line(&mut status)?;
+    if status.contains(" 200") || status.contains(" 201") || status.contains(" 202") {
+        return Ok(());
+    }
+
+    // The body is the whole point of a rejection. `omar serve` compiles a
+    // proposed program before publishing it and answers with the compiler's
+    // own diagnostic, which is what lets the EA fix the program it just wrote.
+    // Reading the status line alone threw that away and handed back
+    // "400 Bad Request", so the EA was writing OMAR with no feedback at all.
+    let mut line = String::new();
+    while reader.read_line(&mut line)? > 0 {
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        line.clear();
+    }
+    let mut payload = String::new();
+    // `Connection: close`, so the body runs to the end of the stream.
+    let _ = reader.read_to_string(&mut payload);
+
+    let detail = serde_json::from_str::<Value>(&payload)
+        .ok()
+        .and_then(|answer| {
+            answer
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| payload.trim().to_string());
+    if detail.is_empty() {
         bail!("omar serve rejected {path}: {}", status.trim());
     }
-    Ok(())
+    bail!("omar serve rejected {path}: {detail}");
 }
 
 /// Forward an EA tool call to `omar serve` over its loopback admin endpoint.
@@ -2657,6 +2687,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A rejected proposal comes back to the EA as the compiler said it.
+    ///
+    /// The EA writes OMAR and has no other way to find out whether it parsed:
+    /// the operator never sees an unbuildable program, so a tool result of
+    /// "400 Bad Request" leaves it guessing at a language it cannot test.
+    #[test]
+    fn a_rejected_proposal_carries_the_compilers_diagnostic() {
+        use std::io::{BufRead, Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        // What `agent_proposal` answers when `omarc` refuses the program.
+        let diagnostic = "design.omar:3:12: expected identifier, found some (Omar.Token.sym \"{\")";
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Drain the whole request before answering. Replying to a client
+            // still writing lets the close race the write, which reads back as
+            // a connection reset rather than as the answer under test.
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            let mut length = 0usize;
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.strip_prefix("Content-Length: ") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut request = vec![0u8; length];
+            reader.read_exact(&mut request).unwrap();
+            let body = json!({"error": diagnostic}).to_string();
+            write!(
+                stream,
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+
+        let error = post_json(
+            &endpoint,
+            "/v1/agent/proposals",
+            &json!({"program": "team T {"}),
+        )
+        .unwrap_err()
+        .to_string();
+        server.join().unwrap();
+
+        assert!(
+            error.contains("expected identifier"),
+            "the compiler's diagnostic did not reach the caller: {error}"
+        );
+        // And it is the message the model is shown, not something wrapping it.
+        let rendered = serde_json::to_string(&tool_error(anyhow!("{error}"))).unwrap();
+        assert!(rendered.contains("expected identifier"), "{rendered}");
     }
 
     #[test]
