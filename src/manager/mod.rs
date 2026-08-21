@@ -479,6 +479,36 @@ fn codex_mcp_overrides(context: &McpLaunchContext) -> Option<String> {
 /// app-server unable to bind, so OMAR declines the side channel instead.
 const SUN_PATH_MAX: usize = 104;
 
+/// Flags that make codex refuse to attach to a running app-server.
+///
+/// The refusal is silent, so a pane carrying one of these would start a server
+/// nobody joins, sit out the socket wait, and then have provisioning poll it
+/// for ninety seconds — all to arrive where it started. Better to see the flag
+/// and not build the home at all.
+const CODEX_NO_ATTACH_FLAGS: &[&str] = &[
+    "-c",
+    "--config",
+    "--profile",
+    "--strict-config",
+    "--search",
+    "--approve-for-me",
+    "--enable",
+    "--disable",
+    "--dangerously-bypass-hook-trust",
+];
+
+/// Would this command's codex refuse the app-server?
+///
+/// `spawn_agent` adds `-c model_reasoning_effort=…` for any agent given a
+/// reasoning effort, and an operator may have configured flags of their own,
+/// so this is a real case rather than a defensive one.
+fn codex_refuses_to_attach(base_command: &str) -> bool {
+    base_command.split_whitespace().any(|token| {
+        let flag = token.split_once('=').map_or(token, |(flag, _)| flag);
+        CODEX_NO_ATTACH_FLAGS.contains(&flag)
+    })
+}
+
 /// A codex home of OMAR's own, one per launched pane.
 ///
 /// codex's TUI only attaches to an app-server when it is started with no
@@ -519,9 +549,11 @@ fn codex_home_dir(context: &McpLaunchContext) -> Option<PathBuf> {
 /// running agent's thread history: deleting one whose app-server happens to be
 /// down would take a working pane's state with it.
 ///
-/// One that names no pane yet was written moments ago by `codex_home_dir` and
-/// is about to be claimed, so it is left alone until it is old enough that it
-/// plainly never was.
+/// One that names no pane is either mid-launch — `codex_home_dir` made it
+/// moments ago and `claim_codex_home` is about to write the name — or the
+/// leftovers of a launch that never got that far. Age separates the two, and a
+/// live app-server vetoes either way: whatever else is true of a home, if
+/// something is still answering on its socket it is in use.
 fn prune_stale_codex_homes(root: &Path) {
     const GRACE: Duration = Duration::from_secs(300);
     let client = TmuxClient::new("");
@@ -538,10 +570,43 @@ fn prune_stale_codex_homes(root: &Path) {
                 .map(|modified| modified.elapsed().unwrap_or_default() >= GRACE)
                 .unwrap_or(false),
         };
-        if finished {
+        if finished && !codex_home_is_serving(&path) {
             let _ = std::fs::remove_dir_all(&path);
         }
     }
+}
+
+/// Is a pane still using this home?
+///
+/// The home holds the agent's thread history and the config its TUI is
+/// running on, so this is the last check before deleting one. A connection
+/// that is accepted means an app-server is up, which means a pane is up.
+fn codex_home_is_serving(home: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(crate::channel::codex_socket_path(home)).is_ok()
+}
+
+/// Record which pane a home belongs to, and drop any earlier home that claimed
+/// the same one.
+///
+/// A session name is reused: `ensure_manager_session` and the topology runner
+/// both kill a pane and immediately make another with the same name, so the
+/// home the old pane was using would otherwise keep resolving to a live
+/// session and never be pruned.
+pub(crate) fn claim_codex_home(home: &Path, session: &str) {
+    if let Some(root) = home.parent() {
+        for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+            let sibling = entry.path();
+            if sibling == home {
+                continue;
+            }
+            let claimed = std::fs::read_to_string(sibling.join(CODEX_HOME_SESSION_FILE))
+                .is_ok_and(|name| name.trim() == session);
+            if claimed && !codex_home_is_serving(&sibling) {
+                let _ = std::fs::remove_dir_all(&sibling);
+            }
+        }
+    }
+    let _ = std::fs::write(home.join(CODEX_HOME_SESSION_FILE), session);
 }
 
 /// Where provisioning records which tmux session a home belongs to.
@@ -603,16 +668,22 @@ fn codex_config_toml(
 fn codex_home_launch(context: &McpLaunchContext, developer_instructions: &str) -> Option<PathBuf> {
     let server_exe = omar_server_exe()?;
     let context_file = materialize_mcp_context_file(context)?;
-    let home = codex_home_dir(context)?;
     let user_codex = dirs::home_dir()?.join(".codex");
-
     let config = codex_config_toml(
         &std::fs::read_to_string(user_codex.join("config.toml")).unwrap_or_default(),
         developer_instructions,
         &server_exe,
         &context_file,
     );
-    write_private_file(&home.join("config.toml"), config.as_bytes()).ok()?;
+
+    // Made last, once everything that can fail has: a home abandoned between
+    // being created and being filled would have no session name to prune it by
+    // and no server to answer for it, so nothing would ever remove it.
+    let home = codex_home_dir(context)?;
+    if write_private_file(&home.join("config.toml"), config.as_bytes()).is_err() {
+        let _ = std::fs::remove_dir_all(&home);
+        return None;
+    }
 
     // Symlinked, not copied: the token is refreshed in place, and a pane
     // holding a stale copy would be logged out mid-run.
@@ -634,6 +705,8 @@ fn codex_home_launch(context: &McpLaunchContext, developer_instructions: &str) -
 ///    the record a fresh home opens a "do you trust this directory?" prompt
 ///    the agent never answers. Appended only if it is not already there: the
 ///    same table twice is a parse error, and codex refuses to start on one.
+///    `sed` escapes it first, because it goes in as a TOML quoted key and a
+///    directory named with a `"` or a `\` would be the same parse error.
 /// 2. An app-server is started, in the background of that same shell. The TUI
 ///    attaches to it on its way up, which is what gives OMAR somewhere to
 ///    inject events.
@@ -641,7 +714,10 @@ fn codex_home_launch(context: &McpLaunchContext, developer_instructions: &str) -
 ///    yet, and a server and a TUI creating it at the same moment collide on
 ///    the migration — codex then refuses to start with a "local database
 ///    appears to be damaged". Waiting for the socket means the server has
-///    finished. The wait is bounded: past it the TUI starts anyway, with no
+///    finished. The wait ends early if the server dies — a codex too old for
+///    `app-server --listen`, or one that is not on `PATH`, would otherwise
+///    spend twenty seconds of the caller's readiness budget going nowhere —
+///    and is bounded in any case. Past either, the TUI starts with no
 ///    channel, which is the ordinary fallback.
 ///
 /// Deliberately no `trap` to kill the server. A plain background job is in the
@@ -659,13 +735,14 @@ fn codex_home_command(home: &Path, tui_command: &str) -> String {
     let socket = "\"$CODEX_HOME/app-server-control/app-server-control.sock\"";
     format!(
         "export CODEX_HOME={home}; \
-         omar_cwd=\"$(pwd -P)\"; \
+         omar_cwd=\"$(pwd -P | sed 's/[\\\\\"]/\\\\&/g')\"; \
          grep -qF \"[projects.\\\"$omar_cwd\\\"]\" \"$CODEX_HOME/config.toml\" || \
          printf '\\n[projects.\"%s\"]\\ntrust_level = \"trusted\"\\n' \"$omar_cwd\" \
          >> \"$CODEX_HOME/config.toml\"; \
          codex app-server --listen unix:// >/dev/null 2>&1 & \
-         omar_waited=0; \
-         while [ ! -S {socket} ] && [ \"$omar_waited\" -lt 100 ]; \
+         omar_srv=$!; omar_waited=0; \
+         while [ ! -S {socket} ] && [ \"$omar_waited\" -lt 100 ] \
+         && kill -0 \"$omar_srv\" 2>/dev/null; \
          do sleep 0.2; omar_waited=$((omar_waited+1)); done; \
          {tui_command}"
     )
@@ -1037,7 +1114,11 @@ pub fn build_agent_command(
         Some(BackendKind::Codex) => {
             // Preferred: everything in a per-pane home's `config.toml`, so the
             // TUI carries no `-c` and will attach to an app-server OMAR can
-            // reach. Falls back to the flags if the home cannot be written.
+            // reach. Falls back to the flags if the home cannot be written, or
+            // if the command already carries something codex will not attach
+            // with — a home built for a TUI that refuses to join it is worse
+            // than none, because the pane pays for the server twice over and
+            // still ends up on the input box.
             let instructions = std::fs::read_to_string(prompt_file).map(|body| {
                 substitutions
                     .iter()
@@ -1045,11 +1126,13 @@ pub fn build_agent_command(
                         body.replace(pattern, replacement)
                     })
             });
-            if let Some(home) = instructions
-                .ok()
-                .and_then(|instructions| codex_home_launch(mcp_context, &instructions))
-            {
-                return codex_home_command(&home, &base_command);
+            if !codex_refuses_to_attach(&base_command) {
+                if let Some(home) = instructions
+                    .ok()
+                    .and_then(|instructions| codex_home_launch(mcp_context, &instructions))
+                {
+                    return codex_home_command(&home, &base_command);
+                }
             }
             let mut cmd = format!(
                 "{} -c \"developer_instructions='''{}'''\"",
@@ -1950,8 +2033,16 @@ mod tests {
              state database and codex refuses to start: {cmd}"
         );
         assert!(
-            cmd.contains("trust_level = \"trusted\"") && cmd.contains("$(pwd -P)"),
+            cmd.contains("trust_level = \"trusted\"") && cmd.contains("$(pwd -P"),
             "the launch cwd must be trusted or codex blocks on a prompt: {cmd}"
+        );
+        assert!(
+            cmd.contains(r#"sed 's/[\\"]/\\&/g'"#),
+            "the cwd goes in as a TOML quoted key and must be escaped: {cmd}"
+        );
+        assert!(
+            cmd.contains("kill -0 \"$omar_srv\""),
+            "the wait must end when the server dies: {cmd}"
         );
 
         // The configuration the flags used to carry now lives in the home.
@@ -1989,6 +2080,100 @@ mod tests {
         assert!(cmd.contains("mcp_servers.omar.command"));
         assert!(cmd.contains("mcp_servers.omar.args"));
         assert!(cmd.contains("-c features.scheduled_tasks=false"));
+    }
+
+    #[test]
+    fn a_codex_that_will_not_attach_is_launched_the_old_way() {
+        // `spawn_agent` adds `-c model_reasoning_effort=…` for any agent given
+        // one, and codex then refuses the app-server. Building a home anyway
+        // would start a second codex nobody joins, spend the pane's readiness
+        // budget waiting for a socket, and poll it for ninety seconds — to end
+        // up on the input box regardless.
+        let dir = short_tempdir();
+        let prompt = dir.path().join("agent.md");
+        std::fs::write(&prompt, "be helpful").unwrap();
+
+        for base in [
+            "codex --no-alt-screen -c model_reasoning_effort='\"high\"'",
+            "codex --no-alt-screen --profile work",
+            "codex --no-alt-screen --search",
+            "codex --no-alt-screen --enable web_search",
+            "codex --no-alt-screen --config model=\"o3\"",
+        ] {
+            let cmd = build_agent_command(base, &prompt, &[], &test_mcp_context(dir.path()));
+            assert!(
+                cmd.contains("developer_instructions='''"),
+                "{base} must take the flag path: {cmd}"
+            );
+            assert!(
+                crate::channel::codex_home(&cmd).is_none(),
+                "{base} must not be given a home it cannot attach to: {cmd}"
+            );
+        }
+
+        // The flags OMAR always adds are not on that list.
+        for base in [
+            "codex --no-alt-screen",
+            "codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-sol",
+        ] {
+            let cmd = build_agent_command(base, &prompt, &[], &test_mcp_context(dir.path()));
+            assert!(
+                crate::channel::codex_home(&cmd).is_some(),
+                "{base} should still get a home: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_home_whose_server_is_answering_is_never_deleted() {
+        // The pane's TUI is a client of that server, and the home holds the
+        // thread history it is running on. Deleting either out from under a
+        // live pane takes the agent with it, so a live socket vetoes every
+        // path that removes a home — however the session bookkeeping reads.
+        let dir = short_tempdir();
+        let root = dir.path();
+
+        let live = root.join("live");
+        std::fs::create_dir_all(crate::channel::codex_socket_path(&live).parent().unwrap())
+            .unwrap();
+        let _listener =
+            std::os::unix::net::UnixListener::bind(crate::channel::codex_socket_path(&live))
+                .unwrap();
+        // Everything the bookkeeping could get wrong, at once: it claims a
+        // session that does not exist, and it is older than the grace.
+        std::fs::write(live.join(CODEX_HOME_SESSION_FILE), "omar-agent-gone-9z8y7x").unwrap();
+
+        prune_stale_codex_homes(root);
+        assert!(live.exists(), "a live app-server must veto the prune");
+
+        // And the same veto covers the sweep of an earlier home for a reused
+        // session name.
+        let newer = root.join("newer");
+        std::fs::create_dir_all(&newer).unwrap();
+        claim_codex_home(&newer, "omar-agent-gone-9z8y7x");
+        assert!(live.exists(), "a live app-server must veto the sweep too");
+    }
+
+    #[test]
+    fn an_earlier_home_for_the_same_pane_is_reclaimed() {
+        // `ensure_manager_session` kills a pane and makes another with the
+        // same name, so the old home's recorded session resolves again and it
+        // would never be pruned.
+        let dir = short_tempdir();
+        let root = dir.path();
+        let old = root.join("old");
+        let new = root.join("new");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join(CODEX_HOME_SESSION_FILE), "omar-agent-1-work").unwrap();
+
+        claim_codex_home(&new, "omar-agent-1-work");
+
+        assert!(!old.exists(), "the previous home for this pane must go");
+        assert_eq!(
+            std::fs::read_to_string(new.join(CODEX_HOME_SESSION_FILE)).unwrap(),
+            "omar-agent-1-work"
+        );
     }
 
     #[test]

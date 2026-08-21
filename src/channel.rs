@@ -228,7 +228,7 @@ impl Channel {
             }
             Channel::CodexAppServer { socket } => {
                 let mut session = CodexSession::open(socket)?;
-                let thread = session.newest_thread()?;
+                let thread = session.only_thread()?;
                 session.inject(&thread, text)
             }
             Channel::Spool { path } => {
@@ -439,9 +439,8 @@ pub fn provision_in_background(backend: Option<&str>, session: String, command: 
         Some("codex") => match codex_home(&command) {
             Some(home) => {
                 // Which pane this home belongs to, so a later launch can tell
-                // that the pane is gone and take the app-server with it.
-                let _ =
-                    std::fs::write(home.join(crate::manager::CODEX_HOME_SESSION_FILE), &session);
+                // that it is finished and reclaim the disk.
+                crate::manager::claim_codex_home(&home, &session);
                 Box::new(move || provision_codex(&home))
             }
             None => return,
@@ -455,18 +454,40 @@ pub fn provision_in_background(backend: Option<&str>, session: String, command: 
     });
 }
 
-/// `CODEX_HOME=<dir>` as it appears in a launch command.
+/// `export CODEX_HOME='<dir>'` as it appears in a launch command.
 ///
 /// The launch command is where OMAR records which per-pane codex home this
 /// pane was given, the same way `--port` records opencode's port.
+///
+/// The value is read back through the quoting `shell_single_quote` put on it,
+/// rather than split on whitespace: an operator whose home directory has a
+/// space in it is ordinary, and half a path here is worse than none. A path
+/// that does not come back whole yields `None`, so provisioning is skipped and
+/// the pane falls back to the input box.
 pub(crate) fn codex_home(command: &str) -> Option<PathBuf> {
-    command
-        .split_whitespace()
-        .find_map(|token| token.strip_prefix("CODEX_HOME="))
-        // The assignment is one statement of several, single-quoted against
-        // spaces in the operator's home directory.
-        .map(|dir| PathBuf::from(dir.trim_end_matches(';').trim_matches('\'')))
-        .filter(|dir| !dir.as_os_str().is_empty())
+    let assignment = command.split_once("export CODEX_HOME=")?.1;
+    let dir = unquote_single(assignment)?;
+    (!dir.is_empty()).then(|| PathBuf::from(dir))
+}
+
+/// Undo `shell_single_quote`: read one `'...'` word, in which a literal quote
+/// appears as `'\''`.
+fn unquote_single(text: &str) -> Option<String> {
+    let mut rest = text.strip_prefix('\'')?;
+    let mut out = String::new();
+    loop {
+        let (chunk, tail) = rest.split_once('\'')?;
+        out.push_str(chunk);
+        match tail.strip_prefix("\\''") {
+            // An escaped quote: the word continues.
+            Some(tail) => {
+                out.push('\'');
+                rest = tail;
+            }
+            // Anything else closes the word.
+            None => return Some(out),
+        }
+    }
 }
 
 /// Where a codex home's app-server listens.
@@ -486,7 +507,7 @@ fn provision_codex(home: &Path) -> Option<String> {
     while std::time::Instant::now() < deadline {
         if socket.exists()
             && CodexSession::open(&socket)
-                .and_then(|mut session| session.newest_thread())
+                .and_then(|mut session| session.only_thread())
                 .is_ok()
         {
             return Some(format!("codex:{}", socket.display()));
@@ -625,10 +646,10 @@ impl CodexSession {
         }
     }
 
-    /// The thread the pane is showing.
-    fn newest_thread(&mut self) -> Result<String> {
+    /// The thread the pane is showing, when that is unambiguous.
+    fn only_thread(&mut self) -> Result<String> {
         let listed = self.call("thread/loaded/list", serde_json::json!({}))?;
-        newest_thread(&listed).context("the pane's app-server has no loaded thread")
+        only_thread(&listed).context("the pane has no single loaded thread to inject into")
     }
 
     /// Append the event to a thread without starting a turn.
@@ -648,19 +669,25 @@ impl CodexSession {
     }
 }
 
-/// Pick the thread an event belongs in out of a `thread/loaded/list` reply.
+/// The thread an event belongs in, out of a `thread/loaded/list` reply — and
+/// only when there is no doubt which that is.
 ///
-/// `/new` leaves the old thread loaded alongside the new one, and an event
-/// appended to the thread the user has moved on from is never read. Thread ids
-/// are UUIDv7, whose text order is creation order, so the largest is current.
-fn newest_thread(listed: &serde_json::Value) -> Option<String> {
-    listed
-        .get("data")?
-        .as_array()?
-        .iter()
-        .filter_map(|thread| thread.as_str())
-        .max()
-        .map(str::to_string)
+/// The app-server will say which threads a pane has loaded but not which one
+/// it is showing, and neither creation order nor activity separates them:
+/// `/new` leaves the old thread loaded under a newer id, and `/resume` puts
+/// the pane back on an *older* id while the abandoned new one stays loaded. A
+/// guess that lands on the thread the user has moved on from is delivered,
+/// acknowledged, and never read.
+///
+/// So OMAR only claims a channel it is sure of. More than one loaded thread
+/// means no channel, and delivery goes back through the input box — which
+/// since the draft is protected is a working path, not a failure.
+fn only_thread(listed: &serde_json::Value) -> Option<String> {
+    let threads = listed.get("data")?.as_array()?;
+    match threads.as_slice() {
+        [only] => only.as_str().map(str::to_string),
+        _ => None,
+    }
 }
 
 /// `--port N` as it appears in a launch command.
@@ -1265,14 +1292,7 @@ mod tests {
         let socket = dir.path().join("app-server-control.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = std::thread::spawn(move || {
-            fake_app_server(
-                listener,
-                // `/new` leaves the old thread loaded next to the new one.
-                vec![
-                    "01a0204b-f2e8-73e3-b95a-09abf7616b22",
-                    "01a02051-f65b-7260-9afe-13ffe5229bf6",
-                ],
-            )
+            fake_app_server(listener, vec!["01a02051-f65b-7260-9afe-13ffe5229bf6"])
         });
 
         Channel::CodexAppServer {
@@ -1345,18 +1365,85 @@ mod tests {
     }
 
     #[test]
-    fn the_newest_thread_is_the_one_the_pane_is_showing() {
-        // Ids are UUIDv7, so their text order is creation order.
-        let listed = serde_json::json!({
+    fn a_home_under_a_directory_with_a_space_comes_back_whole() {
+        // Read back through the quoting rather than split on whitespace. Half
+        // a path parses as a plausible home, and provisioning would then claim
+        // and poll somewhere the pane never was — while the pane's real home,
+        // never claimed, ages into the prune.
+        for home in [
+            "/Users/ke/My Home/.omar/codex/ab12",
+            "/Users/ke/it's mine/.omar/codex/ab12",
+            "/Users/ke/two  spaces/ab12",
+        ] {
+            let command = format!(
+                "export CODEX_HOME={}; codex app-server --listen unix://",
+                crate::manager::shell_single_quote(home)
+            );
+            assert_eq!(
+                codex_home(&command),
+                Some(PathBuf::from(home)),
+                "in {command}"
+            );
+        }
+        // A word that never closes is not a path worth guessing at.
+        assert_eq!(
+            codex_home("export CODEX_HOME='/Users/ke/unterminated"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_event_goes_only_to_a_thread_there_is_no_doubt_about() {
+        let listed = serde_json::json!({ "data": ["01a0204b-f2e8-73e3-b95a-09abf7616b22"], "nextCursor": null });
+        assert_eq!(
+            only_thread(&listed).as_deref(),
+            Some("01a0204b-f2e8-73e3-b95a-09abf7616b22")
+        );
+
+        // Two loaded threads and the app-server will not say which the pane is
+        // showing. Creation order does not settle it: `/new` moves the pane to
+        // the newer id, `/resume` moves it back to the older one while the
+        // abandoned new thread stays loaded. Guessing wrong is delivered,
+        // acknowledged, and never read — so OMAR declines and the event goes
+        // through the input box instead.
+        let ambiguous = serde_json::json!({
             "data": ["01a0204b-f2e8-73e3-b95a-09abf7616b22", "01a02051-f65b-7260-9afe-13ffe5229bf6"],
         });
-        assert_eq!(
-            newest_thread(&listed).as_deref(),
-            Some("01a02051-f65b-7260-9afe-13ffe5229bf6")
-        );
+        assert_eq!(only_thread(&ambiguous), None);
+
         // A pane whose TUI has not opened a thread yet is not a channel.
-        assert_eq!(newest_thread(&serde_json::json!({ "data": [] })), None);
-        assert_eq!(newest_thread(&serde_json::json!({})), None);
+        assert_eq!(only_thread(&serde_json::json!({ "data": [] })), None);
+        assert_eq!(only_thread(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn an_ambiguous_pane_reports_a_failure_rather_than_injecting_somewhere() {
+        // The caller's cue to fall back is an error. Returning `Ok` after
+        // injecting into a thread nobody is reading would lose the event with
+        // no sign that anything went wrong.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("app-server-control.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            fake_app_server(
+                listener,
+                vec![
+                    "01a0204b-f2e8-73e3-b95a-09abf7616b22",
+                    "01a02051-f65b-7260-9afe-13ffe5229bf6",
+                ],
+            )
+        });
+
+        let failure = Channel::CodexAppServer {
+            socket: socket.clone(),
+        }
+        .deliver("CI went red")
+        .expect_err("two loaded threads must not be guessed between");
+        assert!(
+            failure.to_string().contains("no single loaded thread"),
+            "unexpected error: {failure}"
+        );
+        drop(server);
     }
 
     #[test]
@@ -1388,14 +1475,14 @@ mod tests {
         // whatever answered as a delivery channel would send events into it.
         // The same goes for an inherited `CODEX_HOME`.
         assert_eq!(opencode_port("tensorboard --port 6006"), Some(6006));
-        assert!(codex_home("export CODEX_HOME=/somewhere; jupyter lab").is_some());
+        assert!(codex_home("export CODEX_HOME='/somewhere'; jupyter lab").is_some());
         for backend in [None, Some("claude"), Some("cursor"), Some("agy")] {
             // Nothing is spawned and nothing is stamped: the guard is on the
             // backend, and the flag alone must never be enough.
             provision_in_background(
                 backend,
                 "unused-session".to_string(),
-                "export CODEX_HOME=/somewhere; tensorboard --port 6006".to_string(),
+                "export CODEX_HOME='/somewhere'; tensorboard --port 6006".to_string(),
             );
         }
         // And a backend that is provisioned still needs its command to say so.
