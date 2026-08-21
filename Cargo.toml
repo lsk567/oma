@@ -30,7 +30,7 @@ tracing = "0.1.44"
 # Terminal attach. `tungstenite` is the sync API, which matches the blocking
 # thread-per-connection model `omar serve` already uses; TLS is off because the
 # server binds loopback only.
-tungstenite = { version = "0.24", default-features = false }
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 portable-pty = "0.8"
 
 [dev-dependencies]
