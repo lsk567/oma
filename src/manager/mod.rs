@@ -505,28 +505,32 @@ fn codex_home_dir(context: &McpLaunchContext) -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Drop the codex homes — and the app-servers — of panes that are gone.
+/// Drop the codex homes of panes that are gone.
 ///
-/// Each launch makes a new home, and codex fills it with several megabytes of
-/// state, so without this they accumulate for the life of the machine. The
-/// server matters more than the disk: `tmux kill-session` closes the pane's
-/// terminal without signalling anything in it, so the shell's own trap only
-/// fires when the TUI notices and exits, and an app-server can outlive its
-/// pane indefinitely.
+/// Disk only. The app-server needs no reaping: it is a background job of the
+/// pane's own shell, so it shares the pane's process group and dies with it —
+/// on `tmux kill-session`, and on the TUI exiting and taking the session with
+/// it. But nothing removes the directory, and codex fills each one with
+/// several megabytes of sqlite, so without this they accumulate for the life
+/// of the machine.
 ///
 /// A home is finished when the pane named in it is no longer a tmux session.
-/// One that names no pane yet is mid-launch, and is left alone until it is old
-/// enough that it plainly never got one.
+/// Named, rather than probed for a live socket, because the home holds the
+/// running agent's thread history: deleting one whose app-server happens to be
+/// down would take a working pane's state with it.
+///
+/// One that names no pane yet was written moments ago by `codex_home_dir` and
+/// is about to be claimed, so it is left alone until it is old enough that it
+/// plainly never was.
 fn prune_stale_codex_homes(root: &Path) {
-    const GRACE: Duration = Duration::from_secs(3600);
+    const GRACE: Duration = Duration::from_secs(300);
     let client = TmuxClient::new("");
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let pane = std::fs::read_to_string(path.join(CODEX_HOME_SESSION_FILE));
-        let finished = match &pane {
+        let finished = match std::fs::read_to_string(path.join(CODEX_HOME_SESSION_FILE)) {
             Ok(session) => !client.has_session(session.trim()).unwrap_or(true),
             Err(_) => entry
                 .metadata()
@@ -534,41 +538,14 @@ fn prune_stale_codex_homes(root: &Path) {
                 .map(|modified| modified.elapsed().unwrap_or_default() >= GRACE)
                 .unwrap_or(false),
         };
-        if !finished {
-            continue;
+        if finished {
+            let _ = std::fs::remove_dir_all(&path);
         }
-        kill_codex_app_server(&path);
-        let _ = std::fs::remove_dir_all(&path);
     }
 }
 
-/// Where the pane's shell records its app-server, and where provisioning
-/// records which tmux session the home belongs to.
-const CODEX_HOME_PID_FILE: &str = "app-server.pid";
+/// Where provisioning records which tmux session a home belongs to.
 pub(crate) const CODEX_HOME_SESSION_FILE: &str = "omar-session";
-
-/// Stop the app-server a finished home left running.
-///
-/// The recorded pid is checked against what is actually running first: pids
-/// are reused, and killing whatever inherited this one would be far worse than
-/// leaving a server up.
-fn kill_codex_app_server(home: &Path) {
-    let Ok(pid) = std::fs::read_to_string(home.join(CODEX_HOME_PID_FILE)) else {
-        return;
-    };
-    let pid = pid.trim();
-    if pid.is_empty() || pid.parse::<u32>().is_err() {
-        return;
-    }
-    let running = std::process::Command::new("ps")
-        .args(["-p", pid, "-o", "command="])
-        .output()
-        .map(|out| String::from_utf8_lossy(&out.stdout).contains("app-server"))
-        .unwrap_or(false);
-    if running {
-        let _ = std::process::Command::new("kill").arg(pid).status();
-    }
-}
 
 /// The `config.toml` for a per-pane codex home.
 ///
@@ -657,17 +634,22 @@ fn codex_home_launch(context: &McpLaunchContext, developer_instructions: &str) -
 ///    the record a fresh home opens a "do you trust this directory?" prompt
 ///    the agent never answers. Appended only if it is not already there: the
 ///    same table twice is a parse error, and codex refuses to start on one.
-/// 2. An app-server is started on the home's socket. The TUI attaches to it on
-///    its way up, which is what gives OMAR somewhere to inject events. A trap
-///    kills it when the shell exits, and its pid is written down so that
-///    `prune_stale_codex_homes` can finish the job when the shell does not —
-///    `tmux kill-session` signals nothing inside the pane.
+/// 2. An app-server is started, in the background of that same shell. The TUI
+///    attaches to it on its way up, which is what gives OMAR somewhere to
+///    inject events.
 /// 3. The TUI waits for the socket. A brand-new home has no state database
 ///    yet, and a server and a TUI creating it at the same moment collide on
 ///    the migration — codex then refuses to start with a "local database
 ///    appears to be damaged". Waiting for the socket means the server has
 ///    finished. The wait is bounded: past it the TUI starts anyway, with no
 ///    channel, which is the ordinary fallback.
+///
+/// Deliberately no `trap` to kill the server. A plain background job is in the
+/// pane's process group and dies with the pane; a `trap ... HUP` makes the
+/// shell *catch* the hangup instead of dying of it, and a shell blocked in the
+/// TUI never reaches the handler — so it survives, holding the server open.
+/// The trap does not clean up after the pane, it is what stops the pane
+/// cleaning up after itself.
 ///
 /// The TUI itself is launched with no `-c` and no `--profile`: any of those
 /// makes codex refuse to attach, which is the whole reason the configuration
@@ -682,8 +664,6 @@ fn codex_home_command(home: &Path, tui_command: &str) -> String {
          printf '\\n[projects.\"%s\"]\\ntrust_level = \"trusted\"\\n' \"$omar_cwd\" \
          >> \"$CODEX_HOME/config.toml\"; \
          codex app-server --listen unix:// >/dev/null 2>&1 & \
-         echo $! > \"$CODEX_HOME/{CODEX_HOME_PID_FILE}\"; \
-         trap \"kill $! 2>/dev/null\" EXIT HUP TERM; \
          omar_waited=0; \
          while [ ! -S {socket} ] && [ \"$omar_waited\" -lt 100 ]; \
          do sleep 0.2; omar_waited=$((omar_waited+1)); done; \
@@ -1954,7 +1934,14 @@ mod tests {
             cmd.contains("codex app-server --listen unix://"),
             "the pane must own an app-server: {cmd}"
         );
-        assert!(cmd.contains("trap \"kill $!"), "and must kill it: {cmd}");
+        // A background job dies with the pane's process group. A `trap` would
+        // make the shell catch the hangup instead of dying of it, and a shell
+        // sitting in the TUI never reaches the handler — so the pane would
+        // survive its own kill and hold the server open.
+        assert!(
+            !cmd.contains("trap "),
+            "trapping the hangup is what keeps the server alive: {cmd}"
+        );
         assert!(
             cmd.contains(
                 "while [ ! -S \"$CODEX_HOME/app-server-control/app-server-control.sock\" ]"
@@ -2006,8 +1993,8 @@ mod tests {
 
     #[test]
     fn a_codex_home_outlives_its_pane_only_until_the_next_launch() {
-        // `tmux kill-session` signals nothing inside the pane, so the shell's
-        // own trap cannot be relied on to take the app-server down with it.
+        // The app-server dies with the pane on its own; the directory does
+        // not, and each launch mints a multi-megabyte one.
         let dir = short_tempdir();
         let root = dir.path();
 
@@ -2019,7 +2006,7 @@ mod tests {
         )
         .unwrap();
 
-        // Written by the pane's shell before OMAR knows the session name.
+        // Made by `codex_home_dir`, not yet claimed by provisioning.
         let launching = root.join("launching");
         std::fs::create_dir_all(&launching).unwrap();
 
