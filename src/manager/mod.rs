@@ -474,10 +474,15 @@ fn codex_mcp_overrides(context: &McpLaunchContext) -> Option<String> {
     ))
 }
 
-/// The longest `sun_path` a Unix socket may have. macOS allows 104 bytes
-/// including the terminator; a per-pane codex home longer than that leaves the
-/// app-server unable to bind, so OMAR declines the side channel instead.
-const SUN_PATH_MAX: usize = 104;
+/// The longest socket path codex will bind.
+///
+/// Not the operating system's limit — macOS itself accepts 103 bytes — but
+/// codex's own, measured against the shipped 0.147.0 binary: 95 binds and 96
+/// fails with "path must be shorter than SUN_LEN". A path in between passes
+/// the OS and is refused by codex, which loses the channel silently and leaves
+/// a home behind for nothing, so the stricter bound is the useful one. It may
+/// move with the codex version.
+const SUN_PATH_MAX: usize = 96;
 
 /// Flags that make codex refuse to attach to a running app-server.
 ///
@@ -2055,10 +2060,23 @@ mod tests {
     }
 
     #[test]
+    fn the_socket_bound_is_the_one_codex_enforces_not_the_kernel() {
+        // Measured against codex 0.147.0: a 95-byte socket path binds, 96
+        // fails with "path must be shorter than SUN_LEN". macOS itself would
+        // take 103, and a path in that gap is the bad case — it passes the
+        // kernel, codex refuses it, and the channel is lost silently while a
+        // home is left behind for nothing.
+        assert_eq!(
+            SUN_PATH_MAX, 96,
+            "the guard must reject the paths codex rejects, not the ones the OS does"
+        );
+    }
+
+    #[test]
     fn a_codex_home_too_deep_for_a_socket_falls_back_to_the_flags() {
-        // `sun_path` is 104 bytes. A pane whose home cannot hold a socket gets
-        // no side channel — but it must still launch, with the configuration
-        // it always had.
+        // A pane whose home cannot hold a socket codex will bind gets no side
+        // channel — but it must still launch, with the configuration it always
+        // had.
         let dir = short_tempdir();
         let deep = dir.path().join("d".repeat(90));
         std::fs::create_dir_all(&deep).unwrap();
