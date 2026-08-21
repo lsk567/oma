@@ -1,4 +1,5 @@
 pub mod event;
+mod pane_input;
 
 pub use event::ScheduledEvent;
 
@@ -377,7 +378,6 @@ impl Scheduler {
     fn next_timestamp(&self) -> Option<u64> {
         self.transaction(false, |queue| queue.peek().map(|event| event.timestamp))
     }
-
     fn take_due_deliveries(
         &self,
         popup_receiver: &PopupReceiver,
@@ -423,35 +423,57 @@ impl Scheduler {
 
                 let mut restore_input = None;
                 if should_defer_for_popup(popup_receiver, &receiver, ea_id) {
-                    // If the user has a meaningful draft, preserve it across
-                    // event delivery: capture input, let the normal delivery
-                    // path clear/submit the event, then restore the draft.
-                    // If the pane cannot be read, defer rather than risk
-                    // wiping text we cannot put back.
-                    let Some(input) = get_pane_input(base_prefix, &receiver, ea_id) else {
-                        let defer_until = now_ns() + POPUP_DEFER_NS;
-                        for mut event in batch {
-                            event.timestamp = defer_until;
-                            remaining.push(event);
+                    // Preserve a draft across delivery: capture it, clear the
+                    // box, let the normal path submit the event, then paste the
+                    // draft back.
+                    //
+                    // Anything we cannot read, or cannot clear, defers instead.
+                    // Clearing input we are unable to restore loses the user's
+                    // work outright, which is worse than a late event.
+                    let target = pane_target_name(&receiver, ea_id, base_prefix);
+
+                    let draft = match get_pane_input(base_prefix, &receiver, ea_id) {
+                        pane_input::PaneInput::Empty => None,
+                        pane_input::PaneInput::Draft(draft) => Some(draft),
+                        pane_input::PaneInput::Unknown(_) => {
+                            defer_batch(
+                                batch,
+                                &mut remaining,
+                                &mut deliveries,
+                                receiver,
+                                ea_id,
+                                earliest_ts,
+                            );
+                            continue;
                         }
-                        deliveries.push(DueDelivery {
-                            receiver,
-                            ea_id,
-                            timestamp: earliest_ts,
-                            batch: Vec::new(),
-                            deferred_for_popup: true,
-                            restore_input: None,
-                        });
-                        continue;
                     };
 
-                    if pane_input_should_restore(&input) {
-                        restore_input = Some(input);
+                    match clear_pane_input(base_prefix, &receiver, ea_id, &target) {
+                        Cleared::Empty => {
+                            restore_input = draft.filter(|draft| !draft.trim().is_empty())
+                        }
+                        state => {
+                            // `Partial` means keys landed and the box still
+                            // holds part of the draft, so put back what was
+                            // taken. `Untouched` means nothing was sent and the
+                            // draft is whole — pasting then would duplicate it.
+                            if state == Cleared::Partial {
+                                if let Some(draft) = &draft {
+                                    let _ =
+                                        crate::tmux::TmuxClient::new("").paste_text(&target, draft);
+                                }
+                            }
+                            defer_batch(
+                                batch,
+                                &mut remaining,
+                                &mut deliveries,
+                                receiver,
+                                ea_id,
+                                earliest_ts,
+                            );
+                            continue;
+                        }
                     }
-                    // Input is empty/trivial or has been captured for restore.
-                    // Clear the current line before normal event delivery.
-                    let target = pane_target_name(&receiver, ea_id, base_prefix);
-                    let _ = crate::tmux::TmuxClient::new("").send_keys(&target, "C-u");
                 }
 
                 let remaining_quota = MAX_EVENTS_PER_EA_PER_TICK - delivered_so_far;
@@ -495,6 +517,33 @@ impl Scheduler {
     }
 }
 
+/// Push a batch back onto the queue to be retried after the popup delay.
+///
+/// Used whenever the pane cannot be read or cannot be cleared: a late event is
+/// recoverable, a destroyed draft is not.
+fn defer_batch(
+    batch: Vec<ScheduledEvent>,
+    remaining: &mut BinaryHeap<ScheduledEvent>,
+    deliveries: &mut Vec<DueDelivery>,
+    receiver: String,
+    ea_id: ea::EaId,
+    earliest_ts: u64,
+) {
+    let defer_until = now_ns() + POPUP_DEFER_NS;
+    for mut event in batch {
+        event.timestamp = defer_until;
+        remaining.push(event);
+    }
+    deliveries.push(DueDelivery {
+        receiver,
+        ea_id,
+        timestamp: earliest_ts,
+        batch: Vec::new(),
+        deferred_for_popup: true,
+        restore_input: None,
+    });
+}
+
 /// Build the tmux session name for a receiver.
 fn pane_target_name(receiver: &str, ea_id: ea::EaId, base_prefix: &str) -> String {
     if receiver == "ea" || receiver == "omar" {
@@ -504,393 +553,78 @@ fn pane_target_name(receiver: &str, ea_id: ea::EaId, base_prefix: &str) -> Strin
     }
 }
 
-/// Capture the current user input in the agent's pane.
-/// Returns `None` if the pane cannot be read (agent not running, tmux absent).
+/// Capture the user's in-progress draft from an agent pane.
 ///
-/// TUI backends render status bars and input boxes differently, so special
-/// cases return only the user's draft text. Shell-like backends fall back to
-/// the last line with a prompt prefix stripped.
-fn get_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId) -> Option<String> {
+/// The backend is read from the session stamp written at launch rather than
+/// sniffed from the pane, and the capture is the visible pane only, so
+/// scrollback cannot contribute stale prompt rows.
+fn get_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId) -> pane_input::PaneInput {
     let target = pane_target_name(receiver, ea_id, base_prefix);
     let client = crate::tmux::TmuxClient::new("");
 
-    // Check if this pane is running a special backend
-    let pane_cmd = client.get_pane_command(&target).ok().unwrap_or_default();
-
-    let pane_capture = client.capture_pane_plain(&target, 120).ok()?;
-
-    if pane_cmd == "opencode"
-        || pane_cmd.ends_with("/opencode")
-        || pane_capture.contains("OpenCode")
-    {
-        return Some(extract_opencode_input_from_capture(&pane_capture));
-    }
-
-    if pane_cmd == "claude"
-        || pane_cmd == "claude.exe"
-        || pane_cmd.ends_with("/claude")
-        || pane_cmd.ends_with("/claude.exe")
-        || pane_capture.contains("Claude Code")
-    {
-        let ansi_capture = client
-            .capture_pane(&target, 120)
-            .unwrap_or_else(|_| pane_capture.clone());
-        return Some(extract_claude_input_from_capture(&ansi_capture));
-    }
-
-    if pane_cmd == "codex"
-        || pane_cmd == "codex.exe"
-        || pane_cmd.ends_with("/codex")
-        || pane_cmd.ends_with("/codex.exe")
-        || pane_capture.contains("OpenAI Codex")
-        || pane_capture.lines().any(is_codex_status_line)
-    {
-        let ansi_capture = client
-            .capture_pane(&target, 120)
-            .unwrap_or_else(|_| pane_capture.clone());
-        return Some(extract_prefixed_input_from_capture(
-            &ansi_capture,
-            "›",
-            is_codex_input_chrome,
-        ));
-    }
-
-    if pane_capture.contains("Cursor Agent") {
-        return Some(extract_prefixed_input_from_capture(
-            &pane_capture,
-            "→",
-            |_| false,
-        ));
-    }
-
-    if pane_capture.contains("Antigravity CLI") {
-        return Some(extract_prefixed_input_from_capture(
-            &pane_capture,
-            "*",
-            |_| false,
-        ));
-    }
-
-    // Standard CLI: last line is the prompt/input line.
-    pane_capture.lines().last().map(|line| {
-        if is_agent_status_line(line) {
-            String::new()
-        } else {
-            strip_prompt_prefix(line).to_string()
-        }
-    })
-}
-
-fn extract_claude_input_from_capture(content: &str) -> String {
-    content
-        .lines()
-        .rev()
-        .find_map(extract_claude_prompt_line)
-        .unwrap_or_default()
-}
-
-fn extract_claude_prompt_line(line: &str) -> Option<String> {
-    let (_, after_prompt) = line.split_once('❯')?;
-    if input_starts_suggestion_styled(after_prompt) {
-        return Some(String::new());
-    }
-    let stripped = strip_ansi(after_prompt);
-    let input = stripped.trim();
-    if is_claude_input_chrome(input) {
-        return Some(String::new());
-    }
-    Some(input.to_string())
-}
-
-fn extract_prefixed_input_from_capture(
-    content: &str,
-    prefix: &str,
-    is_chrome: impl Fn(&str) -> bool,
-) -> String {
-    content
-        .lines()
-        .rev()
-        .find_map(|line| extract_prefixed_input_line(line, prefix, &is_chrome))
-        .unwrap_or_default()
-}
-
-fn extract_prefixed_input_line(
-    line: &str,
-    prefix: &str,
-    is_chrome: &impl Fn(&str) -> bool,
-) -> Option<String> {
-    let trimmed = line.trim_start();
-    let after_prefix = trimmed.strip_prefix(prefix)?;
-    if input_starts_suggestion_styled(after_prefix) {
-        return Some(String::new());
-    }
-    let stripped = strip_ansi(after_prefix);
-    let input = stripped.trim();
-    if is_chrome(input) {
-        return Some(String::new());
-    }
-    Some(input.to_string())
-}
-
-fn strip_ansi(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            for code in chars.by_ref() {
-                if ('@'..='~').contains(&code) {
-                    break;
-                }
-            }
-            continue;
-        }
-        output.push(ch);
-    }
-    output
-}
-
-fn input_starts_suggestion_styled(input: &str) -> bool {
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    let mut dimmed = false;
-    let mut reverse_video = false;
-
-    while i < bytes.len() {
-        if let Some(ch) = input[i..].chars().next() {
-            if ch.is_whitespace() {
-                i += ch.len_utf8();
-                continue;
-            }
-        }
-
-        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-            if let Some((end, is_sgr)) = ansi_sequence_end(bytes, i + 2) {
-                if is_sgr {
-                    update_suggestion_style_state(
-                        &input[i + 2..end],
-                        &mut dimmed,
-                        &mut reverse_video,
-                    );
-                }
-                i = end + 1;
-                continue;
-            }
-        }
-
-        return dimmed || reverse_video;
-    }
-
-    false
-}
-
-fn ansi_sequence_end(bytes: &[u8], mut i: usize) -> Option<(usize, bool)> {
-    while i < bytes.len() {
-        let byte = bytes[i];
-        if (0x40..=0x7e).contains(&byte) {
-            return Some((i, byte == b'm'));
-        }
-        i += 1;
-    }
-    None
-}
-
-fn update_suggestion_style_state(params: &str, dimmed: &mut bool, reverse_video: &mut bool) {
-    let codes: Vec<u16> = if params.is_empty() {
-        vec![0]
-    } else {
-        params
-            .split(';')
-            .filter_map(|part| part.parse::<u16>().ok())
-            .collect()
+    let Some(backend) = client.session_backend(&target) else {
+        return pane_input::PaneInput::Unknown("backend not identified");
     };
-    let mut i = 0;
-    while i < codes.len() {
-        match codes[i] {
-            0 => {
-                *dimmed = false;
-                *reverse_video = false;
-            }
-            22 | 39 => *dimmed = false,
-            7 => *reverse_video = true,
-            27 => *reverse_video = false,
-            2 | 90 => *dimmed = true,
-            38 if codes.get(i + 1) == Some(&5) => {
-                if let Some(color) = codes.get(i + 2) {
-                    if *color == 8 || (232..=255).contains(color) {
-                        *dimmed = true;
-                    }
-                }
-                i += 2;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-}
-
-fn extract_opencode_input_from_capture(content: &str) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    // opencode TUI structure (bottom-up): status bar, input box border, input content, ...
-    // Look for the input area by finding lines that are NOT pure TUI chrome.
-    // TUI chrome typically contains box-drawing characters: │ ─ └ ┘ ┌ ┐ ├ ┤ ┬ ┴ ┼
-    // The input content is inside the box, potentially with leading │ border.
-
-    // Start from the bottom and skip status bar / border lines
-    let mut input_lines: Vec<&str> = Vec::new();
-    let mut in_input_area = false;
-
-    for line in lines.iter().rev() {
-        let trimmed = line.trim();
-
-        // Skip empty lines at the very bottom
-        if trimmed.is_empty() && input_lines.is_empty() {
-            continue;
-        }
-
-        // Bottom border of input box: typically a line of ─ or └───...───┘
-        if !in_input_area && is_tui_horizontal_border(trimmed) {
-            in_input_area = true;
-            continue;
-        }
-
-        // Status bar: often contains mode info, model name, or has many special chars
-        if !in_input_area && is_opencode_status_bar(trimmed) {
-            continue;
-        }
-
-        // Top border of input box: signals end of input area
-        if in_input_area && is_tui_horizontal_border(trimmed) {
-            break;
-        }
-
-        // Inside input area - extract content (strip leading/trailing box borders)
-        if in_input_area {
-            if !trimmed.is_empty() && !has_tui_vertical_border(line) {
-                break;
-            }
-            let content = strip_tui_borders(line);
-            if !content.trim().is_empty() && !is_opencode_input_chrome(content) {
-                input_lines.push(content);
-            }
-        }
-
-        // Safety: don't scan too far up
-        if input_lines.len() > 5 {
-            break;
-        }
-    }
-
-    // Return the combined input (or empty string if no input found)
-    input_lines.reverse();
-    input_lines.join(" ").trim().to_string()
-}
-
-/// Check if a line looks like a TUI status bar or chrome (not user input).
-///
-/// Uses only structural density: status bars and chrome lines contain a high
-/// proportion of non-alphanumeric, non-whitespace characters (separators,
-/// icons, pipes). Avoids keyword matching so user input that happens to
-/// contain words like "claude" or "mode" is never misclassified.
-fn is_opencode_status_bar(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    if line.contains('•')
-        && (lower.contains("opencode")
-            || lower.contains("mcp")
-            || lower.contains("model")
-            || lower.contains("token"))
-    {
-        return true;
-    }
-
-    let special = line
-        .chars()
-        .filter(|c| !c.is_alphanumeric() && !c.is_whitespace())
-        .count();
-    let total = line.chars().count();
-    total > 0 && special * 4 > total
-}
-
-fn is_opencode_input_chrome(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.starts_with("Ask anything...")
-        || trimmed.starts_with("Build ·")
-        || trimmed.starts_with("Plan ·")
-        || trimmed.starts_with("Debug ·")
-        || trimmed.starts_with("Free Models")
-}
-
-fn is_claude_input_chrome(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.is_empty()
-}
-
-fn is_codex_input_chrome(line: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.is_empty()
-}
-
-fn is_codex_status_line(line: &str) -> bool {
-    is_agent_status_line(line)
-}
-
-fn is_agent_status_line(line: &str) -> bool {
-    let trimmed = line.trim();
-    let Some((left, right)) = trimmed.rsplit_once(" · ") else {
-        return false;
+    let Some(shape) = pane_input::Shape::for_backend(&backend) else {
+        return pane_input::PaneInput::Unknown("backend has no known input shape");
     };
-    let pathish = right.starts_with("~/")
-        || right.starts_with('/')
-        || right.starts_with("./")
-        || right.starts_with("../")
-        || right.contains(":\\");
-    pathish && !left.trim().is_empty() && !left.contains(['›', '❯', '→', '*'])
+    let Ok(capture) = client.capture_pane_visible(&target) else {
+        return pane_input::PaneInput::Unknown("pane capture failed");
+    };
+
+    let caret = client
+        .caret_position(&target)
+        .map(|(row, col)| pane_input::Caret { row, col });
+    let width = client.pane_width(&target);
+    pane_input::extract(shape, &capture, caret, width)
 }
 
-fn has_tui_vertical_border(line: &str) -> bool {
-    line.chars().any(|c| matches!(c, '│' | '┃' | '║'))
-}
-
-/// Check if a line is a TUI horizontal border (made of ─, └, ┘, etc.)
-fn is_tui_horizontal_border(line: &str) -> bool {
-    if line.is_empty() {
-        return false;
-    }
-    let border_chars = "─━═└┘┌┐├┤┬┴┼╔╗╚╝╠╣╦╩╬▀▁▂▃▄▅▆▇█▔╴╵╶╷╸╹╺╻";
-    let border_count = line.chars().filter(|c| border_chars.contains(*c)).count();
-    let non_whitespace_count = line.chars().filter(|c| !c.is_whitespace()).count();
-    // A border line is mostly made of border characters
-    non_whitespace_count > 0 && border_count > non_whitespace_count / 2
-}
-
-/// Strip TUI vertical border characters from the edges of a line
-fn strip_tui_borders(line: &str) -> &str {
-    let border_chars = ['│', '┃', '║', ' '];
-    line.trim_start_matches(|c| border_chars.contains(&c))
-        .trim_end_matches(|c| border_chars.contains(&c))
-}
-
-/// Strip a leading prompt token from shell-like input lines.
-fn strip_prompt_prefix(line: &str) -> &str {
-    let trimmed = line.trim();
-    match trimmed.find(' ') {
-        Some(pos) if trimmed[..pos].chars().all(|c| !c.is_alphanumeric()) => trimmed[pos..].trim(),
-        _ => trimmed,
-    }
-}
-
-fn input_char_count(input: &str) -> usize {
-    input.chars().filter(|c| !c.is_whitespace()).count()
-}
-
-/// Return `true` when the captured input is large enough that OMAR should
-/// preserve and restore it across event delivery.
+/// Empty the input box, confirming it by re-reading the pane.
 ///
-/// Heuristic:
-/// - 0-3 non-whitespace chars: trivial stub; wipe and deliver.
-/// - >3 non-whitespace chars: user draft; wipe, deliver, restore.
-pub(crate) fn pane_input_should_restore(input: &str) -> bool {
-    input_char_count(input) > 3
+/// `C-u` kills one line at a time — a visual line on some backends, a logical
+/// one on others — so the count needed varies with the draft. Rather than
+/// guess, press and re-check until the box reads empty. Returns `false` if it
+/// never does, so the caller can put the draft back and defer.
+/// What emptying the input box achieved.
+#[derive(Debug, PartialEq, Eq)]
+enum Cleared {
+    /// The box is empty.
+    Empty,
+    /// Nothing was sent, so whatever was there is untouched.
+    Untouched,
+    /// Keys were sent and the box still holds text — it is damaged now.
+    Partial,
+}
+
+fn clear_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId, target: &str) -> Cleared {
+    const MAX_CLEAR_PRESSES: usize = 40;
+    let client = crate::tmux::TmuxClient::new("");
+    let mut pressed = false;
+
+    for _ in 0..MAX_CLEAR_PRESSES {
+        match get_pane_input(base_prefix, receiver, ea_id) {
+            pane_input::PaneInput::Empty => return Cleared::Empty,
+            // Never keep hammering a pane we cannot read. Whether the draft is
+            // still whole depends on how far we got, and the caller needs to
+            // know: putting it back on top of an intact draft duplicates it.
+            pane_input::PaneInput::Unknown(_) => {
+                return if pressed {
+                    Cleared::Partial
+                } else {
+                    Cleared::Untouched
+                };
+            }
+            pane_input::PaneInput::Draft(_) => {}
+        }
+        let _ = client.send_keys(target, "C-u");
+        pressed = true;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    match get_pane_input(base_prefix, receiver, ea_id) {
+        pane_input::PaneInput::Empty => Cleared::Empty,
+        _ => Cleared::Partial,
+    }
 }
 
 pub(crate) fn deliver_to_tmux(
@@ -1448,361 +1182,7 @@ mod tests {
 
     // ── input preservation threshold — pure heuristic ──
 
-    #[test]
-    fn pane_input_empty_is_not_restored() {
-        assert!(!pane_input_should_restore(""));
-        assert!(!pane_input_should_restore("   "));
-    }
-
-    #[test]
-    fn pane_input_short_stub_at_or_under_threshold_is_not_restored() {
-        assert!(!pane_input_should_restore("a"));
-        assert!(!pane_input_should_restore("ab"));
-        assert!(!pane_input_should_restore("abc"));
-        assert!(!pane_input_should_restore("a b c"));
-    }
-
-    #[test]
-    fn pane_input_more_than_three_chars_is_restored() {
-        assert!(pane_input_should_restore("abcd"));
-        assert!(pane_input_should_restore("hello world"));
-        assert!(pane_input_should_restore("fix the bug"));
-    }
-
-    #[test]
-    fn shell_prompt_prefix_is_stripped() {
-        assert_eq!(strip_prompt_prefix("❯ abc"), "abc");
-        assert_eq!(strip_prompt_prefix("$ hello world"), "hello world");
-        assert_eq!(strip_prompt_prefix("> fix the bug"), "fix the bug");
-    }
-
-    #[test]
-    fn shell_prompt_prefix_preserves_plain_input() {
-        assert_eq!(strip_prompt_prefix("abc"), "abc");
-        assert_eq!(strip_prompt_prefix("hello"), "hello");
-    }
-
     // ── opencode TUI extraction helpers ──
-
-    #[test]
-    fn tui_border_detection() {
-        assert!(is_tui_horizontal_border(
-            "└───────────────────────────────────────────┘"
-        ));
-        assert!(is_tui_horizontal_border(
-            "┌─────────────────────────────────────────────┐"
-        ));
-        assert!(is_tui_horizontal_border("════════════════════════════════"));
-        assert!(is_tui_horizontal_border(
-            "╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀"
-        ));
-        assert!(is_tui_horizontal_border(
-            "▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄"
-        ));
-        assert!(!is_tui_horizontal_border("hello world"));
-        assert!(!is_tui_horizontal_border("│ some text │"));
-        assert!(!is_tui_horizontal_border(""));
-    }
-
-    #[test]
-    fn tui_status_bar_detection() {
-        // High special-char density → status bar / chrome
-        assert!(is_opencode_status_bar("──────────────────────────────"));
-        assert!(is_opencode_status_bar("│◆ ready │ ⬆ 0 ⬇ 0 │ main │"));
-        assert!(is_opencode_status_bar(
-            "15.3K (8%) context left • OpenCode 1.14.28"
-        ));
-        // Normal prose → not a status bar, even if it contains tool names
-        assert!(!is_opencode_status_bar("fix the bug in claude"));
-        assert!(!is_opencode_status_bar("hello world"));
-        assert!(!is_opencode_status_bar("refactor the openai client"));
-    }
-
-    #[test]
-    fn tui_border_stripping() {
-        assert_eq!(strip_tui_borders("│ hello world │"), "hello world");
-        assert_eq!(strip_tui_borders("║ content ║"), "content");
-        assert_eq!(strip_tui_borders("  text  "), "text");
-        assert_eq!(strip_tui_borders("no borders"), "no borders");
-    }
-
-    #[test]
-    fn opencode_idle_capture_extracts_no_meaningful_input() {
-        // Captured locally with:
-        // `tmux capture-pane -t omar-fixture-opencode -p -S -30`
-        // from an idle opencode 1.14.41 pane.
-        const IDLE_OPENCODE_CAPTURE: &str = r#"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-                                                                                                             ▄
-                                                                            █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█
-                                                                            █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀
-                                                                            ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
-
-
-                                                          ┃
-                                                          ┃  Ask anything... "Fix broken tests"
-                                                          ┃
-                                                          ┃  Build · Free Models Router OpenRouter
-                                                          ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-                                                                                                          tab agents  ctrl+p commands
-
-
-
-                                                              ● Tip Configure "git push": "ask" to require approval before pushing
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  /workspace/omar:fix/smart-popup-event-deferral                                                                                                                            1.14.41
-"#;
-
-        let input = extract_opencode_input_from_capture(IDLE_OPENCODE_CAPTURE);
-
-        assert_eq!(input, "");
-        assert!(!pane_input_should_restore(&input));
-    }
-
-    #[test]
-    fn opencode_capture_extracts_typed_input() {
-        let capture = r#"
-                                                          ┃
-                                                          ┃  fix the scheduler deferral bug
-                                                          ┃
-                                                          ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-                                                                                                          tab agents  ctrl+p commands
-"#;
-
-        assert!(capture
-            .lines()
-            .any(|line| is_tui_horizontal_border(line.trim())));
-        let input = extract_opencode_input_from_capture(capture);
-
-        assert_eq!(input, "fix the scheduler deferral bug");
-        assert!(pane_input_should_restore(&input));
-    }
-
-    #[test]
-    fn claude_idle_capture_extracts_no_restorable_input() {
-        let capture = " ▐▛███▜▌   Claude Code v2.1.136
-▝▜█████▛▘  Opus 4.7 with low effort · Claude Max
-  ▘▘ ▝▝    /workspace/omar
-
-────────────────────────────────────────────────────────────────
-❯ \x1b[7mT\x1b[0mry \"refactor dashboard.rs\"
-────────────────────────────────────────────────────────────────
-  PR #133
-";
-
-        let input = extract_claude_input_from_capture(capture);
-
-        assert_eq!(input, "");
-        assert!(!pane_input_should_restore(&input));
-    }
-
-    #[test]
-    fn claude_capture_extracts_typed_input_for_restore() {
-        let capture = r#"
-────────────────────────────────────────────────────────────────
-❯ fix the scheduler restore bug
-────────────────────────────────────────────────────────────────
-  ? for shortcuts
-"#;
-
-        let input = extract_claude_input_from_capture(capture);
-
-        assert_eq!(input, "fix the scheduler restore bug");
-        assert!(pane_input_should_restore(&input));
-    }
-
-    #[test]
-    fn claude_capture_ignores_dimmed_autocomplete_suggestion() {
-        let capture = "\n────────────────────────────────────────────────────────────────\n❯ \x1b[2mwrite the next task summary\x1b[0m\n────────────────────────────────────────────────────────────────\n";
-
-        let input = extract_claude_input_from_capture(capture);
-
-        assert_eq!(input, "");
-        assert!(!pane_input_should_restore(&input));
-    }
-
-    #[test]
-    fn claude_capture_ignores_reverse_video_autocomplete_suggestion() {
-        let capture = "\n────────────────────────────────────────────────────────────────\n❯ \x1b[7mw\x1b[0mrite the next task summary\n────────────────────────────────────────────────────────────────\n";
-
-        let input = extract_claude_input_from_capture(capture);
-
-        assert_eq!(input, "");
-        assert!(!pane_input_should_restore(&input));
-    }
-
-    #[test]
-    fn claude_capture_keeps_three_char_stub_trivial() {
-        let capture = r#"
-────────────────────────────────────────────────────────────────
-❯ abc
-────────────────────────────────────────────────────────────────
-"#;
-
-        let input = extract_claude_input_from_capture(capture);
-
-        assert_eq!(input, "abc");
-        assert!(!pane_input_should_restore(&input));
-    }
-
-    #[test]
-    fn codex_capture_extracts_typed_input_for_restore() {
-        let capture = r#"
-╭────────────────────────────────────────────────╮
-│ >_ OpenAI Codex (v0.133.0)                     │
-╰────────────────────────────────────────────────╯
-
-› hello world
-
-  gpt-5.5 medium · /workspace/omar
-
-› hello world
-
-  gpt-5.5 medium · /workspace/omar
-"#;
-
-        let input = extract_prefixed_input_from_capture(capture, "›", is_codex_input_chrome);
-
-        assert_eq!(input, "hello world");
-        assert!(pane_input_should_restore(&input));
-    }
-
-    #[test]
-    fn codex_capture_ignores_dimmed_autocomplete_suggestion() {
-        let capture = "\n╭────────────────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.133.0)                     │\n╰────────────────────────────────────────────────╯\n\n› \x1b[2mwrite the next task summary\x1b[0m\n\n  gpt-5.5 medium · /workspace/omar\n";
-
-        let input = extract_prefixed_input_from_capture(capture, "›", is_codex_input_chrome);
-
-        assert_eq!(input, "");
-        assert!(!pane_input_should_restore(&input));
-    }
-
-    #[test]
-    fn codex_capture_ignores_gray_autocomplete_suggestion() {
-        let capture = "\n› \x1b[38;5;245mwrite the next task summary\x1b[0m\n\n  gpt-5.5 medium · /workspace/omar\n";
-
-        let input = extract_prefixed_input_from_capture(capture, "›", is_codex_input_chrome);
-
-        assert_eq!(input, "");
-        assert!(!pane_input_should_restore(&input));
-    }
-
-    #[test]
-    fn codex_scrolled_capture_ignores_status_line_without_banner() {
-        let capture = r#"
-  gpt-5.5 medium · /workspace/omar
-"#;
-
-        let input = extract_prefixed_input_from_capture(capture, "›", is_codex_input_chrome);
-
-        assert_eq!(input, "");
-        assert!(!pane_input_should_restore(&input));
-    }
-
-    #[test]
-    fn codex_idle_capture_ignores_dimmed_placeholder() {
-        let capture = "\
-╭────────────────────────────────────────────────╮
-│ >_ OpenAI Codex (v0.133.0)                     │
-╰────────────────────────────────────────────────╯
-
-› \x1b[2mwrite the next task summary\x1b[0m
-
-  gpt-5.5 medium · /workspace/omar
-";
-
-        let input = extract_prefixed_input_from_capture(capture, "›", is_codex_input_chrome);
-
-        assert_eq!(input, "");
-        assert!(!pane_input_should_restore(&input));
-    }
-
-    #[test]
-    fn shell_fallback_ignores_agent_status_line() {
-        let input = r#"
-  gpt-5.5 medium · /workspace/omar
-"#
-        .lines()
-        .last()
-        .map(|line| {
-            if is_agent_status_line(line) {
-                String::new()
-            } else {
-                strip_prompt_prefix(line).to_string()
-            }
-        })
-        .unwrap();
-
-        assert_eq!(input, "");
-        assert!(!pane_input_should_restore(&input));
-    }
-
-    #[test]
-    fn cursor_capture_extracts_typed_input_for_restore() {
-        let capture = r#"
-  Cursor Agent
-  v2026.05.24-dda726e
-
- ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
-  → hello world
- ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-  Composer 2.5 Fast                                                   Auto-run
-"#;
-
-        let input = extract_prefixed_input_from_capture(capture, "→", |_| false);
-
-        assert_eq!(input, "hello world");
-        assert!(pane_input_should_restore(&input));
-    }
-
-    #[test]
-    fn antigravity_capture_extracts_typed_input_for_restore() {
-        let capture = r#"
-      ▄▀▀▄        Antigravity CLI 1.0.3
-
-────────────────────────────────────────────────────────────────────────────────
- YOLO Ctrl+Y                                                      2 MCP servers
-▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
- * hello world
-▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
-"#;
-
-        let input = extract_prefixed_input_from_capture(capture, "*", |_| false);
-
-        assert_eq!(input, "hello world");
-        assert!(pane_input_should_restore(&input));
-    }
 
     // ── Popup-defer decision (pure helper) ──
     //

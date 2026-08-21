@@ -109,6 +109,9 @@ fn tail_pane_lines(output: String, lines: i32) -> String {
 const AGENT_COLUMNS: &str = "200";
 const AGENT_ROWS: &str = "50";
 
+/// Session-environment key holding the backend a session was launched with.
+const SESSION_BACKEND_VAR: &str = "OMAR_BACKEND";
+
 #[derive(Debug, Clone)]
 pub struct TmuxClient {
     prefix: String,
@@ -305,6 +308,24 @@ impl TmuxClient {
             &(-lines).to_string(),
         ])?;
         Ok(tail_pane_lines(output, lines))
+    }
+
+    /// How many columns wide the pane is.
+    pub fn pane_width(&self, target: &str) -> Option<usize> {
+        let target = exact_pane_target(target);
+        self.run(&["display-message", "-t", &target, "-p", "#{pane_width}"])
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+    }
+
+    /// Capture only the rows currently on screen, with ANSI escapes intact.
+    ///
+    /// Scrollback is deliberately excluded: caret coordinates are relative to
+    /// the visible pane, and old prompt rows left in history read exactly like
+    /// live ones.
+    pub fn capture_pane_visible(&self, target: &str) -> Result<String> {
+        let target = exact_pane_target(target);
+        self.run(&["capture-pane", "-e", "-t", &target, "-p", "-S", "0"])
     }
 
     /// Get the name of the command currently running in a pane.
@@ -732,7 +753,76 @@ impl TmuxClient {
         args.extend(["sh", "-lc", command]);
         self.run(&args)?;
         self.run(&["set-option", "-t", name, "history-limit", "10000"])?;
+        // Record which backend this session was launched with. Everything that
+        // later needs to know reads it back instead of guessing from the pane,
+        // which cannot be done reliably: `#{pane_current_command}` is `node`
+        // for any npm-installed backend, and banner text scrolls away.
+        if let Some(backend) = crate::manager::command_backend_name(command) {
+            let _ = self.set_session_backend(name, backend);
+        }
         Ok(())
+    }
+
+    /// Stamp the backend name into the session's own environment.
+    pub fn set_session_backend(&self, name: &str, backend: &str) -> Result<()> {
+        let target = exact_session_target(name);
+        self.run(&[
+            "set-environment",
+            "-t",
+            &target,
+            SESSION_BACKEND_VAR,
+            backend,
+        ])?;
+        Ok(())
+    }
+
+    /// Which backend is running in this session.
+    ///
+    /// Prefers the stamp written at launch. Falls back to the pane command and
+    /// then to the pane process's full argv, so sessions started by an older
+    /// OMAR — or attached by hand — are still identified when they can be.
+    pub fn session_backend(&self, name: &str) -> Option<String> {
+        let target = exact_session_target(name);
+        if let Ok(output) = self.run(&["show-environment", "-t", &target, SESSION_BACKEND_VAR]) {
+            if let Some(value) = output
+                .trim()
+                .strip_prefix(&format!("{}=", SESSION_BACKEND_VAR))
+            {
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+
+        self.get_pane_command(name)
+            .ok()
+            .and_then(|command| crate::manager::command_backend_name(&command))
+            .or_else(|| {
+                self.get_pane_process_command(name)
+                    .ok()
+                    .and_then(|command| crate::manager::command_backend_name(&command))
+            })
+            .map(|backend| backend.to_string())
+    }
+
+    /// Where the terminal caret sits, and whether the backend leaves it
+    /// visible. A hidden caret means the position is not meaningful.
+    pub fn caret_position(&self, target: &str) -> Option<(usize, usize)> {
+        let target = exact_pane_target(target);
+        let output = self
+            .run(&[
+                "display-message",
+                "-t",
+                &target,
+                "-p",
+                "#{cursor_flag} #{cursor_y} #{cursor_x}",
+            ])
+            .ok()?;
+        let mut fields = output.split_whitespace();
+        let visible = fields.next()? == "1";
+        let row = fields.next()?.parse().ok()?;
+        let col = fields.next()?.parse().ok()?;
+        visible.then_some((row, col))
     }
 
     /// Kill a session
@@ -1299,6 +1389,67 @@ mod tests {
     /// at 0 forever and breaking `wait_for_stable` / `wait_for_change` on
     /// readiness-gated prompt delivery. This test asserts we get a usable,
     /// advancing timestamp out of the box (no monitor-activity needed).
+    #[test]
+    fn a_sessions_backend_is_recorded_at_launch_and_read_back() {
+        // The pane cannot be asked what it is running: `pane_current_command`
+        // is `node` for every npm-installed backend, and banner text scrolls
+        // away. So the launcher records it and everything else reads the stamp.
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+
+        let session = "omar-test-backend-stamp";
+        let _ = tmux_command()
+            .args(["kill-session", "-t", session])
+            .output();
+        let _guard = SessionGuard(session.to_string());
+
+        let ok = tmux_command()
+            .args(["new-session", "-d", "-s", session, "sleep", "60"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("Skipping test: failed to create tmux session");
+            return;
+        }
+
+        let client = TmuxClient::new("");
+        client
+            .set_session_backend(session, "codex")
+            .expect("stamp the backend");
+
+        assert_eq!(client.session_backend(session).as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn a_session_without_a_stamp_falls_back_to_the_pane_command() {
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+
+        let session = "omar-test-backend-unstamped";
+        let _ = tmux_command()
+            .args(["kill-session", "-t", session])
+            .output();
+        let _guard = SessionGuard(session.to_string());
+
+        let ok = tmux_command()
+            .args(["new-session", "-d", "-s", session, "sleep", "60"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("Skipping test: failed to create tmux session");
+            return;
+        }
+
+        // `sleep` is not a backend, so nothing is claimed rather than a guess.
+        assert_eq!(TmuxClient::new("").session_backend(session), None);
+    }
+
     #[test]
     fn test_get_pane_activity_returns_usable_timestamp() {
         if !tmux_available() {

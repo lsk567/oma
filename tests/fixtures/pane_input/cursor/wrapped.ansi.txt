@@ -1,0 +1,13 @@
+
+
+  Cursor Agent
+  [2mv2026.08.11-e8db854[0m
+  [2mTip: Use /config to customize Cursor settings and behavior.[0m
+
+
+ [38;2;21;21;21m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄[39m
+ [48;2;21;21;21m → refactor the tokenizer so that it streams input instead of buffering the entire file in memory and also update the docs and the tests to match the new streaming behaviour without breaking the    [49m
+ [48;2;21;21;21m   existing public api surface.[7m [0m[48;2;21;21;21m                                                                                                                                                                      [49m
+ [38;2;21;21;21m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀[39m
+  [2mComposer 2.5 Fast[0m                                                                                                                                                                     [35mRun Everything[39m
+  [2m/private/tmp/fixture-00/-home-user-workspace-omar-fixtures-xy/00000000-0000-0000-0000-000000000000/scratchpad/work[0m
