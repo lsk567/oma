@@ -222,6 +222,9 @@ run_case() {
     case_failed=$((case_failed + 1))
   fi
 
+  # Teardown persists pane transcripts; keep them with the case results.
+  cp -R "$HOME/.omar/ea/0/topologies/$team/logs" "$results_dir/$name-agents" 2>/dev/null || true
+
   if grep -Fq "Topology '$team' completed" "$log"; then
     case_passed=$((case_passed + 1))
   else

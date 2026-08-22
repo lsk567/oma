@@ -3,6 +3,7 @@ mod backend_probe;
 mod channel;
 mod computer;
 mod config;
+mod deploy;
 mod diagram;
 mod ea;
 mod event;
@@ -109,10 +110,23 @@ enum Commands {
         all_eas: bool,
     },
 
-    /// Kill an agent session
+    /// Force kill a deployment, or kill an agent session
     Kill {
-        /// Name of the session to kill
+        /// Deployment (team) name, or an agent session name
         name: String,
+    },
+
+    /// Stop a deployment gracefully: the current tag closes, state and logs
+    /// are persisted, sessions are cleaned up
+    Stop {
+        /// Deployment (team) name
+        deployment: String,
+    },
+
+    /// Show a deployment's lifecycle state
+    Status {
+        /// Deployment (team) name
+        deployment: String,
     },
 
     /// Hand queued OMAR events to a backend hook (invoked by the backend).
@@ -376,12 +390,29 @@ async fn async_main() -> Result<()> {
             let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
             let client =
                 TmuxClient::new(ea::ea_prefix(target.id, &config.dashboard.session_prefix));
-            kill_agent(
-                &client,
-                &name,
-                &scheduler::Scheduler::with_store(scheduler::events_store_path(&omar_dir)),
-                target.id,
-            )
+            // A deployment record wins the name: a team and an agent session
+            // rarely collide, and the record is the more deliberate target.
+            let deployment = deployment_dir(&omar_dir, target.id, &name)
+                .map(|dir| deploy::record_path(&dir).exists())
+                .unwrap_or(false);
+            if deployment {
+                kill_deployment(&omar_dir, target.id, &client, &name)
+            } else {
+                kill_agent(
+                    &client,
+                    &name,
+                    &scheduler::Scheduler::with_store(scheduler::events_store_path(&omar_dir)),
+                    target.id,
+                )
+            }
+        }
+        Some(Commands::Stop { deployment }) => {
+            let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
+            stop_deployment(&omar_dir, target.id, &deployment)
+        }
+        Some(Commands::Status { deployment }) => {
+            let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
+            status_deployment(&omar_dir, target.id, &deployment)
         }
         Some(Commands::SetupTmux) => setup_tmux(),
         Some(Commands::Manager { action }) => {
@@ -485,6 +516,7 @@ async fn async_main() -> Result<()> {
                     panel_ready: None,
                 },
             )
+            .map(|_| ())
         }
         Some(Commands::HookDrain { format }) => {
             // Always print valid JSON, even on misconfiguration: a hook that
@@ -694,6 +726,138 @@ fn now_ns() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_nanos() as u64
+}
+
+/// Where a team's deployment record and artifacts live.
+/// Checked, not trusted: the name comes off the command line, and
+/// `PathBuf::join` treats an absolute path as a replacement rather than a
+/// suffix -- so `/tmp/x` would name a directory outside the EA entirely, and
+/// the record found there decides which pid gets killed.
+///
+/// The rule is the compiler's own. `verify` refuses any bytecode whose team is
+/// not an identifier, so a name rejected here could never have been deployed
+/// and has no record to act on.
+fn deployment_dir(omar_dir: &std::path::Path, ea_id: ea::EaId, team: &str) -> Result<PathBuf> {
+    if !topology::valid_identifier(team) {
+        anyhow::bail!("invalid team name '{team}'");
+    }
+    Ok(ea::ea_state_dir(ea_id, omar_dir)
+        .join("topologies")
+        .join(team))
+}
+
+/// Ask the runner to stop, then wait, bounded by the run's own invocation
+/// timeout: the longest a tag may take to close once the stop is seen.
+fn stop_deployment(omar_dir: &std::path::Path, ea_id: ea::EaId, team: &str) -> Result<()> {
+    let dir = deployment_dir(omar_dir, ea_id, team)?;
+    let record = deploy::DeploymentRecord::load(&dir)?
+        .ok_or_else(|| anyhow::anyhow!("no deployment '{}'", team))?;
+    if record.state.is_terminal() {
+        println!("Deployment '{}' is already {}", team, record.state);
+        return Ok(());
+    }
+    if !record.runner_alive() {
+        anyhow::bail!(
+            "deployment '{}' is {} but its runner (pid {}) is gone; use 'omar kill {}' to clean up",
+            team,
+            record.state,
+            record.pid,
+            team
+        );
+    }
+    deploy::request_stop(&dir)?;
+    println!("Stop requested; waiting for the current tag to close");
+    let deadline =
+        std::time::Instant::now() + Duration::from_secs(record.timeout_seconds.saturating_add(120));
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        let Some(current) = deploy::DeploymentRecord::load(&dir)? else {
+            break;
+        };
+        if current.state.is_terminal() {
+            println!("Deployment '{}' is {}", team, current.state);
+            return Ok(());
+        }
+        if !current.runner_alive() {
+            anyhow::bail!(
+                "runner (pid {}) died while stopping; use 'omar kill {}' to clean up",
+                current.pid,
+                team
+            );
+        }
+    }
+    anyhow::bail!(
+        "deployment '{}' did not stop within {}s; 'omar kill {}' forces it",
+        team,
+        record.timeout_seconds.saturating_add(120),
+        team
+    )
+}
+
+/// Report a deployment's state. A record claiming to run under a dead pid is
+/// healed to FAILED here: nobody else is left to write the ending.
+fn status_deployment(omar_dir: &std::path::Path, ea_id: ea::EaId, team: &str) -> Result<()> {
+    let dir = deployment_dir(omar_dir, ea_id, team)?;
+    let mut record = deploy::DeploymentRecord::load(&dir)?
+        .ok_or_else(|| anyhow::anyhow!("no deployment '{}'", team))?;
+    if record.is_active() && !record.runner_alive() {
+        record.advance(deploy::DeploymentState::Failed, Some("runner process died"))?;
+        record.error = Some("runner process died".to_string());
+        record.save(&dir)?;
+    }
+    println!("Deployment '{}' ({})", team, record.deployment_id);
+    println!("  state: {}", record.state);
+    let pid_note = if record.is_active() { " (alive)" } else { "" };
+    println!("  pid: {}{}", record.pid, pid_note);
+    println!("  started_at: {}", record.started_at);
+    if let Some(finished) = record.finished_at {
+        println!("  finished_at: {}", finished);
+    }
+    if let Some(error) = &record.error {
+        println!("  error: {}", error);
+    }
+    for event in &record.history {
+        match &event.detail {
+            Some(detail) => println!("  {} at {} ({})", event.state, event.at, detail),
+            None => println!("  {} at {}", event.state, event.at),
+        }
+    }
+    println!("  agents: {}", record.sessions.len());
+    println!("  files: {}", dir.display());
+    Ok(())
+}
+
+/// Force kill: the runner dies first, then its sessions, then the record says
+/// CANCELLED. Also sweeps sessions a crashed run left behind.
+fn kill_deployment(
+    omar_dir: &std::path::Path,
+    ea_id: ea::EaId,
+    client: &TmuxClient,
+    team: &str,
+) -> Result<()> {
+    let dir = deployment_dir(omar_dir, ea_id, team)?;
+    let mut record = deploy::DeploymentRecord::load(&dir)?
+        .ok_or_else(|| anyhow::anyhow!("no deployment '{}'", team))?;
+    if record.pid != std::process::id() && record.runner_alive() {
+        deploy::kill_process(record.pid);
+        let waited = std::time::Instant::now();
+        while crate::process::pid_alive(record.pid) && waited.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    for failure in deploy::teardown_sessions(client, &record.sessions, &deploy::logs_dir(&dir)) {
+        eprintln!("warning: session not cleaned up: {failure}");
+    }
+    deploy::clear_stop(&dir)?;
+    if record.is_active() {
+        record.advance(
+            deploy::DeploymentState::Cancelled,
+            Some("killed by operator"),
+        )?;
+        record.save(&dir)?;
+    }
+    println!("Deployment '{}' is {}", team, record.state);
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2002,6 +2166,33 @@ mod tests {
             std::fs::read_to_string(&manager_notes[0]).unwrap(),
             "manager notes\n"
         );
+    }
+
+    /// A deployment name that is not a team name names nothing.
+    ///
+    /// `PathBuf::join` treats an absolute path as a replacement rather than a
+    /// suffix, so without this `omar status /tmp/x` reads a record from outside
+    /// the EA directory -- and `omar kill` would take the pid it found there at
+    /// its word.
+    #[test]
+    fn a_deployment_path_cannot_leave_the_ea_directory() {
+        let omar_dir = std::path::Path::new("/home/someone/.omar");
+        let ea_id = ea::EaId::default();
+
+        for escape in ["/tmp/x", "../../etc", "a/b", "", ".", ".."] {
+            assert!(
+                deployment_dir(omar_dir, ea_id, escape).is_err(),
+                "'{escape}' should not name a deployment"
+            );
+        }
+
+        // And a real team name still resolves, under the EA where it belongs.
+        let dir = deployment_dir(omar_dir, ea_id, "Cadence").expect("a team name resolves");
+        assert!(
+            dir.starts_with(ea::ea_state_dir(ea_id, omar_dir)),
+            "{dir:?}"
+        );
+        assert!(dir.ends_with("topologies/Cadence"), "{dir:?}");
     }
 
     #[cfg(target_os = "macos")]

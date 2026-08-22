@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::config;
+use crate::deploy::{self, DeploymentState};
 use crate::diagram::{DiagramServer, NoopTopologyObserver, TopologyObserver};
 use crate::manager::{self, McpLaunchContext, TopologyMcpContext};
 use crate::tmux::flatten_agent_name;
@@ -1369,16 +1370,89 @@ pub struct PanelAccess {
     pub agents: BTreeSet<String>,
 }
 
-pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Result<()> {
+/// How a run ended when it did not fail: it drained its queue, or an
+/// operator's stop closed it at a tag boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunEnd {
+    Completed,
+    Stopped,
+}
+
+/// Advance the shared record and persist it, as one step.
+fn advance_record(
+    record: &Arc<Mutex<deploy::DeploymentRecord>>,
+    dir: &Path,
+    next: DeploymentState,
+    detail: Option<&str>,
+) -> Result<()> {
+    let mut guard = record
+        .lock()
+        .map_err(|_| anyhow::anyhow!("deployment record lock poisoned"))?;
+    guard.advance(next, detail)?;
+    guard.save(dir)
+}
+
+/// The failure funnel: keep pane output as logs, kill the sessions, record
+/// FAILED. Best effort; the caller reports the error already on its way out.
+fn fail_deployment(
+    record: &Arc<Mutex<deploy::DeploymentRecord>>,
+    dir: &Path,
+    host: &dyn deploy::SessionHost,
+    sessions: &BTreeMap<String, String>,
+    error: &anyhow::Error,
+) {
+    for failure in deploy::teardown_sessions(host, sessions, &deploy::logs_dir(dir)) {
+        eprintln!("warning: session not cleaned up: {failure}");
+    }
+    if let Ok(mut guard) = record.lock() {
+        let message = format!("{error:#}");
+        let _ = guard.advance(DeploymentState::Failed, Some(&message));
+        guard.error = Some(message);
+        let _ = guard.save(dir);
+    }
+    let _ = deploy::clear_stop(dir);
+}
+
+pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Result<RunEnd> {
     let state = verify(bytecode)?;
     let runtime_dir = crate::ea::ea_state_dir(config.ea_id, config.omar_dir)
         .join("topologies")
         .join(&state.team);
     fs::create_dir_all(&runtime_dir)?;
+    // One live run per team: its sessions are named by team and agent, so a
+    // second run would be answered by the first run's panes.
+    if let Some(existing) = deploy::DeploymentRecord::load(&runtime_dir)? {
+        if existing.is_active() && existing.pid != std::process::id() && existing.runner_alive() {
+            bail!(
+                "deployment '{}' is {} (pid {}); stop it first",
+                state.team,
+                existing.state,
+                existing.pid
+            );
+        }
+    }
+    // A stop left over from an earlier run must not end this one.
+    deploy::clear_stop(&runtime_dir)?;
     let obsolete_invocations = runtime_dir.join("invocations");
     if obsolete_invocations.exists() {
         fs::remove_dir_all(&obsolete_invocations)?;
     }
+    let client = TmuxClient::new(crate::ea::ea_prefix(config.ea_id, config.base_prefix));
+    let planned_sessions: BTreeMap<String, String> = state
+        .agents
+        .iter()
+        .filter(|(_, agent)| !is_web_backend(&agent.backend))
+        .map(|(name, _)| (name.clone(), client.session_for(name)))
+        .collect();
+    let record = Arc::new(Mutex::new(deploy::DeploymentRecord::create(
+        &state.team,
+        planned_sessions,
+        config.timeout.as_secs(),
+    )));
+    record
+        .lock()
+        .map_err(|_| anyhow::anyhow!("deployment record lock poisoned"))?
+        .save(&runtime_dir)?;
     let diagram_server = config
         .diagram_address
         .map(|address| DiagramServer::start(&state, address))
@@ -1401,10 +1475,20 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
     // input — and those failures are just as much a failed run as one in the
     // event loop. Report them on the stream too, or an observer sees it go
     // quiet with no reason given.
-    let client = TmuxClient::new(crate::ea::ea_prefix(config.ea_id, config.base_prefix));
+    advance_record(&record, &runtime_dir, DeploymentState::Deploying, None)?;
+    // Only what this run spawned. A failure must not tear down a session it
+    // refused to replace.
+    let mut spawned: BTreeMap<String, String> = BTreeMap::new();
     let prepared = (|| -> Result<(InvocationServer, BTreeMap<String, Value>)> {
         let invocation_server = InvocationServer::start()?;
-        spawn_topology_agents(&state, &client, &runtime_dir, &invocation_server, &config)?;
+        spawn_topology_agents(
+            &state,
+            &client,
+            &runtime_dir,
+            &invocation_server,
+            &config,
+            &mut spawned,
+        )?;
         let inputs = parse_inputs(&state, config.inputs)?;
         Ok((invocation_server, inputs))
     })();
@@ -1412,6 +1496,7 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
         Ok(prepared) => prepared,
         Err(error) => {
             observer.run_failed(&error.to_string());
+            fail_deployment(&record, &runtime_dir, &client, &spawned, &error);
             return Err(error);
         }
     };
@@ -1439,20 +1524,102 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
         timeout: config.timeout,
         web,
     };
-    let outputs = match run_event_loop_observed(&state, inputs, &executor, observer, config.pace) {
-        Ok(outputs) => outputs,
+    advance_record(&record, &runtime_dir, DeploymentState::Running, None)?;
+    // Flip RUNNING to STOPPING the moment a stop lands, even while the loop
+    // is blocked mid-tag, so an operator polling status sees it acknowledged.
+    let watcher_shutdown = Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let record = record.clone();
+        let dir = runtime_dir.clone();
+        let shutdown = watcher_shutdown.clone();
+        thread::spawn(move || {
+            while !shutdown.load(Ordering::Acquire) {
+                if deploy::stop_requested(&dir) {
+                    if let Ok(mut guard) = record.lock() {
+                        if guard.state == DeploymentState::Running {
+                            let _ = guard.advance(
+                                DeploymentState::Stopping,
+                                Some("stop requested; waiting for the current tag to close"),
+                            );
+                            let _ = guard.save(&dir);
+                        }
+                    }
+                    return;
+                }
+                thread::sleep(Duration::from_millis(250));
+            }
+        })
+    };
+    let outcome = run_event_loop_observed(
+        &state,
+        inputs,
+        &executor,
+        observer,
+        config.pace,
+        Some(&runtime_dir),
+    );
+    watcher_shutdown.store(true, Ordering::Release);
+    let _ = watcher.join();
+    let end = match outcome {
+        Ok(end) => end,
         Err(error) => {
             observer.run_failed(&error.to_string());
+            let sessions = record
+                .lock()
+                .map(|guard| guard.sessions.clone())
+                .unwrap_or_default();
+            fail_deployment(&record, &runtime_dir, &executor.client, &sessions, &error);
             return Err(error);
         }
     };
+    let (outputs, stopped) = match end {
+        LoopEnd::Completed(outputs) => (outputs, false),
+        LoopEnd::Stopped(outputs) => (outputs, true),
+    };
     observer.run_completed(&outputs);
     write_json_atomic(&runtime_dir.join("state.json"), &state)?;
-    println!("Topology '{}' completed", state.team);
+    write_json_atomic(&deploy::outputs_path(&runtime_dir), &outputs)?;
+    let sessions = record
+        .lock()
+        .map(|guard| guard.sessions.clone())
+        .unwrap_or_default();
+    for failure in
+        deploy::teardown_sessions(&executor.client, &sessions, &deploy::logs_dir(&runtime_dir))
+    {
+        eprintln!("warning: session not cleaned up: {failure}");
+    }
+    {
+        let mut guard = record
+            .lock()
+            .map_err(|_| anyhow::anyhow!("deployment record lock poisoned"))?;
+        if stopped && guard.state == DeploymentState::Running {
+            guard.advance(
+                DeploymentState::Stopping,
+                Some("stop honoured at a tag boundary"),
+            )?;
+        }
+        let detail = if stopped {
+            "stopped by request"
+        } else {
+            "run completed"
+        };
+        guard.advance(DeploymentState::Terminated, Some(detail))?;
+        guard.save(&runtime_dir)?;
+    }
+    deploy::clear_stop(&runtime_dir)?;
+    if stopped {
+        println!("Topology '{}' stopped", state.team);
+    } else {
+        println!("Topology '{}' completed", state.team);
+    }
     for (port, value) in outputs {
         println!("Output {port} = {value}");
     }
-    Ok(())
+    Ok(if stopped {
+        RunEnd::Stopped
+    } else {
+        RunEnd::Completed
+    })
 }
 
 fn spawn_topology_agents(
@@ -1461,6 +1628,7 @@ fn spawn_topology_agents(
     runtime_dir: &Path,
     invocation_server: &InvocationServer,
     config: &TopologyRunConfig<'_>,
+    spawned: &mut BTreeMap<String, String>,
 ) -> Result<()> {
     let protocol = "You are an OMAR topology agent. Only act on OMAR INVOCATION messages. You cannot message other agents. For each invocation, use only omar_set_port to set allowed effects and omar_complete to finish. Port writes are buffered and repeated writes use last-writer-wins semantics.";
     for (name, agent) in &state.agents {
@@ -1507,6 +1675,7 @@ fn spawn_topology_agents(
         };
         let command = manager::build_agent_command(&base_command, &prompt_file, &[], &context);
         client.new_session(&session, &command, Some(config.default_workdir))?;
+        spawned.insert(name.clone(), session);
     }
 
     for (name, agent) in &state.agents {
@@ -1974,13 +2143,29 @@ pub enum Pace {
     Fast,
 }
 
+/// How the loop ended: the queue drained, or a stop closed the run at a tag
+/// boundary. Either way the outputs read so far come along.
+enum LoopEnd {
+    Completed(BTreeMap<String, Value>),
+    Stopped(BTreeMap<String, Value>),
+}
+
 #[cfg(test)]
 fn run_event_loop<E: ReactionExecutor>(
     state: &VmState,
     inputs: BTreeMap<String, Value>,
     executor: &E,
 ) -> Result<BTreeMap<String, Value>> {
-    run_event_loop_observed(state, inputs, executor, &NoopTopologyObserver, Pace::Fast)
+    match run_event_loop_observed(
+        state,
+        inputs,
+        executor,
+        &NoopTopologyObserver,
+        Pace::Fast,
+        None,
+    )? {
+        LoopEnd::Completed(outputs) | LoopEnd::Stopped(outputs) => Ok(outputs),
+    }
 }
 
 fn run_event_loop_observed<E: ReactionExecutor>(
@@ -1989,7 +2174,8 @@ fn run_event_loop_observed<E: ReactionExecutor>(
     executor: &E,
     observer: &dyn TopologyObserver,
     pace: Pace,
-) -> Result<BTreeMap<String, Value>> {
+    deployment_dir: Option<&Path>,
+) -> Result<LoopEnd> {
     // When the run's logical clock was started, which is what every tag's
     // timestamp is measured from.
     let origin = Instant::now();
@@ -2019,8 +2205,14 @@ fn run_event_loop_observed<E: ReactionExecutor>(
     // Fixed before the first tag: precedence follows from the wiring, and the
     // wiring does not change while a run is in flight.
     let layers = precedence_layers(state)?;
+    let stop_now = || deployment_dir.is_some_and(deploy::stop_requested);
 
     while let Some((tag, events)) = queue.pop_first() {
+        // An operator's stop ends the run here, between tags: nothing is in
+        // flight at a boundary, so no invocation's contract is abandoned.
+        if stop_now() {
+            return Ok(LoopEnd::Stopped(outputs));
+        }
         // A tag nothing is present at is not a moment the run passed through.
         // No reaction can fire at one -- enabling asks whether any trigger is
         // in `events`, which is false for every reaction when it is empty --
@@ -2042,8 +2234,12 @@ fn run_event_loop_observed<E: ReactionExecutor>(
             // Microsteps carry no time, so only the timestamp is owed. A tag
             // whose moment has already passed runs now rather than being
             // pushed further out: being late is not a reason to be later.
-            if let Some(remaining) = due.checked_sub(origin.elapsed()) {
-                thread::sleep(remaining);
+            // Sliced so a stop during a long wait is honoured within a beat.
+            while let Some(remaining) = due.checked_sub(origin.elapsed()) {
+                if stop_now() {
+                    return Ok(LoopEnd::Stopped(outputs));
+                }
+                thread::sleep(remaining.min(Duration::from_millis(250)));
             }
         }
         // How far past its logical time this tag actually ran. Zero while the
@@ -2165,7 +2361,7 @@ fn run_event_loop_observed<E: ReactionExecutor>(
             }
         }
     }
-    Ok(outputs)
+    Ok(LoopEnd::Completed(outputs))
 }
 
 fn invocation_spec(
@@ -2294,7 +2490,7 @@ fn interpolation_identifier(expression: &str) -> Result<String> {
         .context("empty prompt interpolation")
 }
 
-fn valid_identifier(value: &str) -> bool {
+pub(crate) fn valid_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -2352,6 +2548,13 @@ fn canonical_backend(backend: &str) -> &str {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// The outputs however the loop ended; these tests never request a stop.
+    fn loop_outputs(end: LoopEnd) -> BTreeMap<String, Value> {
+        match end {
+            LoopEnd::Completed(outputs) | LoopEnd::Stopped(outputs) => outputs,
+        }
+    }
 
     fn program() -> Bytecode {
         serde_json::from_str(
@@ -2990,7 +3193,7 @@ mod tests {
         // Fast: this compares the tags a run passes through against the
         // projection of them, and waiting out real delays would say nothing
         // more about whether the two agree.
-        run_event_loop_observed(state, inputs, executor, &observer, Pace::Fast).unwrap();
+        run_event_loop_observed(state, inputs, executor, &observer, Pace::Fast, None).unwrap();
         let tags = observer.tags.lock().unwrap().clone();
         tags
     }
@@ -3016,14 +3219,17 @@ mod tests {
         let observer = RunTags {
             tags: Mutex::new(Vec::new()),
         };
-        let outputs = run_event_loop_observed(
-            &state,
-            BTreeMap::new(),
-            &SilentExecutor,
-            &observer,
-            Pace::Fast,
-        )
-        .unwrap();
+        let outputs = loop_outputs(
+            run_event_loop_observed(
+                &state,
+                BTreeMap::new(),
+                &SilentExecutor,
+                &observer,
+                Pace::Fast,
+                None,
+            )
+            .unwrap(),
+        );
         assert!(observer.tags.lock().unwrap().is_empty(), "announced a tag");
         assert!(outputs.is_empty());
     }
@@ -3227,14 +3433,17 @@ mod tests {
     fn real_time_owes_the_delay_a_program_asked_for() {
         let state = verify(&delayed_bytecode(TEST_DELAY.as_nanos() as u64)).unwrap();
         let started = Instant::now();
-        let outputs = run_event_loop_observed(
-            &state,
-            BTreeMap::from([("topic".to_string(), json!("x"))]),
-            &PromptExecutor,
-            &NoopTopologyObserver,
-            Pace::RealTime,
-        )
-        .unwrap();
+        let outputs = loop_outputs(
+            run_event_loop_observed(
+                &state,
+                BTreeMap::from([("topic".to_string(), json!("x"))]),
+                &PromptExecutor,
+                &NoopTopologyObserver,
+                Pace::RealTime,
+                None,
+            )
+            .unwrap(),
+        );
         let elapsed = started.elapsed();
         assert_eq!(outputs["memo"], json!("done"));
         assert!(
@@ -3247,14 +3456,17 @@ mod tests {
     fn fast_runs_the_same_program_without_the_wait() {
         let state = verify(&delayed_bytecode(TEST_DELAY.as_nanos() as u64)).unwrap();
         let started = Instant::now();
-        let outputs = run_event_loop_observed(
-            &state,
-            BTreeMap::from([("topic".to_string(), json!("x"))]),
-            &PromptExecutor,
-            &NoopTopologyObserver,
-            Pace::Fast,
-        )
-        .unwrap();
+        let outputs = loop_outputs(
+            run_event_loop_observed(
+                &state,
+                BTreeMap::from([("topic".to_string(), json!("x"))]),
+                &PromptExecutor,
+                &NoopTopologyObserver,
+                Pace::Fast,
+                None,
+            )
+            .unwrap(),
+        );
         let elapsed = started.elapsed();
         // Same outputs, same tags, no wall clock. Only the waiting is skipped.
         assert_eq!(outputs["memo"], json!("done"));
@@ -3308,6 +3520,7 @@ mod tests {
             &SlowExecutor,
             &observer,
             Pace::RealTime,
+            None,
         )
         .unwrap();
 
@@ -3346,6 +3559,7 @@ mod tests {
             &PromptExecutor,
             &observer,
             Pace::Fast,
+            None,
         )
         .unwrap();
         let lags = observer.lags.lock().unwrap().clone();
@@ -3375,6 +3589,7 @@ mod tests {
             &SlowExecutor,
             &NoopTopologyObserver,
             Pace::RealTime,
+            None,
         )
         .unwrap();
         let elapsed = started.elapsed();
@@ -3673,6 +3888,7 @@ mod tests {
                 &Yes,
                 &observer,
                 Pace::Fast,
+                None,
             )
             .unwrap();
             let tag = *observer.tag.lock().unwrap();
@@ -4119,5 +4335,85 @@ mod tests {
             BTreeMap::from([("opinion".into(), json!("yes"))])
         );
         server.registry.remove("invocation-2");
+    }
+
+    /// Answers its invocation, and files a stop request while doing so.
+    struct StopWhileAnsweringExecutor {
+        dir: std::path::PathBuf,
+        calls: Mutex<usize>,
+    }
+
+    impl ReactionExecutor for StopWhileAnsweringExecutor {
+        fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+            *self.calls.lock().unwrap() += 1;
+            crate::deploy::request_stop(&self.dir).unwrap();
+            let port = invocation.allowed_effects.keys().next().unwrap().clone();
+            Ok(BTreeMap::from([(port, json!("ping"))]))
+        }
+    }
+
+    /// `a` fires `reaction.0` at one tag; its action effect schedules
+    /// `reaction.1` a microstep later, so the run crosses a tag boundary.
+    fn two_tag_bytecode() -> Bytecode {
+        serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Boundary",
+              "instructions": [
+                {"op":"begin_plan","team":"Boundary"},
+                {"op":"spawn_agent","name":"worker","backend":"stub"},
+                {"op":"define_port","kind":"input","name":"a","type":"string"},
+                {"op":"define_port","kind":"action","name":"x","type":"string"},
+                {"op":"define_port","kind":"output","name":"out","type":"string"},
+                {"op":"install_reaction","id":"reaction.0","agent":"worker","triggers":["a"],"effects":["x"],"contract":"x","prompt":"First"},
+                {"op":"install_reaction","id":"reaction.1","agent":"worker","triggers":["x"],"effects":["out"],"contract":"out","prompt":"Second"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_stop_request_ends_the_run_at_the_next_tag_boundary() {
+        let state = verify(&two_tag_bytecode()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let executor = StopWhileAnsweringExecutor {
+            dir: dir.path().to_path_buf(),
+            calls: Mutex::new(0),
+        };
+        let inputs = BTreeMap::from([("a".to_string(), json!("go"))]);
+        let end = run_event_loop_observed(
+            &state,
+            inputs.clone(),
+            &executor,
+            &NoopTopologyObserver,
+            Pace::Fast,
+            Some(dir.path()),
+        )
+        .unwrap();
+        assert!(matches!(end, LoopEnd::Stopped(_)));
+        assert_eq!(*executor.calls.lock().unwrap(), 1);
+
+        // The same program drains both tags when nothing watches for a stop.
+        let unwatched = tempfile::tempdir().unwrap();
+        let executor = StopWhileAnsweringExecutor {
+            dir: unwatched.path().to_path_buf(),
+            calls: Mutex::new(0),
+        };
+        let end = run_event_loop_observed(
+            &state,
+            inputs,
+            &executor,
+            &NoopTopologyObserver,
+            Pace::Fast,
+            None,
+        )
+        .unwrap();
+        match end {
+            LoopEnd::Completed(outputs) => assert_eq!(outputs.get("out"), Some(&json!("ping"))),
+            LoopEnd::Stopped(_) => panic!("nothing requested a stop"),
+        }
+        assert_eq!(*executor.calls.lock().unwrap(), 2);
     }
 }
