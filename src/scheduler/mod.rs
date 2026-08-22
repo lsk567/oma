@@ -378,11 +378,7 @@ impl Scheduler {
     fn next_timestamp(&self) -> Option<u64> {
         self.transaction(false, |queue| queue.peek().map(|event| event.timestamp))
     }
-    fn take_due_deliveries(
-        &self,
-        popup_receiver: &PopupReceiver,
-        base_prefix: &str,
-    ) -> Vec<DueDelivery> {
+    fn take_due_deliveries(&self, popup_receiver: &PopupReceiver) -> Vec<DueDelivery> {
         self.transaction(true, |queue| {
             let Some(earliest_ts) = queue.peek().map(|event| event.timestamp) else {
                 return Vec::new();
@@ -421,60 +417,13 @@ impl Scheduler {
                     continue;
                 }
 
-                let mut restore_input = None;
-                if should_defer_for_popup(popup_receiver, &receiver, ea_id) {
-                    // Preserve a draft across delivery: capture it, clear the
-                    // box, let the normal path submit the event, then paste the
-                    // draft back.
-                    //
-                    // Anything we cannot read, or cannot clear, defers instead.
-                    // Clearing input we are unable to restore loses the user's
-                    // work outright, which is worse than a late event.
-                    let target = pane_target_name(&receiver, ea_id, base_prefix);
-
-                    let draft = match get_pane_input(base_prefix, &receiver, ea_id) {
-                        pane_input::PaneInput::Empty => None,
-                        pane_input::PaneInput::Draft(draft) => Some(draft),
-                        pane_input::PaneInput::Unknown(_) => {
-                            defer_batch(
-                                batch,
-                                &mut remaining,
-                                &mut deliveries,
-                                receiver,
-                                ea_id,
-                                earliest_ts,
-                            );
-                            continue;
-                        }
-                    };
-
-                    match clear_pane_input(base_prefix, &receiver, ea_id, &target) {
-                        Cleared::Empty => {
-                            restore_input = draft.filter(|draft| !draft.trim().is_empty())
-                        }
-                        state => {
-                            // `Partial` means keys landed and the box still
-                            // holds part of the draft, so put back what was
-                            // taken. `Untouched` means nothing was sent and the
-                            // draft is whole — pasting then would duplicate it.
-                            if state == Cleared::Partial {
-                                if let Some(draft) = &draft {
-                                    let _ =
-                                        crate::tmux::TmuxClient::new("").paste_text(&target, draft);
-                                }
-                            }
-                            defer_batch(
-                                batch,
-                                &mut remaining,
-                                &mut deliveries,
-                                receiver,
-                                ea_id,
-                                earliest_ts,
-                            );
-                            continue;
-                        }
-                    }
-                }
+                // Reading a pane means several tmux subprocesses, and emptying
+                // one can take seconds of polling. This runs inside the store
+                // transaction, which holds a cross-process lock that other
+                // writers give up on after 500ms — so decide here, and do it
+                // in the caller once the lock is gone.
+                let needs_draft_protection =
+                    should_defer_for_popup(popup_receiver, &receiver, ea_id);
 
                 let remaining_quota = MAX_EVENTS_PER_EA_PER_TICK - delivered_so_far;
                 let (batch, deferred_batch) = split_batch_for_quota(batch, remaining_quota);
@@ -506,8 +455,7 @@ impl Scheduler {
                     ea_id,
                     timestamp: earliest_ts,
                     batch,
-                    deferred_for_popup: false,
-                    restore_input,
+                    needs_draft_protection,
                 });
             }
 
@@ -517,31 +465,16 @@ impl Scheduler {
     }
 }
 
-/// Push a batch back onto the queue to be retried after the popup delay.
+/// Put a batch back on the queue to be retried after the popup delay.
 ///
 /// Used whenever the pane cannot be read or cannot be cleared: a late event is
 /// recoverable, a destroyed draft is not.
-fn defer_batch(
-    batch: Vec<ScheduledEvent>,
-    remaining: &mut BinaryHeap<ScheduledEvent>,
-    deliveries: &mut Vec<DueDelivery>,
-    receiver: String,
-    ea_id: ea::EaId,
-    earliest_ts: u64,
-) {
-    let defer_until = now_ns() + POPUP_DEFER_NS;
+fn requeue_batch(scheduler: &Scheduler, batch: Vec<ScheduledEvent>) {
+    let retry_at = now_ns() + POPUP_DEFER_NS;
     for mut event in batch {
-        event.timestamp = defer_until;
-        remaining.push(event);
+        event.timestamp = retry_at;
+        scheduler.insert(event);
     }
-    deliveries.push(DueDelivery {
-        receiver,
-        ea_id,
-        timestamp: earliest_ts,
-        batch: Vec::new(),
-        deferred_for_popup: true,
-        restore_input: None,
-    });
 }
 
 /// Build the tmux session name for a receiver.
@@ -596,35 +529,137 @@ enum Cleared {
     Partial,
 }
 
-fn clear_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId, target: &str) -> Cleared {
-    const MAX_CLEAR_PRESSES: usize = 40;
-    let client = crate::tmux::TmuxClient::new("");
-    let mut pressed = false;
+/// A key that empties the whole composer at once, for backends that have one.
+///
+/// Only opencode is listed, and only because its binding was checked against a
+/// live pane: `ctrl+c` is registered as "clear input" while the composer holds
+/// text and as "quit" while it does not, so it is safe exactly when we use it —
+/// straight after a read that said there was a draft — and catastrophic
+/// otherwise. Everything else empties the box a line at a time, which is slower
+/// but has no way to kill the agent.
+fn whole_buffer_clear_key(backend: &str) -> Option<&'static str> {
+    match backend {
+        "opencode" => Some("C-c"),
+        _ => None,
+    }
+}
 
-    for _ in 0..MAX_CLEAR_PRESSES {
-        match get_pane_input(base_prefix, receiver, ea_id) {
+fn clear_pane_input(base_prefix: &str, receiver: &str, ea_id: ea::EaId, target: &str) -> Cleared {
+    const MAX_CLEAR_ROUNDS: usize = 40;
+    let client = crate::tmux::TmuxClient::new("");
+    let clear_key = client
+        .session_backend(target)
+        .and_then(|backend| whole_buffer_clear_key(&backend));
+    let mut last: Option<String> = None;
+    let mut removed = false;
+    let mut stalls = 0;
+
+    for _ in 0..MAX_CLEAR_ROUNDS {
+        let current = match get_pane_input(base_prefix, receiver, ea_id) {
             pane_input::PaneInput::Empty => return Cleared::Empty,
             // Never keep hammering a pane we cannot read. Whether the draft is
             // still whole depends on how far we got, and the caller needs to
             // know: putting it back on top of an intact draft duplicates it.
             pane_input::PaneInput::Unknown(_) => {
-                return if pressed {
+                return if removed {
                     Cleared::Partial
                 } else {
                     Cleared::Untouched
                 };
             }
-            pane_input::PaneInput::Draft(_) => {}
+            pane_input::PaneInput::Draft(draft) => draft,
+        };
+
+        // Stop when the keys stop achieving anything, rather than pressing
+        // forty times and then reporting a box we damaged as merely stubborn.
+        if last.as_deref() == Some(current.as_str()) {
+            stalls += 1;
+            if stalls >= 2 {
+                return if removed {
+                    Cleared::Partial
+                } else {
+                    Cleared::Untouched
+                };
+            }
+        } else {
+            if last.is_some() {
+                removed = true;
+            }
+            stalls = 0;
         }
+        last = Some(current);
+
+        // The read above said there is a draft, which is the condition that
+        // makes this key mean "clear" rather than "quit".
+        if let Some(key) = clear_key {
+            let _ = client.send_keys(target, key);
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            continue;
+        }
+
+        // `C-u` kills back to the start of the line. At the start of the
+        // buffer it does nothing, forever, which leaves a draft the user is
+        // editing from the top permanently unclearable — so when a press
+        // achieves nothing, add `C-k`, which kills forward and takes the
+        // newline with it.
+        //
+        // `C-k` is held back until then on purpose: antigravity binds it to
+        // approving a waiting subagent, and approving one on the user's behalf
+        // to tidy an input box is not a trade worth making routinely.
         let _ = client.send_keys(target, "C-u");
-        pressed = true;
+        if stalls > 0 {
+            let _ = client.send_keys(target, "C-k");
+        }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 
     match get_pane_input(base_prefix, receiver, ea_id) {
         pane_input::PaneInput::Empty => Cleared::Empty,
-        _ => Cleared::Partial,
+        _ if removed => Cleared::Partial,
+        _ => Cleared::Untouched,
     }
+}
+
+/// Empty the input box, handing back whatever was in it so it can be put
+/// back afterwards. `None` means the pane could not be read or could not be
+/// cleared, and must not be typed into.
+fn protect_draft(base_prefix: &str, receiver: &str, ea_id: ea::EaId) -> Option<Option<String>> {
+    let draft = match get_pane_input(base_prefix, receiver, ea_id) {
+        pane_input::PaneInput::Empty => None,
+        pane_input::PaneInput::Draft(draft) => Some(draft),
+        // Unreadable: clearing what we cannot put back destroys the draft.
+        pane_input::PaneInput::Unknown(_) => return None,
+    };
+
+    let target = pane_target_name(receiver, ea_id, base_prefix);
+    match clear_pane_input(base_prefix, receiver, ea_id, &target) {
+        Cleared::Empty => Some(draft.filter(|draft| !draft.trim().is_empty())),
+        // Nothing was sent, so the draft is still whole. Pasting it back here
+        // would leave the user with two copies of what they were writing.
+        Cleared::Untouched => None,
+        Cleared::Partial => {
+            // Keys landed and the box still holds part of the draft. Put back
+            // what was taken, or the clearing itself is the damage.
+            if let Some(draft) = &draft {
+                let _ = crate::tmux::TmuxClient::new("").paste_text(&target, draft);
+            }
+            None
+        }
+    }
+}
+
+/// The side channel for a receiver's pane, if its backend offers one.
+fn side_channel(
+    receiver: &str,
+    ea_id: ea::EaId,
+    base_prefix: &str,
+) -> Option<crate::channel::Channel> {
+    let target = pane_target_name(receiver, ea_id, base_prefix);
+    let client = crate::tmux::TmuxClient::new("");
+    let backend = client.session_backend(&target)?;
+    let pane_pid = client.get_pane_pid(&target).ok()?;
+    let stamp = client.session_delivery(&target);
+    crate::channel::Channel::resolve(&backend, pane_pid, stamp.as_deref())
 }
 
 pub(crate) fn deliver_to_tmux(
@@ -634,22 +669,79 @@ pub(crate) fn deliver_to_tmux(
     base_prefix: &str,
     ticker: &TickerBuffer,
     restore_input: Option<&str>,
-) {
+) -> bool {
+    // Set when the input box had to be emptied on the fallback path.
+    let mut rescued = None;
+
+    // Prefer handing the event to the backend directly. It reaches the model
+    // without going through the input box, so a draft the user is typing is
+    // never touched and the event does not read as something they said.
+    if let Some(channel) = side_channel(receiver, ea_id, base_prefix) {
+        match channel.deliver(message) {
+            Ok(()) => {
+                // A channel can appear between capture and delivery — a spool
+                // drained, a port finished provisioning — in which case the
+                // caller has already emptied the box and is holding the draft.
+                // Returning without putting it back would destroy it.
+                if let Some(draft) = restore_input.filter(|draft| !draft.is_empty()) {
+                    let target = pane_target_name(receiver, ea_id, base_prefix);
+                    if crate::tmux::TmuxClient::new("")
+                        .paste_text(&target, draft)
+                        .is_err()
+                    {
+                        ticker.push(format!("tmux input restore failed for {}", receiver));
+                    }
+                }
+                ticker.push(format!(
+                    "delivered event(s) to {} via {}",
+                    receiver,
+                    channel.describe()
+                ));
+                return true;
+            }
+            Err(e) => {
+                ticker.push(format!(
+                    "side channel for {} failed ({}); using the input box",
+                    receiver, e
+                ));
+                // The caller skipped its capture because a channel looked
+                // available, so anything the user was typing is still in the
+                // box and nothing has been cleared. Do that here, or typing
+                // the event would land on top of their draft.
+                match protect_draft(base_prefix, receiver, ea_id) {
+                    Some(draft) => rescued = draft,
+                    None => {
+                        // Unreadable or unclearable: leave the pane alone.
+                        // Losing one event beats destroying a draft.
+                        ticker.push(format!(
+                            "could not clear the input box for {}; retrying later",
+                            receiver
+                        ));
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
     let target = pane_target_name(receiver, ea_id, base_prefix);
     let client = crate::tmux::TmuxClient::new("");
     let opts = DeliveryOptions::default();
     if let Err(e) = client.deliver_prompt(&target, message, &opts) {
         ticker.push(format!("tmux prompt delivery failed for {}: {}", target, e));
-        return;
+        return false;
     }
+    let restore_input = restore_input.or(rescued.as_deref());
     if let Some(input) = restore_input.filter(|input| !input.is_empty()) {
         if let Err(e) = client.paste_text(&target, input) {
             ticker.push(format!("tmux input restore failed for {}: {}", target, e));
-            return;
+            // The event itself did land; only putting the draft back failed.
+            return true;
         }
         ticker.push(format!("restored draft input for {}", receiver));
     }
     ticker.push(format!("delivered event(s) to {}", receiver));
+    true
 }
 
 fn format_delivery(events: &[ScheduledEvent], timestamp: u64) -> String {
@@ -710,8 +802,9 @@ struct DueDelivery {
     ea_id: u32,
     timestamp: u64,
     batch: Vec<ScheduledEvent>,
-    deferred_for_popup: bool,
-    restore_input: Option<String>,
+    /// The user has this pane's popup open, so the input box may hold a draft
+    /// that must be taken out of the way — done by the caller, off the lock.
+    needs_draft_protection: bool,
 }
 
 /// Decide whether to defer an event for `(receiver, ea_id)` because the user
@@ -783,21 +876,43 @@ pub async fn run_event_loop(
                     }
                 }
 
-                for delivery in scheduler.take_due_deliveries(&popup_receiver, &base_prefix) {
+                for delivery in scheduler.take_due_deliveries(&popup_receiver) {
                     let DueDelivery {
                         receiver,
                         ea_id,
                         timestamp,
                         batch,
-                        deferred_for_popup,
-                        restore_input,
+                        needs_draft_protection,
                     } = delivery;
-                    if deferred_for_popup {
-                        ticker.push(format!("deferred event(s) for {} (popup open)", receiver));
-                        continue;
-                    }
                     if batch.is_empty() {
                         continue;
+                    }
+
+                    // Off the store lock now, so this may take its time. A
+                    // side channel bypasses the input box entirely, so there
+                    // is nothing to protect in that case.
+                    let mut restore_input = None;
+                    if needs_draft_protection {
+                        let receiver_name = receiver.clone();
+                        let base_prefix_clone = base_prefix.clone();
+                        let protected = tokio::task::spawn_blocking(move || {
+                            if side_channel(&receiver_name, ea_id, &base_prefix_clone).is_some() {
+                                return Some(None);
+                            }
+                            protect_draft(&base_prefix_clone, &receiver_name, ea_id)
+                        })
+                        .await;
+                        match protected {
+                            Ok(Some(draft)) => restore_input = draft,
+                            _ => {
+                                ticker.push(format!(
+                                    "deferred event(s) for {} (popup open)",
+                                    receiver
+                                ));
+                                requeue_batch(&scheduler, batch);
+                                continue;
+                            }
+                        }
                     }
 
                     let message = format_delivery(&batch, timestamp);
@@ -812,9 +927,15 @@ pub async fn run_event_loop(
                             &base_prefix_clone,
                             &ticker_clone,
                             restore_input.as_deref(),
-                        );
+                        )
                     })
                     .await;
+                    // The batch has already left the queue. If it never
+                    // reached the agent, put it back rather than lose it.
+                    if matches!(delivery_result, Ok(false)) {
+                        requeue_batch(&scheduler, batch);
+                        continue;
+                    }
                     if let Err(e) = delivery_result {
                         ticker.push(format!(
                             "delivery task failed for {} (ea {}): {}",
@@ -839,6 +960,23 @@ pub async fn run_event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_verified_clear_key_is_ever_sent() {
+        // `ctrl+c` means "clear the input" while opencode's composer holds
+        // text and "quit" while it does not, so it is only ever sent straight
+        // after a read that found a draft. No other backend gets one until its
+        // binding has been checked the same way against a live pane — a wrong
+        // guess here kills the user's agent.
+        assert_eq!(whole_buffer_clear_key("opencode"), Some("C-c"));
+        for backend in ["claude", "codex", "cursor", "agy", "stub", ""] {
+            assert_eq!(
+                whole_buffer_clear_key(backend),
+                None,
+                "{backend} must fall back to clearing a line at a time"
+            );
+        }
+    }
 
     fn make_event(receiver: &str, sender: &str, timestamp: u64, payload: &str) -> ScheduledEvent {
         ScheduledEvent {

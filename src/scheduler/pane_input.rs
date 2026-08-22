@@ -46,6 +46,10 @@ pub(crate) struct Shape {
     pub glyph: &'static str,
     /// Left box border, for backends that draw one instead of a bare glyph.
     pub border: Option<char>,
+    /// How many rows the composer shows before it starts scrolling without
+    /// saying so — no marker, no ellipsis, nothing. A draft this tall may have
+    /// more above or below that is simply not on screen.
+    pub scroll_cap: Option<usize>,
 }
 
 impl Shape {
@@ -54,25 +58,34 @@ impl Shape {
             "claude" => Shape {
                 glyph: "❯",
                 border: None,
+                scroll_cap: None,
             },
             "codex" => Shape {
                 glyph: "›",
                 border: None,
+                scroll_cap: None,
             },
             // The live TUI uses U+003E, not the `*` an earlier version of this
             // code assumed.
             "agy" => Shape {
                 glyph: ">",
                 border: None,
+                scroll_cap: None,
             },
+            // Its composer grows to six rows and then scrolls with nothing to
+            // show for it. Measured against a live pane, and unchanged at 20,
+            // 40 and 60 terminal rows — it is the composer's own limit, not
+            // the pane's.
             "cursor" => Shape {
                 glyph: "→",
                 border: None,
+                scroll_cap: Some(6),
             },
             // opencode draws a left-only box border and no prompt glyph.
             "opencode" => Shape {
                 glyph: "",
                 border: Some('┃'),
+                scroll_cap: None,
             },
             _ => return None,
         };
@@ -99,22 +112,26 @@ pub(crate) fn extract(
         return PaneInput::Unknown("empty capture");
     }
 
-    let Some(start) = find_start_row(&shape, &rows, caret) else {
+    // A bordered composer does not own the whole terminal row: opencode
+    // paints a working-directory indicator to its right, on the same rows,
+    // once the pane is wide enough. The rule that closes the box says where
+    // the box actually ends, and anything past that is somebody else's.
+    let right_edge = shape.border.and_then(|_| box_right_edge(&rows, caret));
+
+    let Some(start) = find_start_row(&shape, &rows, caret, right_edge) else {
         return PaneInput::Unknown("no input row found");
     };
 
     // Text begins one space past the glyph (or past the border). Continuation
     // rows line up under it, which is what lets us find them without a
     // per-backend indent constant.
-    let text_col = rows[start].text_col(&shape);
-    let end = find_end_row(&shape, &rows, start, text_col);
+    let text_col = text_column(&shape, &rows, start);
+    let end = find_end_row(&shape, &rows, start, text_col, right_edge);
 
     let mut lines = Vec::new();
     for (offset, row) in rows[start..=end].iter().enumerate() {
         let cut = text_col;
-        let Some(text) = row.after_col(cut) else {
-            return PaneInput::Unknown("input row shorter than its indent");
-        };
+        let text = row.between(cut, right_edge);
 
         // Check before any styling is stripped: some backends render the
         // collapsed-paste token dimmed, which would otherwise erase the very
@@ -122,13 +139,22 @@ pub(crate) fn extract(
         if UNRECOVERABLE.iter().any(|token| text.contains(token)) {
             return PaneInput::Unknown("backend collapsed the draft to a summary token");
         }
+        // Also before stripping: the rows this stands for are off screen, and
+        // on some backends the marker itself is dimmed.
+        if text.trim_start().starts_with('↑') && text.contains(SCROLLED_MARKER) {
+            return PaneInput::Unknown("draft has scrolled inside the input box");
+        }
 
         // Ghost completions and inline argument hints trail the typed text,
         // dimmed. Drop them: the caret pins where typing stopped when the
         // backend leaves it visible, and the styling alone is enough when it
         // does not.
         let text = match caret {
-            Some(caret) if caret.row == start + offset => {
+            // tmux reports the caret in terminal cells. Those only line up
+            // with character offsets while the row is ASCII — a CJK character
+            // is two cells wide, a combining mark none — so anything else
+            // falls back to reading the styling, which needs no column.
+            Some(caret) if caret.row == start + offset && row.visible.is_ascii() => {
                 strip_ghost_after(row, &text, cut, caret.col)
             }
             _ => strip_trailing_dim(row, cut, &text),
@@ -142,13 +168,14 @@ pub(crate) fn extract(
     // new one; joining those with a newline would inject a break the user never
     // typed. Backends that re-flow at word boundaries (opencode) cannot be told
     // apart this way, so they keep the row split.
-    // A bordered composer is narrower than the pane, so its own widest row is
-    // the better estimate of where it wraps.
+    // A bordered composer is narrower than the pane. Measure it from the box
+    // itself — the rule closing it runs the full width — rather than from the
+    // draft, whose longest line says nothing about where text would wrap.
     let width = if shape.border.is_some() {
-        rows[start..=end]
+        rows[end..]
             .iter()
+            .find(|row| row.is_horizontal_border())
             .map(|row| row.visible.trim_end().chars().count())
-            .max()
     } else {
         pane_width
     };
@@ -158,11 +185,13 @@ pub(crate) fn extract(
     if UNRECOVERABLE.iter().any(|token| trimmed.contains(token)) {
         return PaneInput::Unknown("backend collapsed the draft to a summary token");
     }
-    if trimmed.contains(SCROLLED_MARKER) && trimmed.starts_with('↑') {
-        return PaneInput::Unknown("draft has scrolled inside the input box");
-    }
     if trimmed.is_empty() {
         return PaneInput::Empty;
+    }
+    // Deferring a delivery is recoverable; handing back a draft with its first
+    // lines missing, and then clearing the box, is not.
+    if shape.scroll_cap.is_some_and(|cap| end - start + 1 >= cap) {
+        return PaneInput::Unknown("draft may have scrolled inside the composer");
     }
     // A wholly dimmed box is the backend's placeholder, not a draft.
     if rows[start..=end].iter().all(|row| row.is_all_dim(text_col)) {
@@ -170,6 +199,43 @@ pub(crate) fn extract(
     }
 
     PaneInput::Draft(trim_trailing_blank_lines(&draft))
+}
+
+/// The column the draft's text starts at.
+///
+/// Normally the prompt row says: glyph, a space, then text. But that row can be
+/// emptied — `C-u` kills to the start of the line — while the rows below it
+/// still hold the rest of the draft, and tmux strips the row's trailing space,
+/// so the column it implies collapses by one. Every continuation row is then a
+/// column off and reads as chrome, and a box with text in it reports as empty.
+/// When the prompt row has nothing on it, take the column from the first row
+/// below that still does.
+fn text_column(shape: &Shape, rows: &[Row], start: usize) -> usize {
+    let col = rows[start].text_col(shape);
+    if rows[start].visible.chars().skip(col).any(|c| !is_blank(c)) {
+        return col;
+    }
+
+    let Some(next) = rows.get(start + 1) else {
+        return col;
+    };
+    if next.is_horizontal_border() || next.visible.trim().is_empty() {
+        return col;
+    }
+    match shape.border {
+        Some(_) if next.starts_input(shape) => next.text_col(shape),
+        Some(_) => col,
+        None => {
+            // A continuation row is padded out to the text column, so one that
+            // starts hard against the margin is chrome, not draft.
+            let indent = next.visible.chars().take_while(|c| is_blank(*c)).count();
+            if indent == 0 {
+                col
+            } else {
+                indent
+            }
+        }
+    }
 }
 
 /// Join rows, dropping the newline where one row simply ran off the edge.
@@ -184,12 +250,14 @@ fn join_wrapped(
     // `WRAP_SLACK` of the composer's width as a continuation — and require it
     // to be substantially long, so ordinary short lines are never merged.
     const WRAP_SLACK: usize = 24;
-    const MIN_WRAP_LEN: usize = 40;
 
     let Some(width) = pane_width else {
         return lines.join("\n");
     };
     let available = width.saturating_sub(text_col);
+    // Proportional, not absolute: on a narrow composer a 54-character line is
+    // an ordinary line, while on a wide one it is nowhere near the edge.
+    let nearly_full = available * 4 / 5;
 
     let mut out = String::new();
     for (index, line) in lines.iter().enumerate() {
@@ -203,7 +271,7 @@ fn join_wrapped(
                 .count()
                 .saturating_sub(text_col);
             let wrapped =
-                previous >= MIN_WRAP_LEN && previous >= available.saturating_sub(WRAP_SLACK);
+                previous >= nearly_full && previous >= available.saturating_sub(WRAP_SLACK);
             // Word wrapping ate the space that joined the two halves.
             out.push(if wrapped { ' ' } else { '\n' });
         }
@@ -217,7 +285,21 @@ fn join_wrapped(
 /// With a visible caret this walks up from the caret row, so menus rendered
 /// below the box cannot be mistaken for input. Without one it falls back to
 /// the glyph, bounded by the box borders so the same menus stay out.
-fn find_start_row(shape: &Shape, rows: &[Row], caret: Option<Caret>) -> Option<usize> {
+fn box_right_edge(rows: &[Row], caret: Option<Caret>) -> Option<usize> {
+    let from = caret.map(|caret| caret.row).unwrap_or(0).min(rows.len());
+    rows[from..]
+        .iter()
+        .find(|row| row.is_horizontal_border())
+        .or_else(|| rows.iter().rev().find(|row| row.is_horizontal_border()))
+        .map(|row| row.visible.trim_end().chars().count())
+}
+
+fn find_start_row(
+    shape: &Shape,
+    rows: &[Row],
+    caret: Option<Caret>,
+    right_edge: Option<usize>,
+) -> Option<usize> {
     if let Some(caret) = caret {
         if caret.row < rows.len() {
             // A left border repeats on every row of the box, so it marks
@@ -229,13 +311,13 @@ fn find_start_row(shape: &Shape, rows: &[Row], caret: Option<Caret>) -> Option<u
                 // after a partial clear, for instance — so walk up through the
                 // box to the draft rather than giving up on the spot.
                 let mut row = caret.row;
-                while !rows[row].holds_draft(shape) {
+                while !rows[row].holds_draft(shape, right_edge) {
                     if row == 0 || !rows[row].starts_input(shape) {
                         return None;
                     }
                     row -= 1;
                 }
-                while row > 0 && rows[row - 1].holds_draft(shape) {
+                while row > 0 && rows[row - 1].holds_draft(shape, right_edge) {
                     row -= 1;
                 }
                 return Some(row);
@@ -275,10 +357,16 @@ fn find_start_row(shape: &Shape, rows: &[Row], caret: Option<Caret>) -> Option<u
 }
 
 /// The last row of the draft: the caret row, or the last continuation row.
-fn find_end_row(shape: &Shape, rows: &[Row], start: usize, text_col: usize) -> usize {
+fn find_end_row(
+    shape: &Shape,
+    rows: &[Row],
+    start: usize,
+    text_col: usize,
+    right_edge: Option<usize>,
+) -> usize {
     if shape.border.is_some() {
         let mut end = start;
-        while end + 1 < rows.len() && rows[end + 1].holds_draft(shape) {
+        while end + 1 < rows.len() && rows[end + 1].holds_draft(shape, right_edge) {
             end += 1;
         }
         return end;
@@ -467,12 +555,12 @@ impl Row {
 
     /// Is this a bordered row of the input box that actually carries text?
     /// Used for backends whose box repeats a left border on every row.
-    fn holds_draft(&self, shape: &Shape) -> bool {
+    fn holds_draft(&self, shape: &Shape, right_edge: Option<usize>) -> bool {
         if !self.starts_input(shape) {
             return false;
         }
         let col = self.text_col(shape);
-        self.visible.chars().skip(col).any(|c| !is_blank(c))
+        !self.between(col, right_edge).trim().is_empty()
     }
 
     fn is_horizontal_border(&self) -> bool {
@@ -486,17 +574,14 @@ impl Row {
         printed > 0 && border_count > printed / 2
     }
 
-    fn after_col(&self, col: usize) -> Option<String> {
-        let count = self.visible.chars().count();
-        if count < col {
-            // A blank row inside the draft is shorter than the indent.
-            return if self.visible.trim().is_empty() {
-                Some(String::new())
-            } else {
-                None
-            };
-        }
-        Some(self.visible.chars().skip(col).collect::<String>())
+    /// The row's text from `col` up to the box's right edge, if it has one. A
+    /// row shorter than `col` holds nothing there — an empty line in the
+    /// draft, or a prompt row the user has just emptied.
+    fn between(&self, col: usize, right_edge: Option<usize>) -> String {
+        let take = right_edge
+            .map(|edge| edge.saturating_sub(col))
+            .unwrap_or(usize::MAX);
+        self.visible.chars().skip(col).take(take).collect()
     }
 
     /// Is every printed cell from `col` onward dimmed?
@@ -657,6 +742,18 @@ mod tests {
         ("agy", "pastetoken", include_str!("../../tests/fixtures/pane_input/agy/pastetoken.ansi.txt"), Some(Caret { row: 12, col: 28 }), Expect::Unknown),
         ("agy", "single", include_str!("../../tests/fixtures/pane_input/agy/single.ansi.txt"), Some(Caret { row: 12, col: 20 }), Expect::Draft("fix the parser bug")),
         ("agy", "wrapped", include_str!("../../tests/fixtures/pane_input/agy/wrapped.ansi.txt"), Some(Caret { row: 13, col: 30 }), Expect::Draft("refactor the tokenizer so that it streams input instead of buffering the entire file in memory and also update the docs and the tests to match the new streaming behaviour without breaking the existing public api surface.")),
+            // A pane wide enough for opencode to paint its working-directory
+            // indicator to the RIGHT of the composer, on the same rows. Those
+            // cells are past the text column, so without bounding rows at the
+            // box's own edge they read as draft: an empty composer reports a
+            // draft, and a real one is glued to the chrome beside it.
+            (
+                "opencode",
+                "wide_pane_draft",
+                include_str!("../../tests/fixtures/pane_input/opencode/wide_pane_draft.ansi.txt"),
+                Some(Caret { row: 44, col: 23 }),
+                Expect::Draft("alpha line one\nbravo line two\ncharlie line three"),
+            ),
         ];
 
         let mut failures = Vec::new();
@@ -714,6 +811,85 @@ mod tests {
         assert_eq!(got, PaneInput::Draft("fix the parser bug".to_string()));
         if let PaneInput::Draft(draft) = got {
             assert!(!draft.contains('·'), "status line leaked in: {draft:?}");
+        }
+    }
+
+    #[test]
+    fn two_ordinary_lines_of_similar_length_are_not_read_as_one_wrapped_line() {
+        // The test for "this row ran off the edge" has to be proportional to
+        // the composer's width, or on a narrow pane every longish line merges
+        // with the next and the user's line breaks are lost on restore.
+        let line = "a".repeat(54);
+        let esc = "\u{1b}[39m";
+        let capture = format!("{esc}❯ {line}\n  {line}\n");
+        let shape = Shape::for_backend("claude").unwrap();
+        assert_eq!(
+            extract(shape, &capture, None, Some(80)),
+            PaneInput::Draft(format!("{line}\n{line}")),
+            "80-column pane: two 54-char lines are two lines"
+        );
+    }
+
+    #[test]
+    fn a_draft_that_scrolled_inside_the_box_is_never_restored_from_what_shows() {
+        // Only the tail is on screen; treating it as the whole draft and then
+        // clearing the box would throw the rest away.
+        let shape = Shape::for_backend("agy").unwrap();
+        for capture in [
+            "> \u{1b}[2m↑ 91 more lines\u{1b}[0m\n  the visible tail\n",
+            "> the visible head\n  ↑ 12 more lines\n",
+        ] {
+            assert!(
+                matches!(
+                    extract(shape, capture, None, Some(200)),
+                    PaneInput::Unknown(_)
+                ),
+                "a scrolled box must not be treated as a complete draft: {capture:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wide_character_row_falls_back_to_styling_rather_than_the_caret_column() {
+        // tmux counts the caret in cells; CJK is two cells per character, so
+        // using it as an index would cut the user's own text.
+        let shape = Shape::for_backend("claude").unwrap();
+        let capture = "\u{1b}[39m❯ 日本語のテキストです\n";
+        assert_eq!(
+            extract(shape, capture, Some(Caret { row: 0, col: 22 }), Some(200)),
+            PaneInput::Draft("日本語のテキストです".to_string())
+        );
+    }
+
+    #[test]
+    fn an_emptied_prompt_row_does_not_hide_the_lines_below_it() {
+        // `C-u` kills to the start of the line, so a user editing from the top
+        // of a draft empties the prompt row while the rest of the draft stays
+        // below. tmux strips that row's trailing space, so the column it
+        // implies collapses by one and every continuation row reads as chrome.
+        // Reporting that box as empty is what lets the surviving lines be
+        // typed into the event — past OMAR's own end-of-prompt sentinel.
+        let shape = Shape::for_backend("codex").unwrap();
+        let capture =
+            "\n\n\u{203a}\n  line two beta\n  line three gamma\n\n  gpt-5.5 medium \u{b7} ~/x\n";
+        assert_eq!(
+            extract(shape, capture, Some(Caret { row: 2, col: 2 }), Some(200)),
+            PaneInput::Draft("\nline two beta\nline three gamma".to_string())
+        );
+    }
+
+    #[test]
+    fn a_draft_taller_than_cursors_composer_is_never_reported_whole() {
+        // cursor shows six rows and scrolls with no marker at all — no arrow,
+        // no ellipsis. An eight-line draft looks exactly like a six-line one,
+        // so reporting a Draft here hands back the user's text with lines
+        // missing and then empties the box. This capture is a real pane: eight
+        // lines were pasted and only lines three to eight are on screen.
+        let shape = Shape::for_backend("cursor").unwrap();
+        let capture = include_str!("../../tests/fixtures/pane_input/cursor/scrolled8.ansi.txt");
+        match extract(shape, capture, None, Some(120)) {
+            PaneInput::Unknown(_) => {}
+            other => panic!("a scrolled composer must not be read as a draft: {other:?}"),
         }
     }
 

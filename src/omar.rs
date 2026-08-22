@@ -1,5 +1,6 @@
 mod app;
 mod backend_probe;
+mod channel;
 mod computer;
 mod config;
 mod diagram;
@@ -112,6 +113,16 @@ enum Commands {
     Kill {
         /// Name of the session to kill
         name: String,
+    },
+
+    /// Hand queued OMAR events to a backend hook (invoked by the backend).
+    ///
+    /// Reads the spool named by $OMAR_EVENT_SPOOL, empties it, and prints the
+    /// reply shape the backend expects on stdout.
+    HookDrain {
+        /// Which backend's hook contract to answer: cursor or agy.
+        #[arg(long)]
+        format: String,
     },
 
     /// Configure tmux for optimal omar experience
@@ -474,6 +485,24 @@ async fn async_main() -> Result<()> {
                     panel_ready: None,
                 },
             )
+        }
+        Some(Commands::HookDrain { format }) => {
+            // Always print valid JSON, even on misconfiguration: a hook that
+            // writes nothing reads as a failure to the backend.
+            // Check the format before touching the spool: draining first
+            // would destroy every queued event on a typo.
+            let reply = match channel::HookFormat::parse(&format) {
+                Some(hook) => {
+                    let events = std::env::var("OMAR_EVENT_SPOOL")
+                        .ok()
+                        .map(|spool| channel::drain_spool(std::path::Path::new(&spool)))
+                        .unwrap_or_default();
+                    hook.render(&events)
+                }
+                None => "{}".to_string(),
+            };
+            println!("{}", reply);
+            Ok(())
         }
         Some(Commands::StubAgent { context_file }) => stub_agent::run(&context_file),
         Some(Commands::Serve {

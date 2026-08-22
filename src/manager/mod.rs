@@ -119,7 +119,7 @@ fn sed_escape(s: &str) -> String {
         .replace('\'', "'\\''")
 }
 
-fn shell_single_quote(s: &str) -> String {
+pub(crate) fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -178,7 +178,9 @@ fn detect_backend_token(token: &str) -> Option<BackendKind> {
 
     match executable {
         "agy" => Some(BackendKind::Agy),
-        "claude" => Some(BackendKind::Claude),
+        // Homebrew ships Claude Code as a single-file executable named
+        // `claude.exe`, which is what the pane reports it is running.
+        "claude" | "claude.exe" => Some(BackendKind::Claude),
         "codex" => Some(BackendKind::Codex),
         "cursor" => Some(BackendKind::Cursor),
         "opencode" => Some(BackendKind::Opencode),
@@ -204,6 +206,36 @@ pub enum ManagerEnsureResult {
     Started,
     ReplacedBackend,
 }
+
+/// Give opencode a port so OMAR can reach it without the input box.
+///
+/// opencode only listens when it is told a port: with none it talks to an
+/// in-process worker over a fake hostname, and there is nothing to connect to.
+/// Nothing is broken if the port cannot be claimed — the pane simply launches
+/// without a side channel and events go through the composer.
+fn with_opencode_port(base_command: &str) -> String {
+    if base_command
+        .split_whitespace()
+        .any(|token| token == "--port" || token.starts_with("--port=") || token == "--hostname")
+    {
+        return base_command.to_string();
+    }
+    match crate::channel::free_port() {
+        Some(port) => format!("{} --port {}", base_command, port),
+        None => base_command.to_string(),
+    }
+}
+
+/// Let OMAR deliver events over Claude Code's cross-session peer socket.
+///
+/// Without this the session holds an inbound message behind an approval
+/// dialog — OMAR does not attest a permission mode, and an agent launched with
+/// `--dangerously-skip-permissions` distrusts a sender that has not. The dialog
+/// covers the composer, so the held message is worse than no channel at all.
+///
+/// `--settings` loads *additional* settings, so the operator's own settings
+/// files still apply.
+const CLAUDE_INBOUND_SETTINGS: &str = "--settings '{\"crossSessionInbound\":\"accept\"}'";
 
 fn ensure_codex_runtime_flags(base_command: &str) -> String {
     if detect_backend(base_command) != Some(BackendKind::Codex) {
@@ -793,13 +825,17 @@ pub fn build_agent_command(
         }
         Some(BackendKind::Claude) => match materialize_claude_mcp_config(mcp_context) {
             Some(mcp_config) => format!(
-                "{} --system-prompt \"{}\" --mcp-config {} --disallowedTools {}",
+                "{} --system-prompt \"{}\" --mcp-config {} --disallowedTools {} {}",
                 base_command,
                 shell_expr,
                 shell_single_quote(&mcp_config.display().to_string()),
-                shell_single_quote(&backend_native_disallowed_tools_csv())
+                shell_single_quote(&backend_native_disallowed_tools_csv()),
+                CLAUDE_INBOUND_SETTINGS
             ),
-            None => format!("{} --system-prompt \"{}\"", base_command, shell_expr),
+            None => format!(
+                "{} --system-prompt \"{}\" {}",
+                base_command, shell_expr, CLAUDE_INBOUND_SETTINGS
+            ),
         },
         Some(BackendKind::Codex) => {
             let mut cmd = format!(
@@ -845,13 +881,14 @@ pub fn build_agent_command(
             // descriptively and ask back "What is your agent name?" etc.
             // Spawn opencode bare and let `spawn_worker` deliver the prompt
             // via tmux as a single combined first user message.
+            let base_command = with_opencode_port(&base_command);
             match opencode_config_env(mcp_context) {
                 Some(config) => format!(
                     "OPENCODE_CONFIG_CONTENT={} {}",
                     shell_single_quote(&config),
                     base_command
                 ),
-                None => base_command.to_string(),
+                None => base_command,
             }
         }
         None => base_command.to_string(),
@@ -936,16 +973,18 @@ pub fn build_ea_command(
             let base_command = ensure_codex_runtime_flags(base_command);
             let cmd = match materialize_claude_mcp_config(mcp_context) {
                 Some(mcp_config) => format!(
-                    "{} --system-prompt-file {} --mcp-config {} --disallowedTools {}",
+                    "{} --system-prompt-file {} --mcp-config {} --disallowedTools {} {}",
                     base_command,
                     shell_single_quote(&combined_path.display().to_string()),
                     shell_single_quote(&mcp_config.display().to_string()),
-                    shell_single_quote(&backend_native_disallowed_tools_csv())
+                    shell_single_quote(&backend_native_disallowed_tools_csv()),
+                    CLAUDE_INBOUND_SETTINGS
                 ),
                 None => format!(
-                    "{} --system-prompt-file {}",
+                    "{} --system-prompt-file {} {}",
                     base_command,
-                    shell_single_quote(&combined_path.display().to_string())
+                    shell_single_quote(&combined_path.display().to_string()),
+                    CLAUDE_INBOUND_SETTINGS
                 ),
             };
             (cmd, None)
@@ -1584,6 +1623,67 @@ mod tests {
     }
 
     #[test]
+    fn a_claude_session_accepts_events_from_omar_over_its_peer_socket() {
+        // Without this the session holds OMAR's messages behind an approval
+        // dialog that covers the composer, and no event is ever delivered.
+        let dir = tempfile::tempdir().unwrap();
+        for base in ["claude --dangerously-skip-permissions", "claude"] {
+            let cmd = build_agent_command(
+                base,
+                Path::new("/tmp/prompts/ea.md"),
+                &[],
+                &test_mcp_context(dir.path()),
+            );
+            assert!(
+                cmd.contains(r#"--settings '{"crossSessionInbound":"accept"}'"#),
+                "claude must opt in to inbound peer messages: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ea_pane_accepts_events_from_omar_too() {
+        // The EA manager is the most common receiver of scheduled events, and
+        // it is built by a different function than the worker panes.
+        let dir = tempfile::tempdir().unwrap();
+        let (cmd, _) = build_ea_command(
+            "claude --dangerously-skip-permissions",
+            1,
+            "ea-one",
+            Path::new("/tmp/prompts/ea.md"),
+            &test_mcp_context(dir.path()),
+        );
+        assert!(
+            cmd.contains(r#"--settings '{"crossSessionInbound":"accept"}'"#),
+            "the EA pane must opt in to inbound peer messages: {cmd}"
+        );
+    }
+
+    #[test]
+    fn only_claude_is_told_about_inbound_peer_messages() {
+        // The flag is Claude Code's; handing it to another backend would be an
+        // unrecognised argument at launch.
+        let dir = tempfile::tempdir().unwrap();
+        for base in [
+            "codex --no-alt-screen",
+            "opencode",
+            "cursor agent --yolo",
+            "agy --dangerously-skip-permissions",
+        ] {
+            let cmd = build_agent_command(
+                base,
+                Path::new("/tmp/prompts/ea.md"),
+                &[],
+                &test_mcp_context(dir.path()),
+            );
+            assert!(
+                !cmd.contains("crossSessionInbound"),
+                "{base} must not receive a Claude-only flag: {cmd}"
+            );
+        }
+    }
+
+    #[test]
     fn test_build_agent_command_codex() {
         let dir = tempfile::tempdir().unwrap();
         let cmd = build_agent_command(
@@ -1784,9 +1884,37 @@ mod tests {
         // Subagent-dispatcher overlap with OMAR's spawn_agent.
         assert!(cmd.contains("\"Task\":false"));
         assert!(cmd.contains("\"dispatch_agent\":false"));
-        // opencode is spawned bare; the prompt is delivered via tmux after spawn.
+        // The prompt is still delivered via tmux after spawn, not as a flag.
         assert!(!cmd.contains("--prompt"));
-        assert!(cmd.trim_end().ends_with(" opencode"));
+        // ... but opencode is told a port, which is the only way it listens at
+        // all — without one it talks to an in-process worker OMAR cannot reach.
+        let port = cmd
+            .split_whitespace()
+            .skip_while(|token| *token != "--port")
+            .nth(1)
+            .expect("opencode must be given a port");
+        assert!(
+            port.parse::<u16>().is_ok_and(|port| port > 0),
+            "port must be a real number: {port}"
+        );
+    }
+
+    #[test]
+    fn an_operators_own_opencode_port_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        for base in ["opencode --port 4096", "opencode --hostname 0.0.0.0"] {
+            let cmd = build_agent_command(
+                base,
+                Path::new("/tmp/prompts/ea.md"),
+                &[],
+                &test_mcp_context(dir.path()),
+            );
+            assert_eq!(
+                cmd.matches("--port").count(),
+                usize::from(base.contains("--port")),
+                "must not add a second port to {base}: {cmd}"
+            );
+        }
     }
 
     #[test]

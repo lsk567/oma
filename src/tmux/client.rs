@@ -112,6 +112,9 @@ const AGENT_ROWS: &str = "50";
 /// Session-environment key holding the backend a session was launched with.
 const SESSION_BACKEND_VAR: &str = "OMAR_BACKEND";
 
+/// Session-environment key describing the backend's side channel, if it has one.
+const SESSION_DELIVERY_VAR: &str = "OMAR_DELIVERY";
+
 #[derive(Debug, Clone)]
 pub struct TmuxClient {
     prefix: String,
@@ -747,9 +750,33 @@ impl TmuxClient {
             args.extend(["-c", dir]);
         }
 
+        // cursor-agent takes no message from outside, but it runs hooks that
+        // can hand context to the model. Point this pane at its own spool so
+        // the hook knows whose events to collect.
+        let backend = crate::manager::command_backend_name(command);
+        let hooked = match backend {
+            Some("cursor") => crate::channel::install_cursor_hook(),
+            Some("agy") => crate::channel::install_antigravity_hook(),
+            _ => false,
+        };
+        let spool = hooked.then(|| {
+            crate::channel::reset_spool(name);
+            crate::channel::spool_path(name)
+        });
+
         // Execute the provided command through a shell so the full string is
         // interpreted consistently (including quoted args and shell metacharacters)
         // instead of relying on tmux's shell-command parser heuristics.
+        let command = match &spool {
+            // Quoted: a space anywhere in the path would otherwise split the
+            // assignment and take the rest of the launch line with it.
+            Some(path) => &format!(
+                "OMAR_EVENT_SPOOL={} {}",
+                crate::manager::shell_single_quote(&path.display().to_string()),
+                command
+            ),
+            None => command,
+        };
         args.extend(["sh", "-lc", command]);
         self.run(&args)?;
         self.run(&["set-option", "-t", name, "history-limit", "10000"])?;
@@ -757,9 +784,15 @@ impl TmuxClient {
         // later needs to know reads it back instead of guessing from the pane,
         // which cannot be done reliably: `#{pane_current_command}` is `node`
         // for any npm-installed backend, and banner text scrolls away.
-        if let Some(backend) = crate::manager::command_backend_name(command) {
+        if let Some(backend) = backend {
             let _ = self.set_session_backend(name, backend);
         }
+        if let Some(spool) = &spool {
+            let _ = self.set_session_delivery(name, &format!("spool:{}", spool.display()));
+        }
+        // Some backends only offer a side channel once they are up and have
+        // been given a session to talk about. That happens off the launch path.
+        crate::channel::provision_in_background(backend, name.to_string(), command.to_string());
         Ok(())
     }
 
@@ -776,22 +809,40 @@ impl TmuxClient {
         Ok(())
     }
 
+    /// Read one variable out of a session's own environment.
+    pub fn session_env(&self, name: &str, var: &str) -> Option<String> {
+        let target = exact_session_target(name);
+        let output = self.run(&["show-environment", "-t", &target, var]).ok()?;
+        let value = output.trim().strip_prefix(&format!("{}=", var))?;
+        (!value.is_empty()).then(|| value.to_string())
+    }
+
+    /// Record how events reach this session's backend without the input box.
+    /// See `crate::channel` for the format.
+    pub fn set_session_delivery(&self, name: &str, stamp: &str) -> Result<()> {
+        let target = exact_session_target(name);
+        self.run(&[
+            "set-environment",
+            "-t",
+            &target,
+            SESSION_DELIVERY_VAR,
+            stamp,
+        ])?;
+        Ok(())
+    }
+
+    pub fn session_delivery(&self, name: &str) -> Option<String> {
+        self.session_env(name, SESSION_DELIVERY_VAR)
+    }
+
     /// Which backend is running in this session.
     ///
     /// Prefers the stamp written at launch. Falls back to the pane command and
     /// then to the pane process's full argv, so sessions started by an older
     /// OMAR — or attached by hand — are still identified when they can be.
     pub fn session_backend(&self, name: &str) -> Option<String> {
-        let target = exact_session_target(name);
-        if let Ok(output) = self.run(&["show-environment", "-t", &target, SESSION_BACKEND_VAR]) {
-            if let Some(value) = output
-                .trim()
-                .strip_prefix(&format!("{}=", SESSION_BACKEND_VAR))
-            {
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
-            }
+        if let Some(value) = self.session_env(name, SESSION_BACKEND_VAR) {
+            return Some(value);
         }
 
         self.get_pane_command(name)
