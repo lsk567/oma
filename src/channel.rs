@@ -536,8 +536,21 @@ impl CodexSession {
         stream.set_read_timeout(Some(WRITE_TIMEOUT))?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
 
-        let (socket, _) = tungstenite::client("ws://localhost/", stream)
-            .map_err(|error| anyhow::anyhow!("websocket upgrade failed: {error}"))?;
+        let (socket, _) = tungstenite::client("ws://localhost/", stream).map_err(|error| {
+            match error {
+                // The read timeout set above surfaces as WouldBlock, which
+                // tungstenite renders as a bare "Interrupted handshake" —
+                // say what actually ran out, since provisioning retries this
+                // for 90s and every line would otherwise read the same.
+                tungstenite::HandshakeError::Interrupted(_) => anyhow::anyhow!(
+                    "app-server did not answer the websocket upgrade within {}s",
+                    WRITE_TIMEOUT.as_secs()
+                ),
+                tungstenite::HandshakeError::Failure(error) => {
+                    anyhow::anyhow!("websocket upgrade failed: {error}")
+                }
+            }
+        })?;
 
         let mut session = CodexSession { socket, next_id: 1 };
         session
@@ -1272,6 +1285,32 @@ mod tests {
         }
         .deliver("standup in 5")
         .is_err());
+    }
+
+    /// Provisioning retries `open` for 90s, so a bare "Interrupted handshake"
+    /// would be 90s of identical lines that name neither the socket nor the
+    /// timeout that produced them.
+    #[test]
+    fn a_silent_app_server_names_the_timeout_rather_than_the_symptom() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("mute.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        // Accept, then say nothing: the upgrade waits out the read timeout.
+        let server = std::thread::spawn(move || {
+            let held = listener.accept();
+            std::thread::sleep(WRITE_TIMEOUT + Duration::from_secs(1));
+            drop(held);
+        });
+
+        let error = Channel::CodexAppServer { socket }
+            .deliver("standup in 5")
+            .expect_err("a server that never answers cannot take a delivery");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("did not answer the websocket upgrade"),
+            "want the timeout named, got: {error}"
+        );
+        server.join().unwrap();
     }
 
     #[test]
