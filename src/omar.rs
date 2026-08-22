@@ -392,7 +392,10 @@ async fn async_main() -> Result<()> {
                 TmuxClient::new(ea::ea_prefix(target.id, &config.dashboard.session_prefix));
             // A deployment record wins the name: a team and an agent session
             // rarely collide, and the record is the more deliberate target.
-            if deploy::record_path(&deployment_dir(&omar_dir, target.id, &name)).exists() {
+            let deployment = deployment_dir(&omar_dir, target.id, &name)
+                .map(|dir| deploy::record_path(&dir).exists())
+                .unwrap_or(false);
+            if deployment {
                 kill_deployment(&omar_dir, target.id, &client, &name)
             } else {
                 kill_agent(
@@ -726,16 +729,27 @@ fn now_ns() -> u64 {
 }
 
 /// Where a team's deployment record and artifacts live.
-fn deployment_dir(omar_dir: &std::path::Path, ea_id: ea::EaId, team: &str) -> PathBuf {
-    ea::ea_state_dir(ea_id, omar_dir)
+/// Checked, not trusted: the name comes off the command line, and
+/// `PathBuf::join` treats an absolute path as a replacement rather than a
+/// suffix -- so `/tmp/x` would name a directory outside the EA entirely, and
+/// the record found there decides which pid gets killed.
+///
+/// The rule is the compiler's own. `verify` refuses any bytecode whose team is
+/// not an identifier, so a name rejected here could never have been deployed
+/// and has no record to act on.
+fn deployment_dir(omar_dir: &std::path::Path, ea_id: ea::EaId, team: &str) -> Result<PathBuf> {
+    if !topology::valid_identifier(team) {
+        anyhow::bail!("invalid team name '{team}'");
+    }
+    Ok(ea::ea_state_dir(ea_id, omar_dir)
         .join("topologies")
-        .join(team)
+        .join(team))
 }
 
 /// Ask the runner to stop, then wait, bounded by the run's own invocation
 /// timeout: the longest a tag may take to close once the stop is seen.
 fn stop_deployment(omar_dir: &std::path::Path, ea_id: ea::EaId, team: &str) -> Result<()> {
-    let dir = deployment_dir(omar_dir, ea_id, team);
+    let dir = deployment_dir(omar_dir, ea_id, team)?;
     let record = deploy::DeploymentRecord::load(&dir)?
         .ok_or_else(|| anyhow::anyhow!("no deployment '{}'", team))?;
     if record.state.is_terminal() {
@@ -783,7 +797,7 @@ fn stop_deployment(omar_dir: &std::path::Path, ea_id: ea::EaId, team: &str) -> R
 /// Report a deployment's state. A record claiming to run under a dead pid is
 /// healed to FAILED here: nobody else is left to write the ending.
 fn status_deployment(omar_dir: &std::path::Path, ea_id: ea::EaId, team: &str) -> Result<()> {
-    let dir = deployment_dir(omar_dir, ea_id, team);
+    let dir = deployment_dir(omar_dir, ea_id, team)?;
     let mut record = deploy::DeploymentRecord::load(&dir)?
         .ok_or_else(|| anyhow::anyhow!("no deployment '{}'", team))?;
     if record.is_active() && !record.runner_alive() {
@@ -821,13 +835,13 @@ fn kill_deployment(
     client: &TmuxClient,
     team: &str,
 ) -> Result<()> {
-    let dir = deployment_dir(omar_dir, ea_id, team);
+    let dir = deployment_dir(omar_dir, ea_id, team)?;
     let mut record = deploy::DeploymentRecord::load(&dir)?
         .ok_or_else(|| anyhow::anyhow!("no deployment '{}'", team))?;
     if record.pid != std::process::id() && record.runner_alive() {
         deploy::kill_process(record.pid);
         let waited = std::time::Instant::now();
-        while deploy::process_alive(record.pid) && waited.elapsed() < Duration::from_secs(5) {
+        while crate::process::pid_alive(record.pid) && waited.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
@@ -2152,6 +2166,33 @@ mod tests {
             std::fs::read_to_string(&manager_notes[0]).unwrap(),
             "manager notes\n"
         );
+    }
+
+    /// A deployment name that is not a team name names nothing.
+    ///
+    /// `PathBuf::join` treats an absolute path as a replacement rather than a
+    /// suffix, so without this `omar status /tmp/x` reads a record from outside
+    /// the EA directory -- and `omar kill` would take the pid it found there at
+    /// its word.
+    #[test]
+    fn a_deployment_path_cannot_leave_the_ea_directory() {
+        let omar_dir = std::path::Path::new("/home/someone/.omar");
+        let ea_id = ea::EaId::default();
+
+        for escape in ["/tmp/x", "../../etc", "a/b", "", ".", ".."] {
+            assert!(
+                deployment_dir(omar_dir, ea_id, escape).is_err(),
+                "'{escape}' should not name a deployment"
+            );
+        }
+
+        // And a real team name still resolves, under the EA where it belongs.
+        let dir = deployment_dir(omar_dir, ea_id, "Cadence").expect("a team name resolves");
+        assert!(
+            dir.starts_with(ea::ea_state_dir(ea_id, omar_dir)),
+            "{dir:?}"
+        );
+        assert!(dir.ends_with("topologies/Cadence"), "{dir:?}");
     }
 
     #[cfg(target_os = "macos")]

@@ -150,7 +150,7 @@ impl DeploymentRecord {
     }
 
     pub fn runner_alive(&self) -> bool {
-        process_alive(self.pid)
+        crate::process::pid_alive(self.pid)
     }
 }
 
@@ -197,16 +197,6 @@ pub fn clear_stop(dir: &Path) -> Result<()> {
             .with_context(|| format!("failed to remove {}", path.display()))?;
     }
     Ok(())
-}
-
-pub fn process_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
 }
 
 pub fn kill_process(pid: u32) {
