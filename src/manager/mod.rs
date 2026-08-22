@@ -2159,6 +2159,84 @@ mod tests {
         assert!(cmd.contains("-c features.scheduled_tasks=false"));
     }
 
+    /// Both launch paths now splice in the same generated fragment, so run
+    /// the shell rather than spell-check it: the assertions elsewhere are
+    /// `contains`, and those pass just as happily on a fragment `sh` rejects.
+    #[test]
+    fn the_trust_record_is_written_once_however_odd_the_directory_name() {
+        // The two characters the `sed` escapes, in the name it has to survive.
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("wei\"rd\\dir");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let home = dir.path().join("codex-home");
+
+        let run = || {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(codex_trust_cwd())
+                .current_dir(&cwd)
+                .env("CODEX_HOME", &home)
+                .output()
+                .expect("run the trust shell");
+            assert!(
+                out.status.success(),
+                "the trust shell failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run();
+        run();
+
+        let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let real = std::fs::canonicalize(&cwd).unwrap().display().to_string();
+        let want = format!(
+            "[projects.\"{}\"]",
+            real.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+        assert_eq!(
+            config.matches(&want).count(),
+            1,
+            "written once, and recognised by the second run: {config}"
+        );
+        assert!(config.contains("trust_level = \"trusted\""));
+    }
+
+    /// The dedup joined two strings; a missing separator is a launch that
+    /// never reaches codex, and no `contains` assertion would notice.
+    #[test]
+    fn a_provisioning_launch_is_valid_shell() {
+        let out = std::process::Command::new("sh")
+            .args(["-n", "-c", ""])
+            .output()
+            .expect("sh -n");
+        assert!(out.status.success(), "sh cannot syntax-check");
+
+        let cmd = codex_home_command(Path::new("/tmp/omar-home"), "codex --no-alt-screen");
+        let checked = std::process::Command::new("sh")
+            .arg("-n")
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.take().unwrap().write_all(cmd.as_bytes())?;
+                child.wait_with_output()
+            })
+            .expect("syntax-check the launch command");
+        assert!(
+            checked.status.success(),
+            "generated launch is not valid shell: {}\n{}",
+            String::from_utf8_lossy(&checked.stderr),
+            cmd
+        );
+        // Syntax alone does not catch a lost separator: the append would just
+        // redirect into `config.tomlcodex` and `sh -n` would still be happy.
+        assert!(
+            cmd.contains("; codex app-server"),
+            "the trust fragment must end in a separator: {cmd}"
+        );
+    }
+
     #[test]
     fn a_codex_that_will_not_attach_is_launched_the_old_way() {
         // `spawn_agent` adds `-c model_reasoning_effort=…` for any agent given
