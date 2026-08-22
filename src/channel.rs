@@ -43,6 +43,11 @@ pub enum Channel {
     /// model but not rendered in the transcript, and `noReply` seats it
     /// without starting a turn.
     OpencodeHttp { port: u16, session: String },
+    /// codex's app-server. `thread/inject_items` appends to the thread the
+    /// pane's TUI is showing without starting a turn and without drawing
+    /// anything, so the agent reads the event on its next turn and the
+    /// composer never moves.
+    CodexAppServer { socket: PathBuf },
     /// A file the backend's own hook drains into model context.
     ///
     /// cursor-agent and antigravity take no message from outside, but both run
@@ -148,6 +153,14 @@ impl Channel {
                     return None;
                 }
             }
+            // A pane that has exited takes its app-server with it. Answering
+            // with a channel whose socket is gone only costs the caller a
+            // round trip before it falls back.
+            if let Channel::CodexAppServer { socket } = &channel {
+                if !socket.exists() {
+                    return None;
+                }
+            }
             return Some(channel);
         }
         match backend {
@@ -174,6 +187,9 @@ impl Channel {
             }
             "spool" => (!rest.is_empty()).then(|| Channel::Spool {
                 path: PathBuf::from(rest),
+            }),
+            "codex" => (!rest.is_empty()).then(|| Channel::CodexAppServer {
+                socket: PathBuf::from(rest),
             }),
             _ => None,
         }
@@ -210,6 +226,11 @@ impl Channel {
                 }
                 Ok(())
             }
+            Channel::CodexAppServer { socket } => {
+                let mut session = CodexSession::open(socket)?;
+                let thread = session.only_thread()?;
+                session.inject(&thread, text)
+            }
             Channel::Spool { path } => {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).context("create spool directory")?;
@@ -230,6 +251,7 @@ impl Channel {
         match self {
             Channel::ClaudePeer { .. } => "claude peer socket",
             Channel::OpencodeHttp { .. } => "opencode http api",
+            Channel::CodexAppServer { .. } => "codex app-server",
             Channel::Spool { .. } => "hook spool",
         }
     }
@@ -409,17 +431,263 @@ pub fn provision_in_background(backend: Option<&str>, session: String, command: 
     // launched with a `--port`, and polling one of those for 90 seconds — then
     // stamping whatever answered as a delivery channel — would be worse than
     // having no channel at all.
-    if backend != Some("opencode") {
-        return;
-    }
-    let Some(port) = opencode_port(&command) else {
-        return;
+    let stamped: Box<dyn FnOnce() -> Option<String> + Send> = match backend {
+        Some("opencode") => match opencode_port(&command) {
+            Some(port) => Box::new(move || provision_opencode(port)),
+            None => return,
+        },
+        Some("codex") => match codex_home(&command) {
+            Some(home) => {
+                // Which pane this home belongs to, so a later launch can tell
+                // that it is finished and reclaim the disk.
+                crate::manager::claim_codex_home(&home, &session);
+                Box::new(move || provision_codex(&home))
+            }
+            None => return,
+        },
+        _ => return,
     };
     std::thread::spawn(move || {
-        if let Some(stamp) = provision_opencode(port) {
+        if let Some(stamp) = stamped() {
             let _ = crate::tmux::TmuxClient::new("").set_session_delivery(&session, &stamp);
         }
     });
+}
+
+/// `export CODEX_HOME='<dir>'` as it appears in a launch command.
+///
+/// The launch command is where OMAR records which per-pane codex home this
+/// pane was given, the same way `--port` records opencode's port.
+///
+/// The value is read back through the quoting `shell_single_quote` put on it,
+/// rather than split on whitespace: an operator whose home directory has a
+/// space in it is ordinary, and half a path here is worse than none. A path
+/// that does not come back whole yields `None`, so provisioning is skipped and
+/// the pane falls back to the input box.
+pub(crate) fn codex_home(command: &str) -> Option<PathBuf> {
+    let assignment = command.split_once("export CODEX_HOME=")?.1;
+    let dir = unquote_single(assignment)?;
+    (!dir.is_empty()).then(|| PathBuf::from(dir))
+}
+
+/// Undo `shell_single_quote`: read one `'...'` word, in which a literal quote
+/// appears as `'\''`.
+fn unquote_single(text: &str) -> Option<String> {
+    let mut rest = text.strip_prefix('\'')?;
+    let mut out = String::new();
+    loop {
+        let (chunk, tail) = rest.split_once('\'')?;
+        out.push_str(chunk);
+        match tail.strip_prefix("\\''") {
+            // An escaped quote: the word continues.
+            Some(tail) => {
+                out.push('\'');
+                rest = tail;
+            }
+            // Anything else closes the word.
+            None => return Some(out),
+        }
+    }
+}
+
+/// Where a codex home's app-server listens.
+pub fn codex_socket_path(home: &Path) -> PathBuf {
+    home.join("app-server-control")
+        .join("app-server-control.sock")
+}
+
+/// Wait for a pane's app-server to come up with the TUI attached to it.
+///
+/// The socket file appears before the server is answering, and the server
+/// answers before the TUI has opened its thread — an empty thread list is the
+/// signal that the pane is not attached yet, so both are waited out here.
+fn provision_codex(home: &Path) -> Option<String> {
+    let socket = codex_socket_path(home);
+    let deadline = std::time::Instant::now() + PROVISION_TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        if socket.exists()
+            && CodexSession::open(&socket)
+                .and_then(|mut session| session.only_thread())
+                .is_ok()
+        {
+            return Some(format!("codex:{}", socket.display()));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    None
+}
+
+/// The RFC 6455 example nonce.
+///
+/// The server's `Sec-WebSocket-Accept` is derived from this and we do not
+/// check it — there is no proxy or cache between two ends of a Unix socket to
+/// confuse — so a constant keeps the request a fixed string.
+const WS_NONCE: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+
+/// A JSON-RPC conversation with a codex app-server.
+///
+/// The transport is a WebSocket over a Unix socket. The upgrade request is
+/// written by hand rather than through `tungstenite::connect`, which is behind
+/// a feature this crate's own manifest turns off and which only speaks in
+/// terms of URLs — `src/serve.rs` answers the server half the same way.
+struct CodexSession {
+    socket: tungstenite::WebSocket<UnixStream>,
+    next_id: u64,
+}
+
+impl CodexSession {
+    /// Connect, upgrade, and complete the app-server's opening handshake.
+    fn open(path: &Path) -> Result<CodexSession> {
+        let mut stream =
+            UnixStream::connect(path).with_context(|| format!("connect to {}", path.display()))?;
+        stream.set_read_timeout(Some(WRITE_TIMEOUT))?;
+        stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        stream
+            .write_all(
+                format!(
+                    "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+                     Connection: Upgrade\r\nSec-WebSocket-Key: {}\r\n\
+                     Sec-WebSocket-Version: 13\r\n\r\n",
+                    WS_NONCE
+                )
+                .as_bytes(),
+            )
+            .context("send websocket upgrade")?;
+        stream.flush()?;
+
+        // One byte at a time so nothing past the header is swallowed — the
+        // first data frame may already be in the same read.
+        let mut header = Vec::new();
+        let mut byte = [0u8; 1];
+        while !header.ends_with(b"\r\n\r\n") {
+            if std::io::Read::read(&mut stream, &mut byte).context("read upgrade response")? == 0 {
+                anyhow::bail!("app-server closed during the upgrade");
+            }
+            header.push(byte[0]);
+            if header.len() > 4096 {
+                anyhow::bail!("app-server sent no upgrade response");
+            }
+        }
+        let header = String::from_utf8_lossy(&header);
+        if !header.starts_with("HTTP/1.1 101") {
+            anyhow::bail!(
+                "app-server refused the upgrade: {}",
+                header.lines().next().unwrap_or_default()
+            );
+        }
+
+        let mut session = CodexSession {
+            socket: tungstenite::WebSocket::from_raw_socket(
+                stream,
+                tungstenite::protocol::Role::Client,
+                None,
+            ),
+            next_id: 1,
+        };
+        session
+            .call(
+                "initialize",
+                serde_json::json!({
+                    "clientInfo": {
+                        "name": "omar",
+                        "title": "omar",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    }
+                }),
+            )
+            .context("initialize the app-server session")?;
+        session.notify("initialized")?;
+        Ok(session)
+    }
+
+    fn send(&mut self, message: serde_json::Value) -> Result<()> {
+        self.socket
+            .send(tungstenite::Message::Text(message.to_string()))
+            .context("write to the app-server")
+    }
+
+    fn notify(&mut self, method: &str) -> Result<()> {
+        self.send(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": {},
+        }))
+    }
+
+    /// Send a request and read until its answer arrives.
+    ///
+    /// The server pushes notifications of its own down the same socket, so a
+    /// reply is found by id rather than by being the next message.
+    fn call(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }))?;
+
+        loop {
+            let message = self.socket.read().context("read from the app-server")?;
+            let tungstenite::Message::Text(body) = message else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+                continue;
+            };
+            if value.get("id").and_then(serde_json::Value::as_u64) != Some(id) {
+                continue;
+            }
+            if let Some(error) = value.get("error") {
+                anyhow::bail!("{} failed: {}", method, error);
+            }
+            return Ok(value.get("result").cloned().unwrap_or_default());
+        }
+    }
+
+    /// The thread the pane is showing, when that is unambiguous.
+    fn only_thread(&mut self) -> Result<String> {
+        let listed = self.call("thread/loaded/list", serde_json::json!({}))?;
+        only_thread(&listed).context("the pane has no single loaded thread to inject into")
+    }
+
+    /// Append the event to a thread without starting a turn.
+    fn inject(&mut self, thread: &str, text: &str) -> Result<()> {
+        self.call(
+            "thread/inject_items",
+            serde_json::json!({
+                "threadId": thread,
+                "items": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": text }],
+                }],
+            }),
+        )?;
+        Ok(())
+    }
+}
+
+/// The thread an event belongs in, out of a `thread/loaded/list` reply — and
+/// only when there is no doubt which that is.
+///
+/// The app-server will say which threads a pane has loaded but not which one
+/// it is showing, and neither creation order nor activity separates them:
+/// `/new` leaves the old thread loaded under a newer id, and `/resume` puts
+/// the pane back on an *older* id while the abandoned new one stays loaded. A
+/// guess that lands on the thread the user has moved on from is delivered,
+/// acknowledged, and never read.
+///
+/// So OMAR only claims a channel it is sure of. More than one loaded thread
+/// means no channel, and delivery goes back through the input box — which
+/// since the draft is protected is a working path, not a failure.
+fn only_thread(listed: &serde_json::Value) -> Option<String> {
+    let threads = listed.get("data")?.as_array()?;
+    match threads.as_slice() {
+        [only] => only.as_str().map(str::to_string),
+        _ => None,
+    }
 }
 
 /// `--port N` as it appears in a launch command.
@@ -936,6 +1204,259 @@ mod tests {
         }
     }
 
+    /// Play the app-server's half of one delivery and report what it was
+    /// asked, so the framing is checked against a real socket rather than a
+    /// string.
+    fn fake_app_server(listener: UnixListener, threads: Vec<&'static str>) -> Vec<String> {
+        let (mut stream, _) = listener.accept().unwrap();
+
+        let mut header = Vec::new();
+        let mut byte = [0u8; 1];
+        while !header.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+        }
+        let request = String::from_utf8_lossy(&header).into_owned();
+        let key = request
+            .lines()
+            .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+            .expect("a websocket upgrade");
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                     Connection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+                    tungstenite::handshake::derive_accept_key(key.trim().as_bytes())
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+
+        let mut socket = tungstenite::WebSocket::from_raw_socket(
+            stream,
+            tungstenite::protocol::Role::Server,
+            None,
+        );
+        let answer = |socket: &mut tungstenite::WebSocket<UnixStream>,
+                      request: &serde_json::Value,
+                      result: serde_json::Value| {
+            let reply = serde_json::json!({ "id": request["id"], "result": result });
+            socket
+                .send(tungstenite::Message::Text(reply.to_string()))
+                .unwrap();
+        };
+
+        let mut asked = Vec::new();
+        loop {
+            let tungstenite::Message::Text(body) = socket.read().unwrap() else {
+                continue;
+            };
+            asked.push(body.clone());
+            let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+            match request["method"].as_str().unwrap_or_default() {
+                "initialize" => {
+                    // The server talks unprompted; a reply is found by id, not
+                    // by being the next thing to arrive.
+                    socket
+                        .send(tungstenite::Message::Text(
+                            serde_json::json!({
+                                "method": "remoteControl/status/changed",
+                                "params": { "status": "disabled" },
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap();
+                    answer(
+                        &mut socket,
+                        &request,
+                        serde_json::json!({ "userAgent": "codex-tui/0.147.0" }),
+                    );
+                }
+                "thread/loaded/list" => answer(
+                    &mut socket,
+                    &request,
+                    serde_json::json!({ "data": threads, "nextCursor": null }),
+                ),
+                "thread/inject_items" => {
+                    answer(&mut socket, &request, serde_json::json!({}));
+                    return asked;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn an_event_reaches_codex_as_an_injected_item_over_the_app_server_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("app-server-control.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            fake_app_server(listener, vec!["01a02051-f65b-7260-9afe-13ffe5229bf6"])
+        });
+
+        Channel::CodexAppServer {
+            socket: socket.clone(),
+        }
+        .deliver("CI went red on main")
+        .expect("deliver over the app-server");
+
+        let asked: Vec<serde_json::Value> = server
+            .join()
+            .unwrap()
+            .iter()
+            .map(|body| serde_json::from_str(body).unwrap())
+            .collect();
+        let methods: Vec<&str> = asked
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            methods,
+            vec![
+                "initialize",
+                "initialized",
+                "thread/loaded/list",
+                "thread/inject_items"
+            ]
+        );
+
+        let inject = asked.last().unwrap();
+        assert_eq!(
+            inject["params"]["threadId"], "01a02051-f65b-7260-9afe-13ffe5229bf6",
+            "the event belongs in the thread the pane is showing"
+        );
+        let item = &inject["params"]["items"][0];
+        assert_eq!(item["role"], "user");
+        assert_eq!(item["content"][0]["text"], "CI went red on main");
+        // Every request is JSON-RPC; a notification carries no id.
+        assert_eq!(asked[1].get("id"), None);
+    }
+
+    #[test]
+    fn a_dead_app_server_is_a_failed_delivery_rather_than_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Channel::CodexAppServer {
+            socket: dir.path().join("gone.sock"),
+        }
+        .deliver("standup in 5")
+        .is_err());
+    }
+
+    #[test]
+    fn a_codex_stamp_names_the_socket_to_inject_through() {
+        assert_eq!(
+            Channel::from_stamp("codex:/Users/ke/.omar/codex/ab12/app.sock"),
+            Some(Channel::CodexAppServer {
+                socket: PathBuf::from("/Users/ke/.omar/codex/ab12/app.sock")
+            })
+        );
+        assert_eq!(Channel::from_stamp("codex:"), None);
+    }
+
+    #[test]
+    fn a_codex_home_is_read_back_out_of_a_launch_command() {
+        assert_eq!(
+            codex_home("export CODEX_HOME='/Users/ke/.omar/codex/ab12'; codex --no-alt-screen"),
+            Some(PathBuf::from("/Users/ke/.omar/codex/ab12"))
+        );
+        assert_eq!(codex_home("codex --no-alt-screen"), None);
+        assert_eq!(codex_home("export CODEX_HOME=''; codex"), None);
+    }
+
+    #[test]
+    fn a_home_under_a_directory_with_a_space_comes_back_whole() {
+        // Read back through the quoting rather than split on whitespace. Half
+        // a path parses as a plausible home, and provisioning would then claim
+        // and poll somewhere the pane never was — while the pane's real home,
+        // never claimed, ages into the prune.
+        for home in [
+            "/Users/ke/My Home/.omar/codex/ab12",
+            "/Users/ke/it's mine/.omar/codex/ab12",
+            "/Users/ke/two  spaces/ab12",
+        ] {
+            let command = format!(
+                "export CODEX_HOME={}; codex app-server --listen unix://",
+                crate::manager::shell_single_quote(home)
+            );
+            assert_eq!(
+                codex_home(&command),
+                Some(PathBuf::from(home)),
+                "in {command}"
+            );
+        }
+        // A word that never closes is not a path worth guessing at.
+        assert_eq!(
+            codex_home("export CODEX_HOME='/Users/ke/unterminated"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_event_goes_only_to_a_thread_there_is_no_doubt_about() {
+        let listed = serde_json::json!({ "data": ["01a0204b-f2e8-73e3-b95a-09abf7616b22"], "nextCursor": null });
+        assert_eq!(
+            only_thread(&listed).as_deref(),
+            Some("01a0204b-f2e8-73e3-b95a-09abf7616b22")
+        );
+
+        // Two loaded threads and the app-server will not say which the pane is
+        // showing. Creation order does not settle it: `/new` moves the pane to
+        // the newer id, `/resume` moves it back to the older one while the
+        // abandoned new thread stays loaded. Guessing wrong is delivered,
+        // acknowledged, and never read — so OMAR declines and the event goes
+        // through the input box instead.
+        let ambiguous = serde_json::json!({
+            "data": ["01a0204b-f2e8-73e3-b95a-09abf7616b22", "01a02051-f65b-7260-9afe-13ffe5229bf6"],
+        });
+        assert_eq!(only_thread(&ambiguous), None);
+
+        // A pane whose TUI has not opened a thread yet is not a channel.
+        assert_eq!(only_thread(&serde_json::json!({ "data": [] })), None);
+        assert_eq!(only_thread(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn an_ambiguous_pane_reports_a_failure_rather_than_injecting_somewhere() {
+        // The caller's cue to fall back is an error. Returning `Ok` after
+        // injecting into a thread nobody is reading would lose the event with
+        // no sign that anything went wrong.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("app-server-control.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            fake_app_server(
+                listener,
+                vec![
+                    "01a0204b-f2e8-73e3-b95a-09abf7616b22",
+                    "01a02051-f65b-7260-9afe-13ffe5229bf6",
+                ],
+            )
+        });
+
+        let failure = Channel::CodexAppServer {
+            socket: socket.clone(),
+        }
+        .deliver("CI went red")
+        .expect_err("two loaded threads must not be guessed between");
+        assert!(
+            failure.to_string().contains("no single loaded thread"),
+            "unexpected error: {failure}"
+        );
+        drop(server);
+    }
+
+    #[test]
+    fn a_pane_that_is_gone_takes_its_app_server_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("app.sock");
+        let stamp = format!("codex:{}", socket.display());
+        assert_eq!(Channel::resolve("codex", 0, Some(&stamp)), None);
+
+        let _listener = UnixListener::bind(&socket).unwrap();
+        assert!(Channel::resolve("codex", 0, Some(&stamp)).is_some());
+    }
+
     #[test]
     fn a_spool_stamp_round_trips() {
         assert_eq!(
@@ -948,19 +1469,25 @@ mod tests {
     }
 
     #[test]
-    fn only_opencode_is_provisioned_however_the_command_is_written() {
+    fn provisioning_is_gated_on_the_backend_not_on_the_command() {
         // Plenty of things are launched with a `--port` — tunnels, notebook
         // servers, tensorboard. Polling one of those and then stamping
         // whatever answered as a delivery channel would send events into it.
+        // The same goes for an inherited `CODEX_HOME`.
         assert_eq!(opencode_port("tensorboard --port 6006"), Some(6006));
-        for backend in [None, Some("claude"), Some("codex"), Some("cursor")] {
+        assert!(codex_home("export CODEX_HOME='/somewhere'; jupyter lab").is_some());
+        for backend in [None, Some("claude"), Some("cursor"), Some("agy")] {
             // Nothing is spawned and nothing is stamped: the guard is on the
             // backend, and the flag alone must never be enough.
             provision_in_background(
                 backend,
                 "unused-session".to_string(),
-                "tensorboard --port 6006".to_string(),
+                "export CODEX_HOME='/somewhere'; tensorboard --port 6006".to_string(),
             );
+        }
+        // And a backend that is provisioned still needs its command to say so.
+        for backend in [Some("opencode"), Some("codex")] {
+            provision_in_background(backend, "unused-session".to_string(), "bare".to_string());
         }
     }
 

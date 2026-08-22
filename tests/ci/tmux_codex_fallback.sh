@@ -35,6 +35,8 @@ state_file="__STATE_FILE__"
 prev_attempt=$(cat "${state_file}.count" 2>/dev/null || echo 0)
 attempt=$(( prev_attempt + 1 ))
 printf '%s\n' "$*" >> "$state_file"
+# Recorded so the test can find the per-pane config, when there is one.
+printf 'CODEX_HOME=%s\n' "${CODEX_HOME:-}" >> "$state_file"
 echo "$attempt" > "${state_file}.count"
 printf '%s\n' "attempt ${attempt}" >> "$state_file"
 
@@ -151,16 +153,38 @@ if ! grep -q "^attempt 1$" "$state_file"; then
   fail "failed to observe first startup attempt"
 fi
 
-if ! grep -q "mcp_servers\\.omar\\.command" "$state_file"; then
-  fail "found startup attempt without omar MCP command override"
+# codex is configured one of two ways, and which one a machine takes is not a
+# choice this test gets to make.
+#
+# Its TUI only attaches to an app-server when started with no `-c` overrides at
+# all, so OMAR writes a per-pane `CODEX_HOME/config.toml` when it can. It
+# cannot when the socket that home implies would exceed `sun_path` -- 96 bytes
+# -- and that depends on where `mktemp` puts a directory: about 87 bytes on
+# Linux, about 129 under macOS's `/var/folders`. Then it falls back to `-c`
+# flags on the command line, which is why this passed on a mac and failed in
+# CI while both were behaving correctly.
+#
+# So assert what codex was told, not which route carried it.
+configured() {
+  local flag_pattern="$1" toml_pattern="$2" home
+  if grep -q "$flag_pattern" "$state_file"; then
+    return 0
+  fi
+  home="$(grep -m1 '^CODEX_HOME=' "$state_file" 2>/dev/null | cut -d= -f2-)"
+  [ -n "$home" ] && [ -f "$home/config.toml" ] &&
+    grep -q "$toml_pattern" "$home/config.toml"
+}
+
+if ! configured "mcp_servers\\.omar\\.command" "\\[mcp_servers\\.omar\\]"; then
+  fail "codex was not told how to launch omar's MCP server"
 fi
 
-if ! grep -q "mcp_servers\\.omar\\.args" "$state_file"; then
-  fail "found startup attempt without omar MCP args override"
+if ! configured "mcp_servers\\.omar\\.args" "mcp-server"; then
+  fail "codex was not told what arguments omar's MCP server takes"
 fi
 
-if ! grep -q "features.scheduled_tasks=false" "$state_file"; then
-  fail "found startup attempt without disabling codex scheduled tasks"
+if ! configured "features.scheduled_tasks=false" "scheduled_tasks = false"; then
+  fail "codex scheduled tasks were not disabled"
 fi
 
 if grep -q "^attempt 2$" "$state_file"; then
