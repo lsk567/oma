@@ -2093,11 +2093,19 @@ mod tests {
             .output();
         let _guard = SessionGuard(session.to_string());
 
-        // `cat` into nothing: it swallows the paste and prints nothing back, so
-        // pressing Enter leaves the pane exactly as it was. A shell would echo
-        // a fresh prompt and hide the very case under test.
+        // The pane must never change, or the delivery could confirm itself and
+        // there would be no blind case to test. `stty -echo` is what makes
+        // that true rather than merely likely: without it the tty echoes the
+        // paste back, the end sentinel appears, and verification succeeds —
+        // which it did, about one run in eight, under parallel load.
+        //
+        // Nothing reaches the screen, so the copies are counted in the file
+        // `cat` writes instead of in the pane.
+        let sink = std::env::temp_dir().join(format!("omar-answered-probe-{}", std::process::id()));
+        let _ = std::fs::remove_file(&sink);
+        let run = format!("stty -echo; cat > {}", sink.display());
         let ok = tmux_command()
-            .args(["new-session", "-d", "-s", session, "cat > /dev/null"])
+            .args(["new-session", "-d", "-s", session, &run])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -2121,8 +2129,7 @@ mod tests {
         // every attempt pastes the prompt again.
         let blind = client.deliver_prompt_until(session, "OMAR ANSWERED PROBE", &opts, &|| false);
         assert!(blind.is_err(), "a pane that never changes cannot confirm");
-        let pasted = client
-            .capture_pane_plain(session, 400)
+        let pasted = std::fs::read_to_string(&sink)
             .unwrap_or_default()
             .matches("OMAR ANSWERED PROBE")
             .count();
@@ -2137,13 +2144,13 @@ mod tests {
         let _ = tmux_command()
             .args(["kill-session", "-t", session])
             .output();
+        let _ = std::fs::remove_file(&sink);
         let _ = tmux_command()
-            .args(["new-session", "-d", "-s", session, "cat > /dev/null"])
+            .args(["new-session", "-d", "-s", session, &run])
             .status();
         let answered = client.deliver_prompt_until(session, "OMAR ANSWERED PROBE", &opts, &|| true);
         assert!(answered.is_ok(), "an answered prompt was delivered");
-        let pasted = client
-            .capture_pane_plain(session, 400)
+        let pasted = std::fs::read_to_string(&sink)
             .unwrap_or_default()
             .matches("OMAR ANSWERED PROBE")
             .count();
@@ -2151,6 +2158,7 @@ mod tests {
             pasted <= 1,
             "an answered prompt must not be delivered twice, saw {pasted}"
         );
+        let _ = std::fs::remove_file(&sink);
     }
 
     fn extract_sentinel_id(hay: &str, prefix: &str) -> Option<String> {
