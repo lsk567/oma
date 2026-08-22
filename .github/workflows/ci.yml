@@ -404,15 +404,38 @@ jobs:
 
       - name: Verify no hardcoded claude references in runtime paths
         run: |
-          # Ensure no hardcoded "claude --dangerously-skip-permissions" remains
-          # outside of config.rs (where it's the fallback default)
-          MATCHES=$(grep -rn '"claude --dangerously-skip-permissions"' src/ --include='*.rs' | grep -v 'src/config.rs' || true)
+          # A ratchet, not a compatibility test. Making OMAR multi-backend
+          # removed this command from everywhere but `config.rs`, where it is
+          # the documented fallback; this keeps one from creeping back, because
+          # a runtime path that spells claude out is a path opencode cannot
+          # take.
+          #
+          # Runtime paths only, which is what the name says. A `#[cfg(test)]`
+          # module is compiled out of the binary, so a literal there cannot
+          # send anyone to claude -- and a test asserting claude-specific
+          # behaviour has to be able to name claude.
+          #
+          # The boundary is `#[cfg(test)]` followed by `mod`, the trailing test
+          # module. Not `#[cfg(test)]` alone: it also guards individual
+          # test-only helpers part way up a file, and stopping at the first one
+          # would leave everything below it unread -- which is most of the file
+          # and the whole point of the check.
+          MATCHES=$(
+            for file in $(grep -rl '"claude --dangerously-skip-permissions"' src/ --include='*.rs'); do
+              [ "$file" = "src/config.rs" ] && continue
+              awk -v f="$file" '
+                previous ~ /^#\[cfg\(test\)\]$/ && /^mod / { exit }
+                /"claude --dangerously-skip-permissions"/ { print f ":" NR ":" $0 }
+                { previous = $0 }
+              ' "$file"
+            done
+          )
           if [ -n "$MATCHES" ]; then
-            echo "Found hardcoded claude command outside config.rs:"
+            echo "Found hardcoded claude command in a runtime path:"
             echo "$MATCHES"
             exit 1
           fi
-          echo "No hardcoded claude references found outside config.rs"
+          echo "No hardcoded claude references in runtime paths"
 
   build:
     name: Build
