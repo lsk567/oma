@@ -760,17 +760,14 @@ fn codex_home_command(home: &Path, tui_command: &str) -> String {
     let home = shell_single_quote(&home.display().to_string());
     let socket = "\"$CODEX_HOME/app-server-control/app-server-control.sock\"";
     format!(
-        "export CODEX_HOME={home}; \
-         omar_cwd=\"$(pwd -P | sed 's/[\\\\\"]/\\\\&/g')\"; \
-         grep -qF \"[projects.\\\"$omar_cwd\\\"]\" \"$CODEX_HOME/config.toml\" || \
-         printf '\\n[projects.\"%s\"]\\ntrust_level = \"trusted\"\\n' \"$omar_cwd\" \
-         >> \"$CODEX_HOME/config.toml\"; \
+        "export CODEX_HOME={home}; {trust}\
          codex app-server --listen unix:// >/dev/null 2>&1 & \
          omar_srv=$!; omar_waited=0; \
          while [ ! -S {socket} ] && [ \"$omar_waited\" -lt 100 ] \
          && kill -0 \"$omar_srv\" 2>/dev/null; \
          do sleep 0.2; omar_waited=$((omar_waited+1)); done; \
-         {tui_command}"
+         {tui_command}",
+        trust = codex_trust_cwd()
     )
 }
 
