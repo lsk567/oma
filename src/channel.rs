@@ -517,19 +517,12 @@ fn provision_codex(home: &Path) -> Option<String> {
     None
 }
 
-/// The RFC 6455 example nonce.
-///
-/// The server's `Sec-WebSocket-Accept` is derived from this and we do not
-/// check it — there is no proxy or cache between two ends of a Unix socket to
-/// confuse — so a constant keeps the request a fixed string.
-const WS_NONCE: &str = "dGhlIHNhbXBsZSBub25jZQ==";
-
 /// A JSON-RPC conversation with a codex app-server.
 ///
-/// The transport is a WebSocket over a Unix socket. The upgrade request is
-/// written by hand rather than through `tungstenite::connect`, which is behind
-/// a feature this crate's own manifest turns off and which only speaks in
-/// terms of URLs — `src/serve.rs` answers the server half the same way.
+/// The transport is a WebSocket over a Unix socket. `tungstenite::client`
+/// performs the upgrade: it wants a URL only to build the request line and
+/// `Host` header, so a placeholder is fine — the bytes go wherever the stream
+/// already points, which here is a socket path.
 struct CodexSession {
     socket: tungstenite::WebSocket<UnixStream>,
     next_id: u64,
@@ -538,52 +531,28 @@ struct CodexSession {
 impl CodexSession {
     /// Connect, upgrade, and complete the app-server's opening handshake.
     fn open(path: &Path) -> Result<CodexSession> {
-        let mut stream =
+        let stream =
             UnixStream::connect(path).with_context(|| format!("connect to {}", path.display()))?;
         stream.set_read_timeout(Some(WRITE_TIMEOUT))?;
         stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
-        stream
-            .write_all(
-                format!(
-                    "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
-                     Connection: Upgrade\r\nSec-WebSocket-Key: {}\r\n\
-                     Sec-WebSocket-Version: 13\r\n\r\n",
-                    WS_NONCE
-                )
-                .as_bytes(),
-            )
-            .context("send websocket upgrade")?;
-        stream.flush()?;
 
-        // One byte at a time so nothing past the header is swallowed — the
-        // first data frame may already be in the same read.
-        let mut header = Vec::new();
-        let mut byte = [0u8; 1];
-        while !header.ends_with(b"\r\n\r\n") {
-            if std::io::Read::read(&mut stream, &mut byte).context("read upgrade response")? == 0 {
-                anyhow::bail!("app-server closed during the upgrade");
+        let (socket, _) = tungstenite::client("ws://localhost/", stream).map_err(|error| {
+            match error {
+                // The read timeout set above surfaces as WouldBlock, which
+                // tungstenite renders as a bare "Interrupted handshake" —
+                // say what actually ran out, since provisioning retries this
+                // for 90s and every line would otherwise read the same.
+                tungstenite::HandshakeError::Interrupted(_) => anyhow::anyhow!(
+                    "app-server did not answer the websocket upgrade within {}s",
+                    WRITE_TIMEOUT.as_secs()
+                ),
+                tungstenite::HandshakeError::Failure(error) => {
+                    anyhow::anyhow!("websocket upgrade failed: {error}")
+                }
             }
-            header.push(byte[0]);
-            if header.len() > 4096 {
-                anyhow::bail!("app-server sent no upgrade response");
-            }
-        }
-        let header = String::from_utf8_lossy(&header);
-        if !header.starts_with("HTTP/1.1 101") {
-            anyhow::bail!(
-                "app-server refused the upgrade: {}",
-                header.lines().next().unwrap_or_default()
-            );
-        }
+        })?;
 
-        let mut session = CodexSession {
-            socket: tungstenite::WebSocket::from_raw_socket(
-                stream,
-                tungstenite::protocol::Role::Client,
-                None,
-            ),
-            next_id: 1,
-        };
+        let mut session = CodexSession { socket, next_id: 1 };
         session
             .call(
                 "initialize",
@@ -1208,35 +1177,10 @@ mod tests {
     /// asked, so the framing is checked against a real socket rather than a
     /// string.
     fn fake_app_server(listener: UnixListener, threads: Vec<&'static str>) -> Vec<String> {
-        let (mut stream, _) = listener.accept().unwrap();
-
-        let mut header = Vec::new();
-        let mut byte = [0u8; 1];
-        while !header.ends_with(b"\r\n\r\n") {
-            stream.read_exact(&mut byte).unwrap();
-            header.push(byte[0]);
-        }
-        let request = String::from_utf8_lossy(&header).into_owned();
-        let key = request
-            .lines()
-            .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
-            .expect("a websocket upgrade");
-        stream
-            .write_all(
-                format!(
-                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
-                     Connection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
-                    tungstenite::handshake::derive_accept_key(key.trim().as_bytes())
-                )
-                .as_bytes(),
-            )
-            .unwrap();
-
-        let mut socket = tungstenite::WebSocket::from_raw_socket(
-            stream,
-            tungstenite::protocol::Role::Server,
-            None,
-        );
+        let (stream, _) = listener.accept().unwrap();
+        // `tungstenite::accept` answers the upgrade, so the test exercises the
+        // same handshake the app-server does rather than a hand-made reply.
+        let mut socket = tungstenite::accept(stream).unwrap();
         let answer = |socket: &mut tungstenite::WebSocket<UnixStream>,
                       request: &serde_json::Value,
                       result: serde_json::Value| {
@@ -1341,6 +1285,32 @@ mod tests {
         }
         .deliver("standup in 5")
         .is_err());
+    }
+
+    /// Provisioning retries `open` for 90s, so a bare "Interrupted handshake"
+    /// would be 90s of identical lines that name neither the socket nor the
+    /// timeout that produced them.
+    #[test]
+    fn a_silent_app_server_names_the_timeout_rather_than_the_symptom() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("mute.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        // Accept, then say nothing: the upgrade waits out the read timeout.
+        let server = std::thread::spawn(move || {
+            let held = listener.accept();
+            std::thread::sleep(WRITE_TIMEOUT + Duration::from_secs(1));
+            drop(held);
+        });
+
+        let error = Channel::CodexAppServer { socket }
+            .deliver("standup in 5")
+            .expect_err("a server that never answers cannot take a delivery");
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("did not answer the websocket upgrade"),
+            "want the timeout named, got: {error}"
+        );
+        server.join().unwrap();
     }
 
     #[test]
