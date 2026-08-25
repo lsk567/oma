@@ -141,6 +141,13 @@ impl Channel {
     ///
     /// `pane_pid` is the pane's own process. The backend may be a child of it
     /// when the pane runs a shell, so its children are checked too.
+    ///
+    /// `Some` means a channel looks available, not that a delivery through it
+    /// will land. codex resolves on the socket file existing and only
+    /// discovers in [`Channel::deliver`] that the pane has more than one
+    /// thread loaded and cannot be addressed. Callers must treat the error
+    /// from `deliver` as the real answer — the scheduler does, by protecting
+    /// the draft again before it falls back to the input box.
     pub fn resolve(backend: &str, pane_pid: u32, stamp: Option<&str>) -> Option<Channel> {
         // A stamp is written when the backend needed provisioning at launch;
         // it names the port and session an event must be addressed to.
