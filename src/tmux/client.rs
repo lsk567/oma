@@ -2093,11 +2093,31 @@ mod tests {
             .output();
         let _guard = SessionGuard(session.to_string());
 
-        // `cat` into nothing: it swallows the paste and prints nothing back, so
-        // pressing Enter leaves the pane exactly as it was. A shell would echo
-        // a fresh prompt and hide the very case under test.
+        // The pane must never change, or the delivery could confirm itself and
+        // there would be no blind case to test. `stty -echo` is what makes
+        // that true rather than merely likely: without it the tty echoes the
+        // paste back, the end sentinel appears, and verification succeeds —
+        // which it did, about one run in eight, under parallel load.
+        //
+        // Nothing reaches the screen, so the copies are counted in the file
+        // `cat` writes instead of in the pane.
+        let sink =
+            std::env::temp_dir().join(format!("omar-answered-probe-{}.txt", uuid::Uuid::new_v4()));
+        let sink_str = match sink.to_str() {
+            Some(s) => s,
+            None => {
+                eprintln!("Skipping test: temp path is not valid UTF-8: {:?}", sink);
+                return;
+            }
+        };
+        // Single-quote-escape the path so a TMPDIR holding spaces or shell
+        // metacharacters can't redirect the copies somewhere we never read —
+        // which would mask a real regression as "saw 0 paste(s)".
+        let run = format!("stty -echo; cat > '{}'", sink_str.replace('\'', r"'\''"));
+        // Remove the sink on every exit path, including a failed assertion.
+        let _sink_guard = TempPathGuard(sink.clone());
         let ok = tmux_command()
-            .args(["new-session", "-d", "-s", session, "cat > /dev/null"])
+            .args(["new-session", "-d", "-s", session, &run])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -2121,8 +2141,7 @@ mod tests {
         // every attempt pastes the prompt again.
         let blind = client.deliver_prompt_until(session, "OMAR ANSWERED PROBE", &opts, &|| false);
         assert!(blind.is_err(), "a pane that never changes cannot confirm");
-        let pasted = client
-            .capture_pane_plain(session, 400)
+        let pasted = std::fs::read_to_string(&sink)
             .unwrap_or_default()
             .matches("OMAR ANSWERED PROBE")
             .count();
@@ -2131,25 +2150,45 @@ mod tests {
             "expected the blind delivery to retry, saw {pasted} paste(s)"
         );
 
-        // Told the agent answered, the same delivery succeeds without a second
-        // copy — which is the part that matters, since re-delivering is what
-        // the runtime rejects.
-        let _ = tmux_command()
-            .args(["kill-session", "-t", session])
-            .output();
-        let _ = tmux_command()
-            .args(["new-session", "-d", "-s", session, "cat > /dev/null"])
-            .status();
-        let answered = client.deliver_prompt_until(session, "OMAR ANSWERED PROBE", &opts, &|| true);
-        assert!(answered.is_ok(), "an answered prompt was delivered");
-        let pasted = client
-            .capture_pane_plain(session, 400)
-            .unwrap_or_default()
-            .matches("OMAR ANSWERED PROBE")
-            .count();
+        // The regression this test is named for lives one level down, in
+        // `wait_for_change`: an agent that answers between the paste and the
+        // submit has already drawn its output, so Enter causes no change and
+        // only `answered` proves the prompt arrived. Exercise it directly —
+        // routing through `deliver_prompt_until` cannot reach it, because the
+        // same `stty -echo` that makes the blind case above deterministic
+        // also keeps the paste from rendering, so every attempt retries
+        // before it ever submits.
+        let content_before = client.capture_pane(session, 50).unwrap_or_default();
+        let activity_before = client.get_pane_activity(session).unwrap_or(0);
+
         assert!(
-            pasted <= 1,
-            "an answered prompt must not be delivered twice, saw {pasted}"
+            !client.wait_for_change(
+                session,
+                activity_before,
+                &content_before,
+                Duration::from_millis(300),
+                opts.poll_interval,
+                &|| false,
+            ),
+            "a pane that never changes cannot verify an unanswered prompt"
+        );
+
+        // Same still pane, same snapshot — `answered` is the only difference.
+        let started = Instant::now();
+        assert!(
+            client.wait_for_change(
+                session,
+                activity_before,
+                &content_before,
+                Duration::from_secs(2),
+                opts.poll_interval,
+                &|| true,
+            ),
+            "an answered prompt needs no pane change to count as delivered"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the answered check must short-circuit, not wait out the timeout"
         );
     }
 
