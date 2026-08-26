@@ -924,9 +924,17 @@ impl TmuxClient {
     }
 
     /// Find a session by exact name.
+    ///
+    /// Unfiltered, unlike `list_sessions`: the caller has already named one
+    /// session, and the prefix is for enumerating an EA's agents rather than
+    /// for deciding whether a named one exists. Filtering here could not see
+    /// the EA's own pane at all -- the manager is `<prefix>ea-<id>` where a
+    /// worker is `<prefix><ea>-<name>` -- so `ensure_session_not_attached`
+    /// called it missing while `has_session`, which asks tmux directly, found
+    /// it.
     pub fn get_session(&self, name: &str) -> Result<Option<Session>> {
         let target = exact_session_target(name);
-        let sessions = self.list_sessions()?;
+        let sessions = self.list_all_sessions()?;
         Ok(sessions
             .into_iter()
             .find(|session| exact_session_target(&session.name) == target))
