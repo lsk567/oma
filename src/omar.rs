@@ -401,6 +401,7 @@ async fn async_main() -> Result<()> {
                 kill_agent(
                     &client,
                     &name,
+                    &ea::ea_manager_session(target.id, &config.dashboard.session_prefix),
                     &scheduler::Scheduler::with_store(scheduler::events_store_path(&omar_dir)),
                     target.id,
                 )
@@ -674,9 +675,18 @@ fn sessions_for_ea(base_prefix: &str, ea_id: ea::EaId) -> Result<Vec<tmux::Sessi
     Ok(sessions)
 }
 
+/// What the CLI calls the EA's own pane.
+///
+/// Not the name of its session. A worker is `<prefix><ea>-<name>` and the
+/// manager is `<prefix>ea-<id>`, so the manager cannot be reached by the rule
+/// that reaches everything else. The scheduler already addresses it by this
+/// name -- an event's receiver is `"ea"` -- so the listing is not inventing
+/// one, and `omar kill` should answer to it too.
+const CLI_MANAGER_NAME: &str = "ea";
+
 fn display_cli_session_name(session_name: &str, prefix: &str, manager_session: &str) -> String {
     if session_name == manager_session {
-        "ea".to_string()
+        CLI_MANAGER_NAME.to_string()
     } else {
         session_name
             .strip_prefix(prefix)
@@ -702,13 +712,27 @@ fn spawn_agent(
     Ok(())
 }
 
+/// The session a name from `omar list` refers to.
+///
+/// The inverse of `display_cli_session_name`, and the reason this exists: the
+/// listing prints the manager as `ea`, and without an inverse that is the one
+/// name in the listing `omar kill` cannot resolve.
+fn cli_session_name(client: &TmuxClient, name: &str, manager_session: &str) -> String {
+    if name == CLI_MANAGER_NAME {
+        manager_session.to_string()
+    } else {
+        client.session_for(name)
+    }
+}
+
 fn kill_agent(
     client: &TmuxClient,
     name: &str,
+    manager_session: &str,
     scheduler: &scheduler::Scheduler,
     ea_id: ea::EaId,
 ) -> Result<()> {
-    let full_name = client.session_for(name);
+    let full_name = cli_session_name(client, name, manager_session);
 
     if !client.has_session(&full_name)? {
         anyhow::bail!("Session '{}' not found", name);
@@ -2193,6 +2217,35 @@ mod tests {
             "{dir:?}"
         );
         assert!(dir.ends_with("topologies/Cadence"), "{dir:?}");
+    }
+
+    /// Every name `omar list` prints is a name `omar kill` can resolve.
+    ///
+    /// The manager is the one that got this wrong: the listing calls it `ea`,
+    /// and resolution ran it through the worker rule -- `<prefix><ea>-<name>`
+    /// -- producing `omar-agent-0-ea`, a session that has never existed. So
+    /// `omar kill ea` answered "Session 'ea' not found" about the pane it had
+    /// just been shown.
+    #[test]
+    fn a_name_the_listing_prints_is_a_name_kill_resolves() {
+        let base = "omar-agent-";
+        let prefix = ea::ea_prefix(0, base);
+        let manager = ea::ea_manager_session(0, base);
+        let client = TmuxClient::new(prefix.clone());
+
+        // The manager and a worker, as tmux actually names them.
+        for session in [manager.as_str(), "omar-agent-0-worker"] {
+            let shown = display_cli_session_name(session, &prefix, &manager);
+            assert_eq!(
+                cli_session_name(&client, &shown, &manager),
+                session,
+                "listing shows '{shown}' for {session}, which does not resolve back"
+            );
+        }
+
+        // And the manager is spelled the way the scheduler already addresses
+        // it, so killing it cancels its events too.
+        assert_eq!(display_cli_session_name(&manager, &prefix, &manager), "ea");
     }
 
     #[cfg(target_os = "macos")]
