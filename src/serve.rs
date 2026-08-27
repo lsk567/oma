@@ -598,8 +598,19 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
         ("POST", rest) if rest.starts_with("/v1/runs/") && rest.ends_with("/stop") => {
             let id = rest
                 .trim_start_matches("/v1/runs/")
-                .trim_end_matches("/stop");
-            stop_run(&context, id)
+                .trim_end_matches("/stop")
+                .to_string();
+            // Drained even though the route takes no arguments. Closing a
+            // socket with unread bytes still in it sends RST rather than FIN,
+            // and the client reads that as the connection being reset instead
+            // of as the answer -- which is what a `{}` body from a caller that
+            // sends one would have done.
+            if content_length > MAX_BODY_BYTES {
+                (413, json!({"error": "body too large"}))
+            } else {
+                let _ = read_body(content_length)?;
+                stop_run(&context, &id)
+            }
         }
         ("POST", rest) if rest.starts_with("/v1/runs/") && rest.ends_with("/panel") => {
             let id = rest
@@ -1677,6 +1688,14 @@ mod tests {
 
         let response = request(address, "POST", "/v1/runs/nobody/stop", Some("{}"));
         assert!(response.contains(" 404 "), "{response}");
+
+        // A body the route does not want is still a body it must read. Closing
+        // a socket with bytes left unread sends RST rather than FIN, and the
+        // client sees the connection reset instead of the answer. Large enough
+        // not to hide inside a buffer.
+        let ignored = format!("{{\"note\":\"{}\"}}", "x".repeat(16 * 1024));
+        let response = request(address, "POST", "/v1/runs/run-1/stop", Some(&ignored));
+        assert!(response.contains(" 200 "), "{response}");
     }
 
     #[test]
