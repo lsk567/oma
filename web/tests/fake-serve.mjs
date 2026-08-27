@@ -72,6 +72,35 @@ export async function startFakeServe({
     }
     // Before the run-record route, which matches any suffix — the same order
     // the daemon's own arms are in, and for the same reason.
+    // Before the run-record route, as on the daemon, which would otherwise
+    // take the suffix for part of the id.
+    if (
+      request.method === "POST" &&
+      url.pathname.startsWith("/v1/runs/") &&
+      url.pathname.endsWith("/stop")
+    ) {
+      const id = url.pathname.slice("/v1/runs/".length, -"/stop".length);
+      const entry = runs.get(id);
+      if (!entry) return json(response, 404, { error: "unknown run" });
+      const active = entry.record.status === "running" || entry.record.status === "starting";
+      if (!active) {
+        return json(response, 200, {
+          run_id: id,
+          status: entry.record.status,
+          stopping: false,
+        });
+      }
+      // Accepted, not done: the daemon answers before the run has ended, and
+      // the record is what says when it has. Held briefly so the client's
+      // waiting state is a state a test can see.
+      entry.stopping = true;
+      setTimeout(() => {
+        entry.record.status = "stopped";
+        entry.record.finished_at = Math.floor(Date.now() / 1000);
+        publish(entry, "run_completed", { status: "stopped" });
+      }, 400);
+      return json(response, 202, { run_id: id, status: "stopping", stopping: true });
+    }
     if (url.pathname.startsWith("/v1/runs/") && url.pathname.endsWith("/panel")) {
       const id = url.pathname.slice("/v1/runs/".length, -"/panel".length);
       const entry = runs.get(id);

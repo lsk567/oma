@@ -154,6 +154,17 @@ impl DeploymentRecord {
     }
 }
 
+/// Where a team's deployment record and artifacts live.
+///
+/// One definition, because four places need this path and a copy that drifts
+/// would have `omar stop` and the daemon looking in different directories for
+/// the same run.
+pub fn dir_for(omar_dir: &Path, ea_id: crate::ea::EaId, team: &str) -> PathBuf {
+    crate::ea::ea_state_dir(ea_id, omar_dir)
+        .join("topologies")
+        .join(team)
+}
+
 pub fn record_path(dir: &Path) -> PathBuf {
     dir.join("deployment.json")
 }

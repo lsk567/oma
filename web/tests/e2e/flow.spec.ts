@@ -656,16 +656,23 @@ test("the studio opens on a centred prompt, then settles into a thread", async (
   expect(Math.abs(messageCentre - viewport.width / 2)).toBeLessThan(40);
 });
 
-test("the composer's buttons line up", async ({ page }) => {
+test("the workflow's buttons sit with the workflow", async ({ page }) => {
   await useFakeServe(page);
   await draftUntilProposed(page);
 
-  // Discard, Deploy and send sit in a row; differing heights read as sloppy.
+  // Deploying acts on the topology, not on the message being written, so the
+  // controls belong to the panel drawing it.
+  const actions = page.locator(".diagram-heading .workflow-actions");
+  await expect(actions.getByRole("button", { name: "Discard" })).toBeVisible();
+  await expect(actions.getByRole("button", { name: "Deploy", exact: true })).toBeVisible();
+  await expect(page.locator(".composer-actions").getByRole("button", { name: "Deploy" }))
+    .toHaveCount(0);
+
+  // Discard and Deploy sit in a row; differing heights read as sloppy.
   const boxes = await Promise.all(
     [
-      page.getByRole("button", { name: "Discard" }),
-      page.getByRole("button", { name: "Deploy", exact: true }),
-      page.getByLabel("Draft workflow"),
+      actions.getByRole("button", { name: "Discard" }),
+      actions.getByRole("button", { name: "Deploy", exact: true }),
     ].map(async (button) => (await button.boundingBox())!),
   );
   const [first] = boxes;
@@ -673,6 +680,42 @@ test("the composer's buttons line up", async ({ page }) => {
     expect(Math.round(box.height)).toBe(Math.round(first.height));
     expect(Math.round(box.y)).toBe(Math.round(first.y));
   }
+
+  // And the stats did not get stranded in the middle by the third child.
+  const stats = (await page.locator(".run-stats").boundingBox())!;
+  expect(stats.x).toBeGreaterThan(
+    (await page.locator(".diagram-heading h2").boundingBox())!.x,
+  );
+  expect(stats.x + stats.width).toBeLessThanOrEqual(first.x + 1);
+});
+
+test("a run can be stopped from the panel that shows it", async ({ page }) => {
+  // Until now the only way to end a run started from the UI was to leave the
+  // UI and type `omar stop` in a terminal.
+  await useFakeServe(page);
+  await draftUntilProposed(page);
+
+  // The eyebrow says which topology is on screen: this one has not run.
+  await expect(page.locator(".diagram-heading .eyebrow")).toHaveText("PROPOSED TOPOLOGY");
+  const actions = page.locator(".diagram-heading .workflow-actions");
+  await expect(actions.getByRole("button", { name: "Stop" })).toHaveCount(0);
+
+  await deploy(page);
+  await expect(page.locator(".diagram-heading .eyebrow")).toHaveText("LIVE TOPOLOGY");
+
+  const stop = actions.getByRole("button", { name: "Stop" });
+  await expect(stop).toBeEnabled();
+  await stop.click();
+
+  // A graceful stop lands at the next tag boundary, so the button has to say
+  // it was heard. One that just went quiet would read as hung.
+  await expect(actions.getByRole("button", { name: "Stopping…" })).toBeDisabled();
+
+  // And when the run ends the control goes with it -- there is nothing left to
+  // stop, and a button still offering to would be lying.
+  await expect(actions.getByRole("button", { name: /Stop/ })).toHaveCount(0, {
+    timeout: 5000,
+  });
 });
 
 test("discarding puts the topology away too", async ({ page }) => {

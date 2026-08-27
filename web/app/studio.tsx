@@ -39,6 +39,7 @@ import {
   fetchRun,
   checkProgram,
   startRun,
+  stopRun,
   subscribeToDiagram,
 } from "./lib/runtime-client";
 
@@ -125,6 +126,8 @@ export function Studio({
   });
   // Deploying starts real agents, so the button arms a second, explicit step.
   const [confirming, setConfirming] = useState(false);
+  /** A stop has been asked for and the run has not ended yet. */
+  const [stopping, setStopping] = useState(false);
   const [daemon, setDaemon] = useState<Daemon>(
     isDemo ? { state: "demo" } : { state: "checking" },
   );
@@ -433,6 +436,8 @@ export function Studio({
   async function confirmDesign() {
     if (!design || phase !== "review") return;
     setConfirming(false);
+    // A new run is not stopping, whatever the last one was doing.
+    setStopping(false);
     setPhase("spawning");
     setError("");
     try {
@@ -451,6 +456,28 @@ export function Studio({
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
       setPhase("review");
+    }
+  }
+
+  /**
+   * Ask the run to stop, and keep saying so until it has.
+   *
+   * A graceful stop lands at the next tag boundary rather than immediately, so
+   * the button has to hold a *stopping* state — one that just went quiet would
+   * read as hung for however long the current invocation takes.
+   */
+  async function requestStop() {
+    if (!run || stopping) return;
+    setStopping(true);
+    setError("");
+    try {
+      const outcome = await stopRun(serveUrl, run.run_id);
+      // Already over: a race with it finishing, not a failure. The run record
+      // is about to say so, and nothing is still stopping.
+      if (!outcome.stopping) setStopping(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setStopping(false);
     }
   }
 
@@ -551,6 +578,9 @@ export function Studio({
   }, [source, filename, serveUrl, canRun, presentKey]);
 
   const isDeployed = run !== null;
+  // Only meaningful while a run is in flight: however it ended, nothing is
+  // still stopping, and a button left saying so would outlive its subject.
+  const isStopping = stopping && phase === "observing";
 
   // Widths are clamped against the workspace so the diagram always keeps a
   // usable column, whichever divider is being dragged. Below a panel's minimum
@@ -699,16 +729,16 @@ export function Studio({
               aria-label="Describe a workflow"
             />
             <div>
-              {phase === "observing" || (phase === "review" && !canRun) ? (
-                // A run to report on, or a reason deploying is unavailable.
-                // Holding a design is neither: the deploy button already says
-                // it has not run, so the corner keeps naming the assistant.
+              {phase === "review" && !canRun ? (
+                // Why deploying is unavailable, which is about this composer's
+                // reach rather than about the workflow. The run's own state
+                // left with the buttons: the panel says STATUS beside the
+                // control that changes it, and saying it twice invited the two
+                // to disagree.
                 <span className="composer-status">
-                  {phase === "observing"
-                    ? "Run in progress"
-                    : daemon.state === "demo"
-                      ? "Demo topology — relaunch with OMAR_SERVE_URL to deploy"
-                      : `Cannot reach omar serve at ${serveUrl}`}
+                  {daemon.state === "demo"
+                    ? "Demo topology — relaunch with OMAR_SERVE_URL to deploy"
+                    : `Cannot reach omar serve at ${serveUrl}`}
                 </span>
               ) : (
                 <BackendMenu
@@ -716,49 +746,10 @@ export function Studio({
                   live={daemon.state === "live"}
                 />
               )}
+              {/* Deploying and stopping live on the workflow panel, beside the
+                  topology they act on. What is left here acts on the message
+                  being written. */}
               <div className="composer-actions">
-                {phase === "review" && design ? (
-                  <span role="group" aria-label="Deploy design">
-                    {confirming ? (
-                      <>
-                        <button
-                          className="secondary-button"
-                          onClick={() => setConfirming(false)}
-                          type="button"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          className="primary-button"
-                          onClick={() => void confirmDesign()}
-                          type="button"
-                          disabled={!canRun}
-                          title="This starts real agents"
-                        >
-                          Confirm deploy
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          className="secondary-button"
-                          onClick={discardDesign}
-                          type="button"
-                        >
-                          Discard
-                        </button>
-                        <button
-                          className="primary-button"
-                          onClick={() => setConfirming(true)}
-                          type="button"
-                          disabled={!canRun}
-                        >
-                          Deploy
-                        </button>
-                      </>
-                    )}
-                  </span>
-                ) : null}
                 <button
                   className="send-button"
                   type="submit"
@@ -790,7 +781,11 @@ export function Studio({
         <section className="diagram-panel">
           <div className="diagram-heading">
             <div>
-              <span className="eyebrow">LIVE TOPOLOGY</span>
+              {/* The panel draws a proposal before a run and the run after it,
+                  so it has to say which one is on screen. */}
+              <span className="eyebrow">
+                {snapshot.status === "ready" ? "PROPOSED TOPOLOGY" : "LIVE TOPOLOGY"}
+              </span>
               <h2>{snapshot?.team}</h2>
             </div>
             <div className="run-stats">
@@ -798,6 +793,67 @@ export function Studio({
               <span><small>TAG</small>{tag}</span>
               <span><small>LAG</small>{lag}</span>
             </div>
+            {(phase === "review" && design) || (phase === "observing" && run) ? (
+            <div className="workflow-actions">
+              {phase === "review" && design ? (
+                <span role="group" aria-label="Deploy design">
+                  {confirming ? (
+                    <>
+                      <button
+                        className="secondary-button"
+                        onClick={() => setConfirming(false)}
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="primary-button"
+                        onClick={() => void confirmDesign()}
+                        type="button"
+                        disabled={!canRun}
+                        title="This starts real agents"
+                      >
+                        Confirm deploy
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        className="secondary-button"
+                        onClick={discardDesign}
+                        type="button"
+                      >
+                        Discard
+                      </button>
+                      <button
+                        className="primary-button"
+                        onClick={() => setConfirming(true)}
+                        type="button"
+                        disabled={!canRun}
+                      >
+                        Deploy
+                      </button>
+                    </>
+                  )}
+                </span>
+              ) : null}
+              {phase === "observing" && run ? (
+                <button
+                  className="secondary-button"
+                  onClick={() => void requestStop()}
+                  type="button"
+                  disabled={isStopping}
+                  title={
+                    isStopping
+                      ? "The current tag has to close first"
+                      : "Closes the current tag, then persists and tears down"
+                  }
+                >
+                  {isStopping ? "Stopping…" : "Stop"}
+                </button>
+              ) : null}
+            </div>
+            ) : null}
           </div>
           <DiagramCanvas
             snapshot={snapshot}

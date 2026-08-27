@@ -215,6 +215,11 @@ pub struct Serve {
     agent_token: String,
     running: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
+    /// The state the request handlers share. Kept only so a test can seed a
+    /// run the daemon believes is live, which is otherwise reachable only by
+    /// starting one for real.
+    #[cfg(test)]
+    context: Arc<Context_>,
 }
 
 impl Serve {
@@ -252,6 +257,8 @@ impl Serve {
         // every connection from a poll interval.
         let running = Arc::new(AtomicBool::new(true));
         let thread_running = running.clone();
+        #[cfg(test)]
+        let shared = context.clone();
         let thread = thread::spawn(move || {
             while thread_running.load(Ordering::Relaxed) {
                 match listener.accept() {
@@ -271,6 +278,8 @@ impl Serve {
             agent_token,
             running,
             thread: Some(thread),
+            #[cfg(test)]
+            context: shared,
         };
         // Before this returns, so that everything downstream of "the server
         // started" can rely on the context being there. It names this server,
@@ -583,6 +592,14 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
                 .trim_start_matches("/v1/runs/")
                 .trim_end_matches("/panel");
             panel_status(&context, id)
+        }
+        // Before the run-record route, which would otherwise take the suffix
+        // for part of the id.
+        ("POST", rest) if rest.starts_with("/v1/runs/") && rest.ends_with("/stop") => {
+            let id = rest
+                .trim_start_matches("/v1/runs/")
+                .trim_end_matches("/stop");
+            stop_run(&context, id)
         }
         ("POST", rest) if rest.starts_with("/v1/runs/") && rest.ends_with("/panel") => {
             let id = rest
@@ -1428,6 +1445,46 @@ fn find_active_run<'a>(runs: &'a BTreeMap<String, RunRecord>, team: &str) -> Opt
         .find(|record| record.team == team && is_active(&record.status))
 }
 
+/// Ask a run to stop at its next tag boundary.
+///
+/// The same request `omar stop` makes: a control file the running loop reads
+/// between tags, so no invocation is cut mid-contract and teardown persists
+/// state, logs and outputs before the sessions go.
+///
+/// Graceful only. `omar kill` exists for a runner that has stopped answering,
+/// and that case cannot arise here — the runner is this daemon, so a request
+/// that reaches this function is served by the very process being asked to
+/// stop. A force path from the UI would be a harder action sitting one click
+/// from deploy, and it has nothing to fix that this does not.
+fn stop_run(context: &Arc<Context_>, id: &str) -> (u16, Value) {
+    let team = {
+        let runs = context.runs.lock().expect("serve runs poisoned");
+        match runs.get(id) {
+            Some(record) if is_active(&record.status) => record.team.clone(),
+            // Not an error worth alarming anyone with: asking a finished run to
+            // stop is a race with it finishing, and the outcome is the same.
+            Some(record) => {
+                return (
+                    200,
+                    json!({"run_id": id, "status": record.status, "stopping": false}),
+                )
+            }
+            None => return (404, json!({"error": "unknown run"})),
+        }
+    };
+
+    let dir = crate::deploy::dir_for(&context.omar_dir, context.ea_id, &team);
+    match crate::deploy::request_stop(&dir) {
+        // Accepted, not done: the run ends at the next tag boundary, and the
+        // record's status is what says when it has.
+        Ok(()) => (
+            202,
+            json!({"run_id": id, "status": "stopping", "stopping": true}),
+        ),
+        Err(error) => (500, json!({"error": format!("{error:#}")})),
+    }
+}
+
 fn is_active(status: &str) -> bool {
     status == "starting" || status == "running"
 }
@@ -1566,6 +1623,60 @@ mod tests {
             0,
         )
         .expect("server starts")
+    }
+
+    /// Stopping is a request the runner reads, not a kill.
+    ///
+    /// The route's whole job is to leave the same control file `omar stop`
+    /// leaves, in the directory the run is actually using — so the assertion
+    /// worth making is that the file lands where the runner looks.
+    #[test]
+    fn stopping_a_run_leaves_the_request_where_the_runner_reads_it() {
+        let server = test_server();
+        let address = server.address();
+
+        // A run the daemon believes is live, without agents to start.
+        let team = "Cadence";
+        {
+            let mut runs = server.context.runs.lock().expect("runs");
+            runs.insert(
+                "run-1".to_string(),
+                RunRecord {
+                    run_id: "run-1".to_string(),
+                    team: team.to_string(),
+                    status: "running".to_string(),
+                    diagram_address: None,
+                    started_at: 0,
+                    finished_at: None,
+                    error: None,
+                },
+            );
+        }
+
+        let dir = crate::deploy::dir_for(&server.context.omar_dir, 0, team);
+        std::fs::create_dir_all(&dir).expect("deployment dir");
+        assert!(!crate::deploy::stop_requested(&dir), "nothing asked yet");
+
+        let response = request(address, "POST", "/v1/runs/run-1/stop", Some("{}"));
+        assert!(response.contains(" 202 "), "{response}");
+        assert!(response.contains("\"stopping\":true"), "{response}");
+        assert!(
+            crate::deploy::stop_requested(&dir),
+            "the runner has nothing to read"
+        );
+
+        // A run that has already ended is not an error: asking is a race with
+        // it finishing, and the outcome is the same either way.
+        {
+            let mut runs = server.context.runs.lock().expect("runs");
+            runs.get_mut("run-1").expect("run").status = "completed".to_string();
+        }
+        let response = request(address, "POST", "/v1/runs/run-1/stop", Some("{}"));
+        assert!(response.contains(" 200 "), "{response}");
+        assert!(response.contains("\"stopping\":false"), "{response}");
+
+        let response = request(address, "POST", "/v1/runs/nobody/stop", Some("{}"));
+        assert!(response.contains(" 404 "), "{response}");
     }
 
     #[test]
