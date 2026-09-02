@@ -31,7 +31,7 @@ export type {
   ReactionStatus,
   RunRecord,
   RunStatus,
-} from "./protocol-generated";
+} from "./protocol-generated.ts";
 
 export {
   CHAT_ROLES,
@@ -41,9 +41,9 @@ export {
   PORT_KINDS,
   REACTION_STATUSES,
   RUN_STATUSES,
-} from "./protocol-generated";
+} from "./protocol-generated.ts";
 
-import { CHAT_ROLES, RUN_STATUSES } from "./protocol-generated";
+import { CHAT_ROLES, RUN_STATUSES } from "./protocol-generated.ts";
 import type {
   ChatMessage,
   DiagramEvent,
@@ -51,7 +51,7 @@ import type {
   DiagramSnapshot,
   RunRecord,
   RunStatus,
-} from "./protocol-generated";
+} from "./protocol-generated.ts";
 
 export const DIAGRAM_PROTOCOL_VERSION = 1;
 

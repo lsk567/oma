@@ -5,7 +5,7 @@
 // generator exists to make impossible.
 
 /** Every status `omar serve` can report a run in. */
-export const RUN_STATUSES = ["starting", "running", "completed", "stopped", "failed"] as const;
+export const RUN_STATUSES = ["starting", "running", "stopping", "completed", "stopped", "failed"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
 /** Where a drawing stands. `ready` is compiled but never run, which is what a proposal's preview is. */

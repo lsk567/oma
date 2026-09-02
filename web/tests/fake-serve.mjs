@@ -72,6 +72,29 @@ export async function startFakeServe({
     }
     // Before the run-record route, which matches any suffix — the same order
     // the daemon's own arms are in, and for the same reason.
+    if (
+      request.method === "POST" &&
+      url.pathname.startsWith("/v1/runs/") &&
+      url.pathname.endsWith("/stop")
+    ) {
+      const id = url.pathname.slice("/v1/runs/".length, -"/stop".length);
+      const entry = runs.get(id);
+      if (!entry) return json(response, 404, { error: "unknown run" });
+      // A stopping run is still active, as on the daemon: it holds its sessions
+      // until the tag closes.
+      const active = ["starting", "running", "stopping"].includes(entry.record.status);
+      if (!active) return json(response, 200, entry.record);
+      // Accepted, not done: the daemon answers before the run has ended, and
+      // records `stopping` so a client that reloads still sees it. Held briefly
+      // so that waiting state is one a test can observe.
+      entry.record.status = "stopping";
+      setTimeout(() => {
+        entry.record.status = "stopped";
+        entry.record.finished_at = Math.floor(Date.now() / 1000);
+        publish(entry, "run_completed", { status: "stopped" });
+      }, 400);
+      return json(response, 202, entry.record);
+    }
     if (url.pathname.startsWith("/v1/runs/") && url.pathname.endsWith("/panel")) {
       const id = url.pathname.slice("/v1/runs/".length, -"/panel".length);
       const entry = runs.get(id);

@@ -1415,9 +1415,7 @@ fn fail_deployment(
 
 pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Result<RunEnd> {
     let state = verify(bytecode)?;
-    let runtime_dir = crate::ea::ea_state_dir(config.ea_id, config.omar_dir)
-        .join("topologies")
-        .join(&state.team);
+    let runtime_dir = deploy::dir_for(config.omar_dir, config.ea_id, &state.team);
     fs::create_dir_all(&runtime_dir)?;
     // One live run per team: its sessions are named by team and agent, so a
     // second run would be answered by the first run's panes.
