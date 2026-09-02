@@ -1979,6 +1979,7 @@ mod tests {
             },
             metrics: MetricsConfig::default(),
             slack_bridge: crate::config::SlackBridgeConfig::default(),
+            isolation: crate::config::IsolationConfig::default(),
         }
     }
 

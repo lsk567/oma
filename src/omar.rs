@@ -7,6 +7,7 @@ mod deploy;
 mod diagram;
 mod ea;
 mod event;
+mod isolation;
 mod manager;
 mod mcp;
 mod memory;
@@ -189,6 +190,11 @@ enum Commands {
         /// a wait.
         #[arg(long)]
         fast: bool,
+
+        /// How to separate this team from other teams: none, worktree, or
+        /// container. Overrides `[isolation] mode` for this run.
+        #[arg(long)]
+        isolation: Option<String>,
 
         /// Expose the live topology diagram API while the run is active
         #[arg(long)]
@@ -489,11 +495,19 @@ async fn async_main() -> Result<()> {
             replace,
             timeout_seconds,
             fast,
+            isolation,
             diagram_server,
             diagram_address,
         }) => {
             let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
             let bytecode = topology::load_program(&program)?;
+            let mut isolation_config = config.isolation.clone();
+            if let Some(mode) = isolation {
+                // Reject an unknown mode here rather than after the run has
+                // already created a deployment record for it.
+                isolation::Mode::parse(&mode)?;
+                isolation_config.mode = mode;
+            }
             topology::run_topology(
                 &bytecode,
                 topology::TopologyRunConfig {
@@ -501,6 +515,7 @@ async fn async_main() -> Result<()> {
                     omar_dir: &omar_dir,
                     base_prefix: &config.dashboard.session_prefix,
                     default_workdir: &config.agent.default_workdir,
+                    isolation: &isolation_config,
                     health_idle_warning: config.health.idle_warning,
                     inputs: &inputs,
                     replace,

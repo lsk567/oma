@@ -145,6 +145,9 @@ struct Context_ {
     ea_id: EaId,
     session_prefix: String,
     default_workdir: String,
+    /// Applies to deployed teams. The EA's own pane is not isolated: it
+    /// orchestrates teams rather than belonging to one.
+    isolation: crate::config::IsolationConfig,
     health_idle_warning: i64,
     runs: Runs,
     /// Where each run's web-backed invocations are answered. Absent for a run
@@ -239,6 +242,7 @@ impl Serve {
             ea_id,
             session_prefix: config.dashboard.session_prefix.clone(),
             default_workdir: config.agent.default_workdir.clone(),
+            isolation: config.isolation.clone(),
             health_idle_warning: config.health.idle_warning,
             runs: Runs::default(),
             panels: Panels::default(),
@@ -1369,6 +1373,7 @@ fn spawn_run_thread(
                 omar_dir: &context.omar_dir,
                 base_prefix: &context.session_prefix,
                 default_workdir: &context.default_workdir,
+                isolation: &context.isolation,
                 health_idle_warning: context.health_idle_warning,
                 inputs: &inputs,
                 replace,

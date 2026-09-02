@@ -22,6 +22,9 @@ pub struct Config {
 
     #[serde(default)]
     pub slack_bridge: SlackBridgeConfig,
+
+    #[serde(default)]
+    pub isolation: IsolationConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +74,39 @@ pub struct AgentConfig {
     /// Default working directory
     #[serde(default = "default_workdir")]
     pub default_workdir: String,
+}
+
+/// How a deployment's agents are separated from other deployments.
+///
+/// The team is the unit: agents in one team share a workspace, agents in
+/// different teams never do.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IsolationConfig {
+    /// `none`, `worktree`, or `container`.
+    #[serde(default = "default_isolation_mode")]
+    pub mode: String,
+
+    /// Image container mode runs agents in. The default carries no agent CLIs,
+    /// so a team using one fails its preflight until this points at an image
+    /// that has them — see docs/isolation.md.
+    #[serde(default = "default_isolation_image")]
+    pub image: String,
+
+    /// Host paths mounted into the container so backends find their logins.
+    /// A leading `~/` expands to the operator's home; a path that does not
+    /// exist is skipped rather than created.
+    #[serde(default = "default_credential_mounts")]
+    pub credential_mounts: Vec<String>,
+}
+
+impl Default for IsolationConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_isolation_mode(),
+            image: default_isolation_image(),
+            credential_mounts: default_credential_mounts(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -193,6 +229,28 @@ pub fn resolve_backend(name: &str) -> Result<String, String> {
 
 fn default_workdir() -> String {
     ".".to_string()
+}
+
+fn default_isolation_mode() -> String {
+    "none".to_string()
+}
+
+fn default_isolation_image() -> String {
+    "debian:bookworm-slim".to_string()
+}
+
+/// Every backend's login store. Mounting all of them is what makes a
+/// heterogeneous team work out of the box; an operator who wants a narrower
+/// boundary sets `credential_mounts` to the subset their team needs.
+fn default_credential_mounts() -> Vec<String> {
+    vec![
+        "~/.claude".to_string(),
+        "~/.claude.json".to_string(),
+        "~/.codex".to_string(),
+        "~/.cursor".to_string(),
+        "~/.gemini".to_string(),
+        "~/.local/share/opencode".to_string(),
+    ]
 }
 
 impl Default for DashboardConfig {
