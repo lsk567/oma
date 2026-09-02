@@ -292,11 +292,30 @@ export function assertChatMessage(value: unknown): ChatMessage {
   return { ...message, design, progress, selection } as ChatMessage;
 }
 
+/**
+ * Every status `omar serve` can report, as one list the type and the runtime
+ * check are both built from.
+ *
+ * They used to be two hand-written copies, which is how `stopped` came to be a
+ * status the daemon sends and the client rejects: the union was updated and the
+ * check below was not. One list cannot disagree with itself.
+ */
+export const RUN_STATUSES = [
+  "starting",
+  "running",
+  "stopping",
+  "completed",
+  "stopped",
+  "failed",
+] as const;
+
+export type RunStatus = (typeof RUN_STATUSES)[number];
+
 /** A run as `omar serve` reports it. `diagram_address` is host:port, not a URL. */
 export type RunRecord = {
   run_id: string;
   team: string;
-  status: "starting" | "running" | "completed" | "failed";
+  status: RunStatus;
   diagram_address: string | null;
   started_at: number;
   finished_at: number | null;
@@ -308,8 +327,12 @@ export type RunRequest = {
   inputs: Record<string, unknown>;
 };
 
-export function isRunFinished(status: RunRecord["status"]): boolean {
-  return status === "completed" || status === "failed";
+/**
+ * Whether the run is over, however it ended. `stopped` is an ending like any
+ * other -- it is what a stop asked for, not a failure to be reported.
+ */
+export function isRunFinished(status: RunStatus): boolean {
+  return status === "completed" || status === "stopped" || status === "failed";
 }
 
 export function assertRunRecord(value: unknown): RunRecord {
@@ -320,12 +343,7 @@ export function assertRunRecord(value: unknown): RunRecord {
   if (typeof record.run_id !== "string" || typeof record.team !== "string") {
     throw new Error("Run response is missing required run fields.");
   }
-  if (
-    record.status !== "starting" &&
-    record.status !== "running" &&
-    record.status !== "completed" &&
-    record.status !== "failed"
-  ) {
+  if (!RUN_STATUSES.includes(record.status as RunStatus)) {
     throw new Error(`Unsupported run status ${String(record.status)}.`);
   }
   return record as RunRecord;

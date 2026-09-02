@@ -290,6 +290,28 @@ export async function answerPanel(
   if (!response.ok) throw new Error(await readError(response));
 }
 
+/**
+ * Ask a run to stop at its next tag boundary.
+ *
+ * Accepted, not done: a graceful stop closes the current tag before it
+ * persists and tears down. Answers with the run record, so the caller learns
+ * the run is `stopping` from the same field it already watches — and a record
+ * that comes back already finished is a race with it ending, not a failure.
+ */
+export async function stopRun(
+  serveUrl: string,
+  runId: string,
+  signal?: AbortSignal,
+): Promise<RunRecord> {
+  const base = normalizeRuntimeUrl(serveUrl);
+  const response = await fetch(
+    `${base}/v1/runs/${encodeURIComponent(runId)}/stop`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal },
+  );
+  if (!response.ok) throw new Error(await readError(response));
+  return assertRunRecord(await response.json());
+}
+
 export async function fetchRun(
   serveUrl: string,
   runId: string,

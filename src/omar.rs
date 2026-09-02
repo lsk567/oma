@@ -765,9 +765,7 @@ fn deployment_dir(omar_dir: &std::path::Path, ea_id: ea::EaId, team: &str) -> Re
     if !topology::valid_identifier(team) {
         anyhow::bail!("invalid team name '{team}'");
     }
-    Ok(ea::ea_state_dir(ea_id, omar_dir)
-        .join("topologies")
-        .join(team))
+    Ok(deploy::dir_for(omar_dir, ea_id, team))
 }
 
 /// Ask the runner to stop, then wait, bounded by the run's own invocation
