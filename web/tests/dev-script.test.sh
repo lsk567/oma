@@ -34,6 +34,50 @@ fail() {
   exit 1
 }
 
+# The Node floor, checked with a stub rather than a real old Node: npm does not
+# enforce `engines`, so before this guard an old Node got all the way to a
+# SyntaxError inside a dependency that said nothing about Node versions.
+printf 'Checking the Node version guard...\n'
+stub_dir=$(mktemp -d)
+real_node=$(command -v node)
+cat >"$stub_dir/node" <<EOF
+#!/usr/bin/env bash
+# Only the version lookup is faked. The manifest read has to stay real, or this
+# would be testing the stub instead of the comparison.
+if [[ \${2-} == *process.versions.node* ]]; then
+  printf '20.20.0\n'
+  exit 0
+fi
+exec "$real_node" "\$@"
+EOF
+chmod +x "$stub_dir/node"
+
+guard_log=$(mktemp)
+if PATH="$stub_dir:$PATH" OMAR_DEV_OPEN=0 "$web_dir/dev.sh" >"$guard_log" 2>&1; then
+  printf 'FAIL: dev.sh ran on Node 20 instead of refusing\n' >&2
+  cat "$guard_log" >&2
+  rm -rf "$stub_dir" "$guard_log"
+  exit 1
+fi
+grep -q 'Node 20.20.0 is too old' "$guard_log" || {
+  printf 'FAIL: the guard refused without saying the Node version was why\n' >&2
+  cat "$guard_log" >&2
+  rm -rf "$stub_dir" "$guard_log"
+  exit 1
+}
+rm -rf "$stub_dir" "$guard_log"
+
+# A pull that adds a dependency leaves node_modules present but incomplete, so
+# a manifest newer than the tree has to reinstall. Touching package.json is
+# exactly what that pull looks like to the script.
+#
+# The tree has to exist and has to be older, or the assertion below holds for
+# the behaviour this replaced as well: a missing node_modules installs either
+# way, and that is not the path under test.
+[[ -d "$web_dir/node_modules" ]] || (cd "$web_dir" && npm install --silent)
+touch -t 202001010000 "$web_dir/node_modules"
+touch "$web_dir/package.json"
+
 printf 'Starting dev.sh...\n'
 OMAR_DEV_OPEN=0 \
   OMAR_SERVE_ADDRESS="$serve_address" \
@@ -56,6 +100,9 @@ curl -fsS -o /dev/null "$web_url/" || fail "Mission Control did not answer"
 # demo-mode shell here means the two started without being pointed at anything.
 curl -fsS "$web_url/" | grep -q "$serve_address" \
   || fail "the page does not name the daemon, so it launched in demo mode"
+
+grep -q 'Installing web dependencies' "$log" \
+  || fail "a manifest newer than node_modules did not trigger an install"
 
 printf 'Both answered. Stopping...\n'
 kill "$dev_pid"

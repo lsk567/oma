@@ -68,12 +68,49 @@ open_url() {
   fi
 }
 
+# Checked here because nothing else checks it: npm ignores `engines` unless the
+# project opts into engine-strict, so an old Node installs cleanly and then
+# fails inside a dependency, as a SyntaxError about some export that release
+# does not have. That trace says nothing about Node versions.
+if ! command -v node >/dev/null 2>&1; then
+  printf 'Node is not installed; Mission Control needs Node. See web/README.md.\n' >&2
+  exit 1
+fi
+# Matched rather than stripped of everything non-numeric: a range with two
+# versions in it -- ">=22.13.0 <25" -- strips to "22.13.025", which is not any
+# version, and compares wrong without ever looking wrong.
+required_node=$(node -p "require('$script_dir/package.json').engines.node.match(/[0-9]+(\.[0-9]+)*/)[0]")
+current_node=$(node -p 'process.versions.node')
+if [[ $(printf '%s\n%s\n' "$required_node" "$current_node" | sort -V | head -1) != "$required_node" ]]; then
+  printf 'Node %s is too old; Mission Control needs >=%s. Yours: %s\n' \
+    "$current_node" "$required_node" "$(command -v node)" >&2
+  exit 1
+fi
+
 printf 'Building the runtime...\n'
 (cd "$repo_root" && cargo build --quiet --bin omar)
 
+# Reinstalled when the manifests are newer than the tree, not just when the
+# tree is missing: a pull that adds a dependency leaves node_modules in place
+# but incomplete, and the failure shows up as a module the dev server cannot
+# resolve rather than as anything about installing.
+needs_install=0
 if [[ ! -d "$script_dir/node_modules" ]]; then
+  needs_install=1
+else
+  for manifest in package.json package-lock.json; do
+    if [[ "$script_dir/$manifest" -nt "$script_dir/node_modules" ]]; then
+      needs_install=1
+    fi
+  done
+fi
+
+if ((needs_install)); then
   printf 'Installing web dependencies...\n'
   (cd "$script_dir" && npm install --silent)
+  # npm only touches node_modules when it changes something, so stamp it to
+  # keep this from reinstalling on every run.
+  touch "$script_dir/node_modules"
 fi
 
 printf 'Starting omar serve on %s...\n' "$serve_address"
