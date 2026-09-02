@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::config;
 use crate::deploy::{self, DeploymentState};
 use crate::diagram::{DiagramServer, NoopTopologyObserver, TopologyObserver};
+use crate::isolation;
 use crate::manager::{self, McpLaunchContext, TopologyMcpContext};
 use crate::tmux::flatten_agent_name;
 use crate::tmux::DeliveryOptions;
@@ -1336,7 +1337,11 @@ pub struct TopologyRunConfig<'a> {
     pub ea_id: crate::ea::EaId,
     pub omar_dir: &'a Path,
     pub base_prefix: &'a str,
+    /// The directory a run's workspace is derived from. Under `none` this is
+    /// where every agent launches; under the other modes it is the repository
+    /// each team's worktree is cut from.
     pub default_workdir: &'a str,
+    pub isolation: &'a crate::config::IsolationConfig,
     pub health_idle_warning: i64,
     pub inputs: &'a [String],
     pub replace: bool,
@@ -1479,6 +1484,27 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
     // Only what this run spawned. A failure must not tear down a session it
     // refused to replace.
     let mut spawned: BTreeMap<String, String> = BTreeMap::new();
+    let deployment_id = record
+        .lock()
+        .map_err(|_| anyhow::anyhow!("deployment record lock poisoned"))?
+        .deployment_id
+        .clone();
+    let workspace = match isolation::prepare(
+        config.isolation,
+        config.ea_id,
+        &state.team,
+        &deployment_id,
+        config.default_workdir,
+        &runtime_dir,
+        &launch_binaries(&state),
+    ) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            observer.run_failed(&error.to_string());
+            fail_deployment(&record, &runtime_dir, &client, &spawned, &error);
+            return Err(error);
+        }
+    };
     let prepared = (|| -> Result<(InvocationServer, BTreeMap<String, Value>)> {
         let invocation_server = InvocationServer::start()?;
         spawn_topology_agents(
@@ -1487,6 +1513,7 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
             &runtime_dir,
             &invocation_server,
             &config,
+            &workspace,
             &mut spawned,
         )?;
         let inputs = parse_inputs(&state, config.inputs)?;
@@ -1497,6 +1524,9 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
         Err(error) => {
             observer.run_failed(&error.to_string());
             fail_deployment(&record, &runtime_dir, &client, &spawned, &error);
+            // Keep the worktree: a run that failed during setup is exactly
+            // when an operator needs to see what the team was given.
+            report_workspace_failures(workspace.teardown(true));
             return Err(error);
         }
     };
@@ -1569,6 +1599,7 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
                 .map(|guard| guard.sessions.clone())
                 .unwrap_or_default();
             fail_deployment(&record, &runtime_dir, &executor.client, &sessions, &error);
+            report_workspace_failures(workspace.teardown(true));
             return Err(error);
         }
     };
@@ -1588,6 +1619,9 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
     {
         eprintln!("warning: session not cleaned up: {failure}");
     }
+    // After the panes, never before: a worktree cannot be removed while a
+    // pane still has it as a working directory.
+    report_workspace_failures(workspace.teardown(false));
     {
         let mut guard = record
             .lock()
@@ -1622,12 +1656,39 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
     })
 }
 
+/// Every distinct binary this run's panes will launch.
+///
+/// Container isolation has to prove the image carries them before a pane sits
+/// at "command not found" with nobody to read it. The launch command is the
+/// source of truth rather than the backend name, because a backend's binary
+/// and its name need not match — `cursor` launches `cursor agent`.
+fn launch_binaries(state: &VmState) -> Vec<String> {
+    state
+        .agents
+        .values()
+        .filter(|agent| !is_web_backend(&agent.backend))
+        .filter_map(|agent| config::resolve_backend(canonical_backend(&agent.backend)).ok())
+        .filter_map(|command| command.split_whitespace().next().map(str::to_string))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Teardown is best effort: the run's own outcome is already decided, and a
+/// leftover container or worktree is an operator problem, not a run failure.
+fn report_workspace_failures(failures: Vec<String>) {
+    for failure in failures {
+        eprintln!("warning: workspace not cleaned up: {failure}");
+    }
+}
+
 fn spawn_topology_agents(
     state: &VmState,
     client: &TmuxClient,
     runtime_dir: &Path,
     invocation_server: &InvocationServer,
     config: &TopologyRunConfig<'_>,
+    workspace: &isolation::Workspace,
     spawned: &mut BTreeMap<String, String>,
 ) -> Result<()> {
     let protocol = "You are an OMAR topology agent. Only act on OMAR INVOCATION messages. You cannot message other agents. For each invocation, use only omar_set_port to set allowed effects and omar_complete to finish. Port writes are buffered and repeated writes use last-writer-wins semantics.";
@@ -1660,7 +1721,9 @@ fn spawn_topology_agents(
             ea_id: config.ea_id,
             session_prefix: config.base_prefix.to_string(),
             default_command: base_command.clone(),
-            default_workdir: config.default_workdir.to_string(),
+            // What this agent's own spawns inherit: its team's workspace, not
+            // the operator's checkout.
+            default_workdir: workspace.workdir().to_string(),
             health_idle_warning: config.health_idle_warning,
             tmux_server: std::env::var("OMAR_TMUX_SERVER").ok(),
             // Topology agents answer invocations; they do not chat with the
@@ -1674,7 +1737,8 @@ fn spawn_topology_agents(
             }),
         };
         let command = manager::build_agent_command(&base_command, &prompt_file, &[], &context);
-        client.new_session(&session, &command, Some(config.default_workdir))?;
+        let command = workspace.wrap_command(&command);
+        client.new_session(&session, &command, Some(workspace.workdir()))?;
         spawned.insert(name.clone(), session);
     }
 
@@ -2603,6 +2667,37 @@ mod tests {
         let loaded = load_program_with_compiler(&source_path, Some(&compiler_path)).unwrap();
 
         assert_eq!(loaded.team, "Demo");
+    }
+
+    #[test]
+    fn launch_binaries_are_what_a_container_image_must_carry() {
+        // Distinct, sorted, and named by the binary a pane actually runs —
+        // the container preflight probes these, so a backend whose binary and
+        // name differ must resolve to the binary.
+        let bytecode: Bytecode = serde_json::from_str(
+            r#"{
+              "version": 1,
+              "team": "Demo",
+              "instructions": [
+                {"op":"begin_plan","team":"Demo"},
+                {"op":"spawn_agent","name":"a","backend":"Codex"},
+                {"op":"spawn_agent","name":"b","backend":"Codex"},
+                {"op":"spawn_agent","name":"c","backend":"Cursor"},
+                {"op":"spawn_agent","name":"d","backend":"Web"},
+                {"op":"commit_plan"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let state = verify(&bytecode).unwrap();
+
+        let binaries = launch_binaries(&state);
+
+        // Two codex agents collapse to one probe; cursor launches `cursor
+        // agent`, so the binary is `cursor`, not the backend name.
+        assert_eq!(binaries, vec!["codex".to_string(), "cursor".to_string()]);
+        // A web agent has no pane and so nothing an image must carry.
+        assert!(!binaries.iter().any(|binary| binary == "web"));
     }
 
     #[test]

@@ -32,6 +32,7 @@ Terminal UI
 - **Heterogeneity**: Let `claude`, `codex`, and other agents collaborate as a team.
 - **Full control**: Talk to and control any subagent you want.
 - **Life span**: Long-running or ephemeral agents, your choice.
+- **Isolation**: Give each team its own git worktree or docker container. See [docs/isolation.md](docs/isolation.md).
 - **Customization**: Support all `tmux` commands you love.
 
 Other features include messaging systems integration (e.g., Slack), computer use, and more.
