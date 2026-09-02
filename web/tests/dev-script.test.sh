@@ -70,6 +70,12 @@ rm -rf "$stub_dir" "$guard_log"
 # A pull that adds a dependency leaves node_modules present but incomplete, so
 # a manifest newer than the tree has to reinstall. Touching package.json is
 # exactly what that pull looks like to the script.
+#
+# The tree has to exist and has to be older, or the assertion below holds for
+# the behaviour this replaced as well: a missing node_modules installs either
+# way, and that is not the path under test.
+[[ -d "$web_dir/node_modules" ]] || (cd "$web_dir" && npm install --silent)
+touch -t 202001010000 "$web_dir/node_modules"
 touch "$web_dir/package.json"
 
 printf 'Starting dev.sh...\n'

@@ -76,7 +76,10 @@ if ! command -v node >/dev/null 2>&1; then
   printf 'Node is not installed; Mission Control needs Node. See web/README.md.\n' >&2
   exit 1
 fi
-required_node=$(node -p "require('$script_dir/package.json').engines.node.replace(/[^0-9.]/g, '')")
+# Matched rather than stripped of everything non-numeric: a range with two
+# versions in it -- ">=22.13.0 <25" -- strips to "22.13.025", which is not any
+# version, and compares wrong without ever looking wrong.
+required_node=$(node -p "require('$script_dir/package.json').engines.node.match(/[0-9]+(\.[0-9]+)*/)[0]")
 current_node=$(node -p 'process.versions.node')
 if [[ $(printf '%s\n%s\n' "$required_node" "$current_node" | sort -V | head -1) != "$required_node" ]]; then
   printf 'Node %s is too old; Mission Control needs >=%s. Yours: %s\n' \
