@@ -716,6 +716,14 @@ test("a run can be stopped from the panel that shows it", async ({ page }) => {
   await expect(actions.getByRole("button", { name: /Stop/ })).toHaveCount(0, {
     timeout: 5000,
   });
+
+  // A stop is the ending it asked for, not a failure. The run settles to
+  // `stopped`, which the client has to both accept as a status and read as an
+  // ordinary end -- it did neither, and the run came to rest looking broken.
+  await expect(page.locator(".connection")).toContainText("finished", {
+    timeout: 5000,
+  });
+  await expect(page.locator(".connection-error")).toHaveCount(0);
 });
 
 test("discarding puts the topology away too", async ({ page }) => {

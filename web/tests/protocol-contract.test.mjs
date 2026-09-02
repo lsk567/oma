@@ -14,6 +14,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { startFakeServe, INVALID_MARKER } from "./fake-serve.mjs";
+import { RUN_STATUSES, assertRunRecord, isRunFinished } from "../app/lib/protocol.ts";
 
 const golden = JSON.parse(
   await readFile(new URL("./fixtures/diagram-snapshot.v1.json", import.meta.url), "utf8"),
@@ -90,6 +91,38 @@ test("the demo fixture is the captured topology, not an invented one", async () 
     assert.ok(fixtures.includes(`id: "${port.id}"`), `fixture carries ${port.id}`);
   }
   assert.match(fixtures, /export const reviewProgram = `team ReviewFlow\[/);
+});
+
+test("the client accepts every run status the daemon can send", async () => {
+  // Read out of the daemon's source rather than out of a built binary: this has
+  // to fail in seconds in a checkout with no Rust toolchain, because `web.yml`'s
+  // test job has none. Same bargain as the fixture check above.
+  const serve = await readFile(new URL("../../src/serve.rs", import.meta.url), "utf8");
+  const emitted = [...serve.matchAll(/\bstatus:? =? ?"([a-z]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(
+    [...new Set(emitted)].sort(),
+    [...RUN_STATUSES].sort(),
+    "the daemon and the client disagree about what a run status is",
+  );
+
+  // Naming the status is not enough. `stopped` reached the union while the
+  // parser kept its own hand-written list, so a stopped run arrived as an
+  // unreadable one and the page sat on a run that had already ended.
+  const record = {
+    run_id: "run-1",
+    team: "Cadence",
+    diagram_address: null,
+    started_at: 0,
+    finished_at: null,
+    error: null,
+  };
+  for (const status of RUN_STATUSES) {
+    assert.equal(assertRunRecord({ ...record, status }).status, status);
+  }
+
+  // A stop is an ending; asking for one is not.
+  assert.ok(isRunFinished("stopped"), "a stopped run has ended");
+  assert.ok(!isRunFinished("stopping"), "a stopping run has not ended yet");
 });
 
 test("run admission accepts a program and reports where to observe it", async () => {

@@ -293,27 +293,23 @@ export async function answerPanel(
 /**
  * Ask a run to stop at its next tag boundary.
  *
- * Accepted, not done. A graceful stop closes the current tag before it
- * persists and tears down, so the answer says it was heard and the run
- * record is what says when it has finished. `stopping: false` means the run
- * had already ended — a race with it finishing, not a failure.
+ * Accepted, not done: a graceful stop closes the current tag before it
+ * persists and tears down. Answers with the run record, so the caller learns
+ * the run is `stopping` from the same field it already watches — and a record
+ * that comes back already finished is a race with it ending, not a failure.
  */
 export async function stopRun(
   serveUrl: string,
   runId: string,
   signal?: AbortSignal,
-): Promise<{ stopping: boolean; status: string }> {
+): Promise<RunRecord> {
   const base = normalizeRuntimeUrl(serveUrl);
   const response = await fetch(
     `${base}/v1/runs/${encodeURIComponent(runId)}/stop`,
     { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal },
   );
   if (!response.ok) throw new Error(await readError(response));
-  const body = (await response.json()) as { stopping?: unknown; status?: unknown };
-  return {
-    stopping: body.stopping === true,
-    status: typeof body.status === "string" ? body.status : "unknown",
-  };
+  return assertRunRecord(await response.json());
 }
 
 export async function fetchRun(

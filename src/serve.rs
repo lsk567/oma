@@ -1467,37 +1467,47 @@ fn find_active_run<'a>(runs: &'a BTreeMap<String, RunRecord>, team: &str) -> Opt
 /// that reaches this function is served by the very process being asked to
 /// stop. A force path from the UI would be a harder action sitting one click
 /// from deploy, and it has nothing to fix that this does not.
+///
+/// Answers with the run record, like every other run route: 202 that the stop
+/// was accepted, 200 that the run had already ended -- a race with it
+/// finishing, and the outcome is the same either way.
 fn stop_run(context: &Arc<Context_>, id: &str) -> (u16, Value) {
     let team = {
         let runs = context.runs.lock().expect("serve runs poisoned");
         match runs.get(id) {
             Some(record) if is_active(&record.status) => record.team.clone(),
-            // Not an error worth alarming anyone with: asking a finished run to
-            // stop is a race with it finishing, and the outcome is the same.
-            Some(record) => {
-                return (
-                    200,
-                    json!({"run_id": id, "status": record.status, "stopping": false}),
-                )
-            }
+            Some(record) => return (200, json!(record)),
             None => return (404, json!({"error": "unknown run"})),
         }
     };
 
     let dir = crate::deploy::dir_for(&context.omar_dir, context.ea_id, &team);
-    match crate::deploy::request_stop(&dir) {
-        // Accepted, not done: the run ends at the next tag boundary, and the
-        // record's status is what says when it has.
-        Ok(()) => (
-            202,
-            json!({"run_id": id, "status": "stopping", "stopping": true}),
-        ),
-        Err(error) => (500, json!({"error": format!("{error:#}")})),
+    if let Err(error) = crate::deploy::request_stop(&dir) {
+        return (500, json!({"error": format!("{error:#}")}));
+    }
+
+    // Recorded, not just answered. The record is this API's account of the run
+    // -- `GET /v1/runs` would otherwise keep calling a stopping run `running`,
+    // to every client except the one that happened to ask. `RunEnd` overwrites
+    // it when the loop reaches the boundary.
+    let mut runs = context.runs.lock().expect("serve runs poisoned");
+    match runs.get_mut(id) {
+        // Re-checked because the run may have ended while the request was being
+        // written, and a finished status must not be walked back to stopping.
+        Some(record) if is_active(&record.status) => {
+            record.status = "stopping".to_string();
+            (202, json!(record))
+        }
+        Some(record) => (200, json!(record)),
+        None => (404, json!({"error": "unknown run"})),
     }
 }
 
+/// A stopping run is still active: it holds its tmux sessions until the current
+/// tag closes, so a second run of the same team would still be answered by the
+/// first one's panes.
 fn is_active(status: &str) -> bool {
-    status == "starting" || status == "running"
+    status == "starting" || status == "running" || status == "stopping"
 }
 
 fn now_unix() -> u64 {
@@ -1670,21 +1680,41 @@ mod tests {
 
         let response = request(address, "POST", "/v1/runs/run-1/stop", Some("{}"));
         assert!(response.contains(" 202 "), "{response}");
-        assert!(response.contains("\"stopping\":true"), "{response}");
         assert!(
             crate::deploy::stop_requested(&dir),
             "the runner has nothing to read"
         );
 
+        // Recorded, not merely answered. A client that reloads, and a second
+        // one that never saw the ask, both learn the run is stopping from here
+        // and from nowhere else.
+        assert!(response.contains("\"status\":\"stopping\""), "{response}");
+        assert_eq!(
+            server
+                .context
+                .runs
+                .lock()
+                .expect("runs")
+                .get("run-1")
+                .expect("run")
+                .status,
+            "stopping"
+        );
+
+        // And it stays active while it stops: the sessions are still up, so a
+        // second run of the team would be answered by the first one's panes.
+        assert!(is_active("stopping"));
+
         // A run that has already ended is not an error: asking is a race with
-        // it finishing, and the outcome is the same either way.
+        // it finishing, and the outcome is the same either way. The status it
+        // reached is not walked back to stopping.
         {
             let mut runs = server.context.runs.lock().expect("runs");
             runs.get_mut("run-1").expect("run").status = "completed".to_string();
         }
         let response = request(address, "POST", "/v1/runs/run-1/stop", Some("{}"));
         assert!(response.contains(" 200 "), "{response}");
-        assert!(response.contains("\"stopping\":false"), "{response}");
+        assert!(response.contains("\"status\":\"completed\""), "{response}");
 
         let response = request(address, "POST", "/v1/runs/nobody/stop", Some("{}"));
         assert!(response.contains(" 404 "), "{response}");

@@ -126,8 +126,6 @@ export function Studio({
   });
   // Deploying starts real agents, so the button arms a second, explicit step.
   const [confirming, setConfirming] = useState(false);
-  /** A stop has been asked for and the run has not ended yet. */
-  const [stopping, setStopping] = useState(false);
   const [daemon, setDaemon] = useState<Daemon>(
     isDemo ? { state: "demo" } : { state: "checking" },
   );
@@ -369,7 +367,9 @@ export function Studio({
           if (latest) {
             setRun(latest);
             if (isRunFinished(latest.status)) {
-              setPhase(latest.status === "completed" ? "finished" : "failed");
+              // `stopped` is the ending a stop asked for, so it reads as
+              // finished; only `failed` is a failure.
+              setPhase(latest.status === "failed" ? "failed" : "finished");
               if (latest.error) setError(latest.error);
               return;
             }
@@ -436,8 +436,6 @@ export function Studio({
   async function confirmDesign() {
     if (!design || phase !== "review") return;
     setConfirming(false);
-    // A new run is not stopping, whatever the last one was doing.
-    setStopping(false);
     setPhase("spawning");
     setError("");
     try {
@@ -465,19 +463,19 @@ export function Studio({
    * A graceful stop lands at the next tag boundary rather than immediately, so
    * the button has to hold a *stopping* state — one that just went quiet would
    * read as hung for however long the current invocation takes.
+   *
+   * That state belongs to the run, not to this component. The daemon records it
+   * and answers with the record, so the button reads the same field it already
+   * watches for every other status — one source, which cannot disagree with
+   * itself the way a remembered click and a polled record can.
    */
   async function requestStop() {
-    if (!run || stopping) return;
-    setStopping(true);
+    if (!run || isStopping) return;
     setError("");
     try {
-      const outcome = await stopRun(serveUrl, run.run_id);
-      // Already over: a race with it finishing, not a failure. The run record
-      // is about to say so, and nothing is still stopping.
-      if (!outcome.stopping) setStopping(false);
+      setRun(await stopRun(serveUrl, run.run_id));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
-      setStopping(false);
     }
   }
 
@@ -578,9 +576,9 @@ export function Studio({
   }, [source, filename, serveUrl, canRun, presentKey]);
 
   const isDeployed = run !== null;
-  // Only meaningful while a run is in flight: however it ended, nothing is
-  // still stopping, and a button left saying so would outlive its subject.
-  const isStopping = stopping && phase === "observing";
+  // The daemon's own word for it. Every terminal status replaces it, so the
+  // state cannot outlive the run it was asked of.
+  const isStopping = run?.status === "stopping";
 
   // Widths are clamped against the workspace so the diagram always keeps a
   // usable column, whichever divider is being dragged. Below a panel's minimum
