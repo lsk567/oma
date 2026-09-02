@@ -94,19 +94,12 @@ test("the demo fixture is the captured topology, not an invented one", async () 
 });
 
 test("the client accepts every run status the daemon can send", async () => {
-  // Read out of the daemon's source rather than out of a built binary: this has
-  // to fail in seconds in a checkout with no Rust toolchain, because `web.yml`'s
-  // test job has none. Same bargain as the fixture check above.
-  const serve = await readFile(new URL("../../src/serve.rs", import.meta.url), "utf8");
-  const emitted = [...serve.matchAll(/\bstatus:? =? ?"([a-z]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(
-    [...new Set(emitted)].sort(),
-    [...RUN_STATUSES].sort(),
-    "the daemon and the client disagree about what a run status is",
-  );
-
-  // Naming the status is not enough. `stopped` reached the union while the
-  // parser kept its own hand-written list, so a stopped run arrived as an
+  // What the daemon can send is no longer scraped out of its source: the list
+  // below is generated from the Rust enum, and `cargo test` fails when the
+  // committed copy is stale.
+  //
+  // Naming the status is still not enough. `stopped` reached the union while
+  // the parser kept its own hand-written list, so a stopped run arrived as an
   // unreadable one and the page sat on a run that had already ended.
   const record = {
     run_id: "run-1",

@@ -15,6 +15,9 @@ mod panic_hook;
 mod paths;
 mod process;
 mod projects;
+// The generator runs under `cargo test`; nothing in a release build calls it.
+#[cfg(test)]
+mod protocol;
 mod scheduler;
 mod serve;
 mod stub_agent;

@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use ts_rs::TS;
 
 use crate::topology::{PortKind, VmState};
 
@@ -17,7 +18,73 @@ pub const DIAGRAM_PROTOCOL_VERSION: u32 = 1;
 /// Events a slow subscriber may fall behind by before it is dropped.
 const SUBSCRIBER_QUEUE: usize = 256;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The vocabularies the diagram protocol speaks.
+///
+/// These were `String` on this side and unions on the client's, which is one
+/// list written twice in two languages -- and the client's copy was the only
+/// one a compiler ever checked. Written down here, they are checked at both
+/// ends and generated into TypeScript from this definition, so a variant added
+/// to the runtime cannot quietly fail to reach the client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ReactionStatus {
+    Idle,
+    Running,
+    Completed,
+}
+
+/// What an edge means, which decides how it is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeKind {
+    Connection,
+    Trigger,
+    Effect,
+}
+
+/// Where the drawing stands. `Ready` is a topology compiled but never run,
+/// which is what a proposal's preview is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagramStatus {
+    Ready,
+    Running,
+    Completed,
+    Failed,
+}
+
+/// The name serde puts on the wire for a unit variant.
+///
+/// Read out of serde rather than written down a second time. The SSE framing
+/// needs the event's name in its `event:` line and the generator needs it in
+/// TypeScript; both ask serde, so neither can spell it differently from the
+/// `kind` in the JSON body.
+pub fn wire_name<T: Serialize>(value: &T) -> Option<String> {
+    match serde_json::to_value(value) {
+        Ok(Value::String(name)) => Some(name),
+        _ => None,
+    }
+}
+
+/// What happened, as the event stream names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagramEventKind {
+    RunStarted,
+    TagAdvanced,
+    ReactionStarted,
+    ReactionCompleted,
+    RunCompleted,
+    RunFailed,
+}
+
+impl std::fmt::Display for DiagramEventKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&wire_name(self).ok_or(std::fmt::Error)?)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct DiagramAgent {
     pub id: String,
     pub name: String,
@@ -31,7 +98,7 @@ pub struct DiagramAgent {
 /// Names are flattened by the time the VM sees them, so without this a client
 /// would have to rediscover the grouping by splitting on '.' — guessing at a
 /// convention instead of reading what the program said.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct DiagramInstance {
     pub id: String,
     pub name: String,
@@ -46,7 +113,7 @@ pub struct DiagramInstance {
     pub parent: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct DiagramPort {
     pub id: String,
     pub name: String,
@@ -54,6 +121,7 @@ pub struct DiagramPort {
     #[serde(rename = "type")]
     pub ty: String,
     pub delay: Option<u64>,
+    #[ts(type = "unknown | null")]
     pub value: Option<Value>,
     pub last_tag: Option<DiagramTag>,
     pub instance: String,
@@ -65,7 +133,7 @@ pub struct DiagramPort {
 /// feeds it and nothing can write to it. `last_tag` is when it last fired, so a
 /// client can show the hand where the schedule actually is rather than
 /// animating on a guess.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct DiagramTimer {
     pub id: String,
     pub name: String,
@@ -76,7 +144,7 @@ pub struct DiagramTimer {
     pub instance: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct DiagramReaction {
     pub id: String,
     pub name: String,
@@ -85,7 +153,7 @@ pub struct DiagramReaction {
     pub triggers: Vec<String>,
     pub effects: Vec<String>,
     pub contract: String,
-    pub status: String,
+    pub status: ReactionStatus,
     pub invocation_id: Option<String>,
     pub instance: String,
     /// Nanoseconds this reaction gave itself, or `None` for one bounded only by
@@ -95,10 +163,10 @@ pub struct DiagramReaction {
     pub within: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct DiagramEdge {
     pub id: String,
-    pub kind: String,
+    pub kind: EdgeKind,
     pub source: String,
     pub target: String,
     /// Null when the hop costs nothing. `0` is `after 0`, which costs a
@@ -108,18 +176,18 @@ pub struct DiagramEdge {
     pub delay: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct DiagramTag {
     pub timestamp: u64,
     pub microstep: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct DiagramSnapshot {
     pub protocol_version: u32,
     pub team: String,
     pub sequence: u64,
-    pub status: String,
+    pub status: DiagramStatus,
     pub current_tag: Option<DiagramTag>,
     /// Nanoseconds physical time had run past `current_tag` when it executed.
     /// `None` before the first tag. A sequence number says how much has been
@@ -211,7 +279,7 @@ impl DiagramSnapshot {
                 triggers: reaction.triggers.iter().map(&trigger_id).collect(),
                 effects: reaction.effects.iter().map(|name| port_id(name)).collect(),
                 contract: reaction.contract.clone(),
-                status: "idle".to_string(),
+                status: ReactionStatus::Idle,
                 invocation_id: None,
                 instance: reaction.instance.clone(),
                 within: reaction.within,
@@ -221,7 +289,7 @@ impl DiagramSnapshot {
         for connection in &state.connections {
             edges.push(DiagramEdge {
                 id: format!("connection::{}::{}", connection.source, connection.target),
-                kind: "connection".to_string(),
+                kind: EdgeKind::Connection,
                 source: port_id(&connection.source),
                 target: port_id(&connection.target),
                 delay: connection.delay,
@@ -231,7 +299,7 @@ impl DiagramSnapshot {
             for trigger in &reaction.triggers {
                 edges.push(DiagramEdge {
                     id: format!("trigger::{trigger}::{name}"),
-                    kind: "trigger".to_string(),
+                    kind: EdgeKind::Trigger,
                     source: trigger_id(trigger),
                     target: reaction_id(name),
                     delay: None,
@@ -240,7 +308,7 @@ impl DiagramSnapshot {
             for effect in &reaction.effects {
                 edges.push(DiagramEdge {
                     id: format!("effect::{name}::{effect}"),
-                    kind: "effect".to_string(),
+                    kind: EdgeKind::Effect,
                     source: reaction_id(name),
                     target: port_id(effect),
                     delay: None,
@@ -251,7 +319,7 @@ impl DiagramSnapshot {
             protocol_version: DIAGRAM_PROTOCOL_VERSION,
             team: state.team.clone(),
             sequence: 0,
-            status: "ready".to_string(),
+            status: DiagramStatus::Ready,
             current_tag: None,
             lag: None,
             instances,
@@ -264,13 +332,14 @@ impl DiagramSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct DiagramEvent {
     pub protocol_version: u32,
     pub sequence: u64,
     pub team: String,
     pub tag: Option<DiagramTag>,
-    pub kind: String,
+    pub kind: DiagramEventKind,
+    #[ts(type = "Record<string, unknown>")]
     pub payload: Value,
 }
 
@@ -325,8 +394,13 @@ impl DiagramPublisher {
     /// lock. Doing them separately lets `/v1/diagram` return updated state
     /// carrying the previous sequence, which breaks the versioning contract
     /// clients rely on to tell whether they are behind.
-    fn publish_with<F>(&self, kind: &str, tag: Option<DiagramTag>, payload: Value, mutate: F)
-    where
+    fn publish_with<F>(
+        &self,
+        kind: DiagramEventKind,
+        tag: Option<DiagramTag>,
+        payload: Value,
+        mutate: F,
+    ) where
         F: FnOnce(&mut DiagramSnapshot),
     {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
@@ -341,7 +415,7 @@ impl DiagramPublisher {
             sequence,
             team,
             tag,
-            kind: kind.to_string(),
+            kind,
             payload,
         };
         let mut subscribers = self
@@ -356,16 +430,20 @@ impl DiagramPublisher {
     /// Status is part of the snapshot, so it advances with the sequence like
     /// every other field — setting it on its own would let `/v1/diagram`
     /// report a finished run under the sequence it had while running.
-    fn publish_status(&self, kind: &str, status: &str, payload: Value) {
+    fn publish_status(&self, kind: DiagramEventKind, status: DiagramStatus, payload: Value) {
         self.publish_with(kind, None, payload, |snapshot| {
-            snapshot.status = status.to_string();
+            snapshot.status = status;
         });
     }
 }
 
 impl TopologyObserver for DiagramPublisher {
     fn run_started(&self) {
-        self.publish_status("run_started", "running", json!({}));
+        self.publish_status(
+            DiagramEventKind::RunStarted,
+            DiagramStatus::Running,
+            json!({}),
+        );
     }
 
     fn tag_advanced(
@@ -380,7 +458,7 @@ impl TopologyObserver for DiagramPublisher {
             microstep,
         };
         self.publish_with(
-            "tag_advanced",
+            DiagramEventKind::TagAdvanced,
             Some(tag),
             json!({ "ports": ports, "lag": lag }),
             |snapshot| {
@@ -420,12 +498,12 @@ impl TopologyObserver for DiagramPublisher {
                 .iter_mut()
                 .find(|item| item.name == reaction)
             {
-                item.status = "running".to_string();
+                item.status = ReactionStatus::Running;
                 item.invocation_id = Some(invocation_id.to_string());
             }
         };
         self.publish_with(
-            "reaction_started",
+            DiagramEventKind::ReactionStarted,
             Some(tag),
             json!({ "reaction": reaction_id(reaction), "invocation_id": invocation_id }),
             apply,
@@ -450,12 +528,12 @@ impl TopologyObserver for DiagramPublisher {
                 .iter_mut()
                 .find(|item| item.name == reaction)
             {
-                item.status = "completed".to_string();
+                item.status = ReactionStatus::Completed;
                 item.invocation_id = Some(invocation_id.to_string());
             }
         };
         self.publish_with(
-            "reaction_completed",
+            DiagramEventKind::ReactionCompleted,
             Some(tag),
             json!({
                 "reaction": reaction_id(reaction),
@@ -467,11 +545,19 @@ impl TopologyObserver for DiagramPublisher {
     }
 
     fn run_completed(&self, outputs: &BTreeMap<String, Value>) {
-        self.publish_status("run_completed", "completed", json!({ "outputs": outputs }));
+        self.publish_status(
+            DiagramEventKind::RunCompleted,
+            DiagramStatus::Completed,
+            json!({ "outputs": outputs }),
+        );
     }
 
     fn run_failed(&self, message: &str) {
-        self.publish_status("run_failed", "failed", json!({ "message": message }));
+        self.publish_status(
+            DiagramEventKind::RunFailed,
+            DiagramStatus::Failed,
+            json!({ "message": message }),
+        );
     }
 }
 
@@ -890,7 +976,7 @@ mod tests {
         let trigger = snapshot
             .edges
             .iter()
-            .find(|edge| edge.kind == "trigger")
+            .find(|edge| edge.kind == EdgeKind::Trigger)
             .expect("the timer triggers the reaction");
         assert_eq!(trigger.source, "timer::beat");
 
@@ -961,9 +1047,18 @@ mod tests {
         assert_eq!(snapshot.protocol_version, DIAGRAM_PROTOCOL_VERSION);
         assert_eq!(snapshot.agents[0].id, "agent::worker");
         assert_eq!(snapshot.ports.len(), 2);
-        assert!(snapshot.edges.iter().any(|edge| edge.kind == "trigger"));
-        assert!(snapshot.edges.iter().any(|edge| edge.kind == "effect"));
-        assert!(snapshot.edges.iter().any(|edge| edge.kind == "connection"));
+        assert!(snapshot
+            .edges
+            .iter()
+            .any(|edge| edge.kind == EdgeKind::Trigger));
+        assert!(snapshot
+            .edges
+            .iter()
+            .any(|edge| edge.kind == EdgeKind::Effect));
+        assert!(snapshot
+            .edges
+            .iter()
+            .any(|edge| edge.kind == EdgeKind::Connection));
     }
 
     #[test]

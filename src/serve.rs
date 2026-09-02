@@ -18,6 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -43,11 +44,11 @@ const MAX_SELECTION_NAME: usize = 128;
 /// Messages a stalled chat subscriber may fall behind by before it is dropped.
 const CHAT_QUEUE: usize = 256;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 pub struct RunRecord {
     pub run_id: String,
     pub team: String,
-    pub status: String,
+    pub status: RunStatus,
     pub diagram_address: Option<String>,
     pub started_at: u64,
     pub finished_at: Option<u64>,
@@ -83,12 +84,53 @@ fn default_timeout_seconds() -> u64 {
 type Runs = Arc<Mutex<BTreeMap<String, RunRecord>>>;
 type Panels = Arc<Mutex<BTreeMap<String, topology::PanelAccess>>>;
 
+/// Who spoke. Two parties, and a client draws them differently, so this is a
+/// vocabulary rather than free text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatRole {
+    Operator,
+    Assistant,
+}
+
+/// Every status a run can be reported in.
+///
+/// `Starting` is a run admitted but not yet observable, `Stopping` one that has
+/// been asked to end and has not reached the boundary yet; the rest are what
+/// the loop ended on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    Starting,
+    Running,
+    /// A stop has been requested and the loop has not reached the tag boundary
+    /// where it takes effect.
+    Stopping,
+    Completed,
+    /// A run that ended because it was asked to. An ending like any other, not
+    /// a failure -- the daemon has answered this since `RunEnd::Stopped`
+    /// existed, and no client had it written down.
+    Stopped,
+    Failed,
+}
+
+impl RunStatus {
+    /// Whether the run still holds its agents. Everything else is an ending.
+    ///
+    /// A stopping run is still active: it holds its tmux sessions until the
+    /// current tag closes, so a second run of the same team would still be
+    /// answered by the first one's panes.
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Starting | Self::Running | Self::Stopping)
+    }
+}
+
 /// One entry in the operator/EA conversation. `design` is set only on
 /// proposals, and carries a program the operator has *not* yet approved.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 pub struct ChatMessage {
     pub sequence: u64,
-    pub role: String,
+    pub role: ChatRole,
     pub text: String,
     /// Commentary while working, rather than something awaiting an answer.
     pub progress: bool,
@@ -99,10 +141,11 @@ pub struct ChatMessage {
     pub selection: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct ProposedDesign {
     pub program: String,
     #[serde(default)]
+    #[ts(type = "Record<string, unknown>")]
     pub inputs: BTreeMap<String, Value>,
     /// The compiled topology, so the operator sees what they are approving
     /// before any run exists.
@@ -163,7 +206,7 @@ struct Context_ {
 impl Context_ {
     fn publish(
         &self,
-        role: &str,
+        role: ChatRole,
         text: String,
         progress: bool,
         design: Option<ProposedDesign>,
@@ -173,7 +216,7 @@ impl Context_ {
 
     fn publish_with_selection(
         &self,
-        role: &str,
+        role: ChatRole,
         text: String,
         progress: bool,
         design: Option<ProposedDesign>,
@@ -183,7 +226,7 @@ impl Context_ {
         chat.sequence += 1;
         let message = ChatMessage {
             sequence: chat.sequence,
-            role: role.to_string(),
+            role,
             text,
             progress,
             design,
@@ -865,7 +908,7 @@ fn send_to_ea(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
         );
     }
     let message = context.publish_with_selection(
-        "operator",
+        ChatRole::Operator,
         request.text.clone(),
         false,
         None,
@@ -933,7 +976,7 @@ fn agent_reply(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     if reply.token != context.agent_token {
         return (403, json!({"error": "forbidden"}));
     }
-    context.publish("assistant", reply.text, reply.progress, None);
+    context.publish(ChatRole::Assistant, reply.text, reply.progress, None);
     (202, json!({"status": "delivered"}))
 }
 
@@ -955,7 +998,7 @@ fn agent_proposal(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
         Err(error) => return (400, json!({"error": format!("{error:#}")})),
     };
     context.publish(
-        "assistant",
+        ChatRole::Assistant,
         proposal.summary,
         false,
         Some(ProposedDesign {
@@ -1093,7 +1136,7 @@ fn start_run(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     let record = RunRecord {
         run_id: run_id.clone(),
         team: state.team.clone(),
-        status: "starting".to_string(),
+        status: RunStatus::Starting,
         diagram_address: None,
         started_at: now_unix(),
         finished_at: None,
@@ -1113,8 +1156,8 @@ fn start_run(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
             let mut runs = context.runs.lock().expect("serve runs poisoned");
             if let Some(record) = runs.get_mut(&run_id) {
                 record.diagram_address = Some(diagram_address.to_string());
-                if record.status == "starting" {
-                    record.status = "running".to_string();
+                if record.status == RunStatus::Starting {
+                    record.status = RunStatus::Running;
                 }
                 return (201, json!(record));
             }
@@ -1418,10 +1461,10 @@ fn spawn_run_thread(
         if let Some(record) = runs.get_mut(&run_id) {
             record.finished_at = Some(now_unix());
             match outcome {
-                Ok(topology::RunEnd::Completed) => record.status = "completed".to_string(),
-                Ok(topology::RunEnd::Stopped) => record.status = "stopped".to_string(),
+                Ok(topology::RunEnd::Completed) => record.status = RunStatus::Completed,
+                Ok(topology::RunEnd::Stopped) => record.status = RunStatus::Stopped,
                 Err(error) => {
-                    record.status = "failed".to_string();
+                    record.status = RunStatus::Failed;
                     record.error = Some(format!("{error:#}"));
                 }
             }
@@ -1453,7 +1496,7 @@ fn encode_inputs(state: &VmState, inputs: &BTreeMap<String, Value>) -> Result<Ve
 
 fn find_active_run<'a>(runs: &'a BTreeMap<String, RunRecord>, team: &str) -> Option<&'a RunRecord> {
     runs.values()
-        .find(|record| record.team == team && is_active(&record.status))
+        .find(|record| record.team == team && record.status.is_active())
 }
 
 /// Ask a run to stop at its next tag boundary.
@@ -1463,7 +1506,7 @@ fn find_active_run<'a>(runs: &'a BTreeMap<String, RunRecord>, team: &str) -> Opt
 /// state, logs and outputs before the sessions go.
 ///
 /// Graceful only. `omar kill` exists for a runner that has stopped answering,
-/// and that case cannot arise here — the runner is this daemon, so a request
+/// and that case cannot arise here -- the runner is this daemon, so a request
 /// that reaches this function is served by the very process being asked to
 /// stop. A force path from the UI would be a harder action sitting one click
 /// from deploy, and it has nothing to fix that this does not.
@@ -1475,7 +1518,7 @@ fn stop_run(context: &Arc<Context_>, id: &str) -> (u16, Value) {
     let team = {
         let runs = context.runs.lock().expect("serve runs poisoned");
         match runs.get(id) {
-            Some(record) if is_active(&record.status) => record.team.clone(),
+            Some(record) if record.status.is_active() => record.team.clone(),
             Some(record) => return (200, json!(record)),
             None => return (404, json!({"error": "unknown run"})),
         }
@@ -1494,20 +1537,13 @@ fn stop_run(context: &Arc<Context_>, id: &str) -> (u16, Value) {
     match runs.get_mut(id) {
         // Re-checked because the run may have ended while the request was being
         // written, and a finished status must not be walked back to stopping.
-        Some(record) if is_active(&record.status) => {
-            record.status = "stopping".to_string();
+        Some(record) if record.status.is_active() => {
+            record.status = RunStatus::Stopping;
             (202, json!(record))
         }
         Some(record) => (200, json!(record)),
         None => (404, json!({"error": "unknown run"})),
     }
-}
-
-/// A stopping run is still active: it holds its tmux sessions until the current
-/// tag closes, so a second run of the same team would still be answered by the
-/// first one's panes.
-fn is_active(status: &str) -> bool {
-    status == "starting" || status == "running" || status == "stopping"
 }
 
 fn now_unix() -> u64 {
@@ -1622,11 +1658,11 @@ mod tests {
         }
     }
 
-    fn record(team: &str, status: &str) -> RunRecord {
+    fn record(team: &str, status: RunStatus) -> RunRecord {
         RunRecord {
-            run_id: format!("{team}-{status}"),
+            run_id: format!("{team}-{status:?}"),
             team: team.to_string(),
-            status: status.to_string(),
+            status,
             diagram_address: None,
             started_at: 0,
             finished_at: None,
@@ -1665,7 +1701,7 @@ mod tests {
                 RunRecord {
                     run_id: "run-1".to_string(),
                     team: team.to_string(),
-                    status: "running".to_string(),
+                    status: RunStatus::Running,
                     diagram_address: None,
                     started_at: 0,
                     finished_at: None,
@@ -1698,19 +1734,19 @@ mod tests {
                 .get("run-1")
                 .expect("run")
                 .status,
-            "stopping"
+            RunStatus::Stopping
         );
 
         // And it stays active while it stops: the sessions are still up, so a
         // second run of the team would be answered by the first one's panes.
-        assert!(is_active("stopping"));
+        assert!(RunStatus::Stopping.is_active());
 
         // A run that has already ended is not an error: asking is a race with
         // it finishing, and the outcome is the same either way. The status it
         // reached is not walked back to stopping.
         {
             let mut runs = server.context.runs.lock().expect("runs");
-            runs.get_mut("run-1").expect("run").status = "completed".to_string();
+            runs.get_mut("run-1").expect("run").status = RunStatus::Completed;
         }
         let response = request(address, "POST", "/v1/runs/run-1/stop", Some("{}"));
         assert!(response.contains(" 200 "), "{response}");
@@ -1764,16 +1800,16 @@ mod tests {
     #[test]
     fn active_run_lookup_ignores_finished_and_other_teams() {
         let runs = BTreeMap::from([
-            ("a".to_string(), record("Sample", "completed")),
-            ("b".to_string(), record("Other", "running")),
+            ("a".to_string(), record("Sample", RunStatus::Completed)),
+            ("b".to_string(), record("Other", RunStatus::Running)),
         ]);
         assert!(find_active_run(&runs, "Sample").is_none());
 
         let mut runs = runs;
-        runs.insert("c".to_string(), record("Sample", "starting"));
+        runs.insert("c".to_string(), record("Sample", RunStatus::Starting));
         assert_eq!(
-            find_active_run(&runs, "Sample").map(|record| record.status.as_str()),
-            Some("starting")
+            find_active_run(&runs, "Sample").map(|record| record.status),
+            Some(RunStatus::Starting)
         );
     }
 

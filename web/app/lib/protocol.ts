@@ -1,13 +1,62 @@
+/**
+ * What the client does with the protocol. What the protocol *is* now lives in
+ * `protocol-generated.ts`, emitted from the Rust wire types by
+ * `cargo test protocol`.
+ *
+ * They used to be one hand-written file per language with nothing holding them
+ * together, and they drifted: `stopped` is a status the daemon has answered for
+ * as long as `RunEnd::Stopped` has existed, and it appeared in neither the
+ * union here nor the check below.
+ *
+ * Re-exported rather than replaced, so every existing import still resolves
+ * from here and the split is invisible to callers.
+ */
+export type {
+  ChatMessage,
+  ChatRole,
+  DiagramAgent,
+  DiagramEdge,
+  DiagramEvent,
+  DiagramEventKind,
+  DiagramInstance,
+  DiagramPort,
+  DiagramReaction,
+  DiagramSnapshot,
+  DiagramStatus,
+  DiagramTag,
+  DiagramTimer,
+  EdgeKind,
+  PortKind,
+  ProposedDesign,
+  ReactionStatus,
+  RunRecord,
+  RunStatus,
+} from "./protocol-generated.ts";
+
+export {
+  CHAT_ROLES,
+  DIAGRAM_EVENT_KINDS,
+  DIAGRAM_STATUSES,
+  EDGE_KINDS,
+  PORT_KINDS,
+  REACTION_STATUSES,
+  RUN_STATUSES,
+} from "./protocol-generated.ts";
+
+import { CHAT_ROLES, RUN_STATUSES } from "./protocol-generated.ts";
+import type {
+  ChatMessage,
+  DiagramEvent,
+  DiagramPort,
+  DiagramSnapshot,
+  RunRecord,
+  RunStatus,
+} from "./protocol-generated.ts";
+
 export const DIAGRAM_PROTOCOL_VERSION = 1;
 
 /** Version of the `omar serve` run-admission API, distinct from the diagram protocol. */
 export const SERVE_PROTOCOL_VERSION = 1;
-
-export type DiagramTag = {
-  /** Nanoseconds of logical time since the run began. */
-  timestamp: number;
-  microstep: number;
-};
 
 /** Largest unit that still divides a whole number of nanoseconds. */
 const DURATION_UNITS: [number, string][] = [
@@ -37,113 +86,6 @@ export function formatDuration(nanos: number): string {
     DURATION_UNITS[DURATION_UNITS.length - 1];
   return `${nanos / scale}${unit}`;
 }
-
-export type DiagramAgent = {
-  id: string;
-  name: string;
-  backend: string;
-  instance: string;
-};
-
-export type DiagramPort = {
-  id: string;
-  name: string;
-  kind: "input" | "output" | "action";
-  type: string;
-  delay: number | null;
-  value: unknown | null;
-  last_tag: DiagramTag | null;
-  /** The container it is drawn in. Empty for programs compiled before
-      instances were carried through the protocol. */
-  instance: string;
-};
-
-export type DiagramReaction = {
-  id: string;
-  name: string;
-  agent: string;
-  order: number;
-  triggers: string[];
-  effects: string[];
-  contract: string;
-  status: "idle" | "running" | "completed";
-  invocation_id: string | null;
-  instance: string;
-  /**
-   * Nanoseconds this reaction gave itself with `within`, or null for one
-   * bounded only by the run. Null also for a runtime that predates the field.
-   */
-  within: number | null;
-};
-
-/**
- * A trigger the runtime fires from its own logical clock.
- *
- * Not a port: nothing feeds it, so it is drawn as a clock rather than as an
- * inlet with no source. `last_tag` is when it last fired — the schedule as the
- * runtime actually ran it, rather than one the client extrapolates.
- */
-export type DiagramTimer = {
-  id: string;
-  name: string;
-  offset: number;
-  /** 0 fires once; anything else re-arms forever. */
-  period: number;
-  last_tag: DiagramTag | null;
-  instance: string;
-};
-
-/** A team `main` instantiated: one container in the drawing. */
-export type DiagramInstance = {
-  id: string;
-  name: string;
-  /** The team it came from. */
-  team: string;
-  /**
-   * The container this one is drawn inside, as an id, or empty at the top
-   * level. A team can instantiate another team, so containers nest.
-   */
-  parent: string;
-};
-
-export type DiagramEdge = {
-  id: string;
-  kind: "connection" | "trigger" | "effect";
-  source: string;
-  target: string;
-  /**
-   * What the hop costs. Null for a plain connection, whose value is readable
-   * at the tag it was written; 0 for `after 0`, which costs a microstep; and
-   * nanoseconds above that. Trigger and effect edges are always null.
-   */
-  delay: number | null;
-};
-
-export type DiagramSnapshot = {
-  protocol_version: number;
-  team: string;
-  sequence: number;
-  status: "ready" | "running" | "completed" | "failed";
-  current_tag: DiagramTag | null;
-  /**
-   * Nanoseconds physical time had run past `current_tag` when it executed.
-   * Null before the first tag, and from a runtime that predates the field.
-   *
-   * Zero means the run is on or ahead of its schedule. It grows only when work
-   * outlasts the gap the program gave it, which is the question an operator
-   * actually has: is this keeping up?
-   */
-  lag: number | null;
-  /** Containers to draw. Empty means the runtime predates instances, and the
-      program is drawn as one box named after itself. */
-  instances: DiagramInstance[];
-  agents: DiagramAgent[];
-  ports: DiagramPort[];
-  /** Empty for a program with no timer, and for runtimes that predate them. */
-  timers: DiagramTimer[];
-  reactions: DiagramReaction[];
-  edges: DiagramEdge[];
-};
 
 /** One invocation a `Web` agent is waiting on, as the daemon reports it. */
 export type PendingInvocation = {
@@ -228,41 +170,6 @@ export function webAgents(snapshot: DiagramSnapshot): Set<string> {
   );
 }
 
-export type DiagramEvent = {
-  protocol_version: number;
-  sequence: number;
-  team: string;
-  tag: DiagramTag | null;
-  kind:
-    | "run_started"
-    | "tag_advanced"
-    | "reaction_started"
-    | "reaction_completed"
-    | "run_completed"
-    | "run_failed";
-  payload: Record<string, unknown>;
-};
-
-/** A program the EA has proposed. Nothing runs until the operator approves it. */
-export type ProposedDesign = {
-  program: string;
-  inputs: Record<string, unknown>;
-  /** Compiled by the runtime, so the operator sees what they are approving. */
-  preview: DiagramSnapshot;
-};
-
-/** One turn of the operator/EA conversation, as `omar serve` relays it. */
-export type ChatMessage = {
-  sequence: number;
-  role: "operator" | "assistant";
-  text: string;
-  /** Commentary while the assistant works, rather than a reply awaiting you. */
-  progress: boolean;
-  design: ProposedDesign | null;
-  /** Diagram components the operator had selected when they sent this. */
-  selection: string[];
-};
-
 export function assertChatMessage(value: unknown): ChatMessage {
   if (!value || typeof value !== "object") {
     throw new Error("Chat message is not an object.");
@@ -271,7 +178,7 @@ export function assertChatMessage(value: unknown): ChatMessage {
   if (typeof message.sequence !== "number" || typeof message.text !== "string") {
     throw new Error("Chat message is missing required fields.");
   }
-  if (message.role !== "operator" && message.role !== "assistant") {
+  if (!CHAT_ROLES.includes(message.role as (typeof CHAT_ROLES)[number])) {
     throw new Error(`Unsupported chat role ${String(message.role)}.`);
   }
   const progress = message.progress === true;
@@ -292,44 +199,16 @@ export function assertChatMessage(value: unknown): ChatMessage {
   return { ...message, design, progress, selection } as ChatMessage;
 }
 
-/**
- * Every status `omar serve` can report, as one list the type and the runtime
- * check are both built from.
- *
- * They used to be two hand-written copies, which is how `stopped` came to be a
- * status the daemon sends and the client rejects: the union was updated and the
- * check below was not. One list cannot disagree with itself.
- */
-export const RUN_STATUSES = [
-  "starting",
-  "running",
-  "stopping",
-  "completed",
-  "stopped",
-  "failed",
-] as const;
-
-export type RunStatus = (typeof RUN_STATUSES)[number];
-
-/** A run as `omar serve` reports it. `diagram_address` is host:port, not a URL. */
-export type RunRecord = {
-  run_id: string;
-  team: string;
-  status: RunStatus;
-  diagram_address: string | null;
-  started_at: number;
-  finished_at: number | null;
-  error: string | null;
-};
-
 export type RunRequest = {
   program: string;
   inputs: Record<string, unknown>;
 };
 
 /**
- * Whether the run is over, however it ended. `stopped` is an ending like any
- * other -- it is what a stop asked for, not a failure to be reported.
+ * Whether the run is over, however it ended.
+ *
+ * `stopped` is an ending like any other — it is what a stop asked for, not a
+ * failure. It was missing here for as long as the daemon could answer it.
  */
 export function isRunFinished(status: RunStatus): boolean {
   return status === "completed" || status === "stopped" || status === "failed";
@@ -343,6 +222,9 @@ export function assertRunRecord(value: unknown): RunRecord {
   if (typeof record.run_id !== "string" || typeof record.team !== "string") {
     throw new Error("Run response is missing required run fields.");
   }
+  // Checked against the generated list, so a status the daemon adds cannot be
+  // one the client rejects. This is why the generator emits a runtime array and
+  // not only a type: a type would have been erased before this ran.
   if (!RUN_STATUSES.includes(record.status as RunStatus)) {
     throw new Error(`Unsupported run status ${String(record.status)}.`);
   }

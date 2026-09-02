@@ -32,6 +32,7 @@ tracing = "0.1.44"
 # server binds loopback only.
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 portable-pty = "0.8"
+ts-rs = { version = "12.0.1", features = ["serde-compat"] }
 
 [dev-dependencies]
 pretty_assertions = "1"
