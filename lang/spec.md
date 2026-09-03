@@ -20,16 +20,20 @@ program     = "team", identifier, "(", agents, ")",
 agents      = [ agent, { ",", agent } ] ;
 agent       = identifier, ":", identifier ;
 
-declaration = input | output | action | timer | connection | prompt ;
+declaration = input | output | action | timer | state | connection
+            | prompt | reaction ;
 input       = "input", identifier, ":", type ;
 output      = "output", identifier, ":", type ;
 action      = "action", identifier, [ "(", "delay", "=", delay, ")" ],
               [ ":", type ] ;
 timer       = "timer", identifier, "(", delay, ",", delay, ")" ;
+state       = "state", identifier, ":", type, "=", literal ;
 connection  = identifier, "->", identifier, [ "after", delay ] ;
 
 prompt      = "prompt", identifier, "(", triggers, ")",
               "->", effects, [ deadline ], prompt-string ;
+reaction    = "reaction", "(", triggers, ")", "->", effects, code-body ;
+code-body   = "{=", rust, "=}" ;
 deadline    = "within", "(", duration, ")" ;
 delay       = duration | "0" ;
 duration    = natural, unit ;
@@ -73,6 +77,20 @@ delimits a block comment.
 The prompt body is delivered to the agent. `$(name)` interpolates a trigger
 value and may only reference that prompt's triggers. If a declared trigger is
 not present in an invocation, its interpolation expands to `<absent>`.
+
+- `reaction(a, b) -> effects {= ... =}` declares a reaction that runs Rust
+  instead of asking an agent, so it names none. Inside the body each trigger
+  is an `Option<T>` local (`None` when absent), each effect an `Option<T>`
+  local starting `None`; whatever is `Some` when the body ends is written. A
+  team parameter `$(p)` is substituted before compilation. The bodies of a
+  program are compiled once, std only, no dependencies, so running a program
+  with one needs cargo; a program of prompts never invokes it. `within` is not
+  accepted, there is no agent to wait for.
+- `state round : int = 0` declares a value a code reaction reads and writes as
+  `self.round`. It starts at the literal and keeps its last value from one
+  invocation to the next. Types are `int`, `bool`, `string`, so the value a
+  run ends with can be kept in the deployment record and shown. Code reactions
+  of an instance that keeps state run in declaration order at a tag.
 
 ### 2.2 Effect contracts
 
@@ -367,9 +385,11 @@ KILL_AGENT name
 DEFINE_PORT kind name type [delay]
 REMOVE_PORT name
 
+DECLARE_STATE name type initial
+
 CONNECT_PORTS source target [delay]
 
-INSTALL_REACTION id agent triggers effects contract prompt within
+INSTALL_REACTION id agent triggers effects contract prompt [body] [within]
 UPDATE_REACTION id triggers effects contract prompt within
 REMOVE_REACTION id
 
@@ -394,10 +414,12 @@ The port `delay` field is omitted when no fixed delay is declared.
 Reaction fields are ordered:
 
 ```text
-op, id, agent, triggers, effects, contract, prompt, within
+op, id, agent, triggers, effects, contract, prompt, body, within
 ```
 
-`within` is nanoseconds, and is omitted when the reaction declares no deadline.
+`body` is a code reaction's Rust and is omitted for a prompt; `agent` is empty
+for a code reaction. `within` is nanoseconds, and is omitted when the reaction
+declares no deadline.
 
 The VM verifies the complete plan before performing effects. Unknown
 instructions, invalid references, invalid types, or inconsistent contracts are

@@ -1,6 +1,7 @@
 mod app;
 mod backend_probe;
 mod channel;
+mod code_reaction;
 mod computer;
 mod config;
 mod deploy;
@@ -848,6 +849,9 @@ fn status_deployment(omar_dir: &std::path::Path, ea_id: ea::EaId, team: &str) ->
         }
     }
     println!("  agents: {}", record.sessions.len());
+    for (name, value) in &record.state_vars {
+        println!("  state {name} = {value}");
+    }
     println!("  files: {}", dir.display());
     Ok(())
 }

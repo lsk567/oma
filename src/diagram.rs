@@ -820,6 +820,7 @@ mod tests {
         VmState {
             version: 1,
             team: "Sample".to_string(),
+            state_vars: BTreeMap::new(),
             instances: BTreeMap::new(),
             timers: BTreeMap::new(),
             agents: BTreeMap::from([(
@@ -864,6 +865,7 @@ mod tests {
                     effects: vec!["answer".to_string()],
                     contract: "answer".to_string(),
                     prompt: "Respond".to_string(),
+                    body: None,
                     within: None,
                 },
             )]),
@@ -881,6 +883,7 @@ mod tests {
         VmState {
             version: 1,
             team: "SimpleBrief".to_string(),
+            state_vars: BTreeMap::new(),
             timers: BTreeMap::new(),
             instances: BTreeMap::from([
                 (
@@ -930,6 +933,7 @@ mod tests {
                     effects: vec!["writer.draft".to_string()],
                     contract: "writer.draft".to_string(),
                     prompt: "Draft".to_string(),
+                    body: None,
                     within: None,
                 },
             )]),

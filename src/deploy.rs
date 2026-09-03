@@ -88,6 +88,10 @@ pub struct DeploymentRecord {
     /// Per-invocation timeout, which bounds a graceful stop.
     pub timeout_seconds: u64,
     pub history: Vec<TransitionEvent>,
+    /// The last value of every state variable, kept so a stopped run can be
+    /// read back and, once there is a resume, continued.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub state_vars: BTreeMap<String, serde_json::Value>,
 }
 
 impl DeploymentRecord {
@@ -108,6 +112,7 @@ impl DeploymentRecord {
                 at: now,
                 detail: None,
             }],
+            state_vars: BTreeMap::new(),
         }
     }
 

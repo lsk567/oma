@@ -1,0 +1,30 @@
+// The sketch from the code reactions issue: one team whose reaction remembers
+// how many rounds the token has made. Ring.omar carries its counter in the
+// token; this one keeps it in a state variable, which is what state is for.
+team RingLeader {
+    input token : string
+    timer startup(1ns, 0)
+    output fwd : string
+    output done : bool
+    state round : int = 0
+
+    reaction(startup) -> fwd {=
+        fwd = Some("go".to_string());
+    =}
+
+    // State rides on `self`. Its last value outlives the run: the deployment
+    // record keeps it.
+    reaction(token) -> (fwd | done) {=
+        if self.round < 10 {
+            self.round += 1;
+            fwd = token;
+        } else {
+            done = Some(true);
+        }
+    =}
+}
+
+main {
+    leader = RingLeader()
+    leader.fwd -> leader.token after 0
+}
