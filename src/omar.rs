@@ -378,7 +378,9 @@ async fn async_main() -> Result<()> {
             let target = resolve_cli_ea(&omar_dir, cli.ea.as_deref())?;
             let client =
                 TmuxClient::new(ea::ea_prefix(target.id, &config.dashboard.session_prefix));
-            let cmd = command.unwrap_or_else(|| config.agent.default_command.clone());
+            let cmd = manager::ensure_claude_inbound_settings(
+                &command.unwrap_or_else(|| config.agent.default_command.clone()),
+            );
             spawn_agent(&client, &name, &cmd, workdir.as_deref())
         }
         Some(Commands::List { all_eas }) => {

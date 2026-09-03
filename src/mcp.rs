@@ -1146,7 +1146,7 @@ impl OmarMcpServer {
                 &self.context,
             )
         } else {
-            base_command.clone()
+            manager::ensure_claude_inbound_settings(&base_command)
         };
 
         if client.has_session(&session_name).unwrap_or(false) {

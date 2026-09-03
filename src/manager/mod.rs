@@ -238,6 +238,17 @@ fn with_opencode_port(base_command: &str) -> String {
 /// before using the socket, so a pane launched without it is typed at instead.
 const CLAUDE_INBOUND_SETTINGS: &str = "--settings '{\"crossSessionInbound\":\"accept\"}'";
 
+/// Append the inbound-peer setting to a claude launch command that lacks it.
+/// Other backends' commands come back unchanged: the flag is Claude Code's.
+pub fn ensure_claude_inbound_settings(command: &str) -> String {
+    if detect_backend(command) != Some(BackendKind::Claude)
+        || command.contains(CLAUDE_INBOUND_SETTINGS)
+    {
+        return command.to_string();
+    }
+    format!("{} {}", command, CLAUDE_INBOUND_SETTINGS)
+}
+
 fn ensure_codex_runtime_flags(base_command: &str) -> String {
     if detect_backend(base_command) != Some(BackendKind::Codex) {
         return base_command.to_string();
@@ -1121,20 +1132,19 @@ pub fn build_agent_command(
             let _ = ensure_antigravity_mcp_config(mcp_context);
             format!("TERM=xterm-256color {} -i \"{}\"", base_command, shell_expr)
         }
-        Some(BackendKind::Claude) => match materialize_claude_mcp_config(mcp_context) {
-            Some(mcp_config) => format!(
-                "{} --system-prompt \"{}\" --mcp-config {} --disallowedTools {} {}",
-                base_command,
-                shell_expr,
-                shell_single_quote(&mcp_config.display().to_string()),
-                shell_single_quote(&backend_native_disallowed_tools_csv()),
-                CLAUDE_INBOUND_SETTINGS
-            ),
-            None => format!(
-                "{} --system-prompt \"{}\" {}",
-                base_command, shell_expr, CLAUDE_INBOUND_SETTINGS
-            ),
-        },
+        Some(BackendKind::Claude) => {
+            let cmd = match materialize_claude_mcp_config(mcp_context) {
+                Some(mcp_config) => format!(
+                    "{} --system-prompt \"{}\" --mcp-config {} --disallowedTools {}",
+                    base_command,
+                    shell_expr,
+                    shell_single_quote(&mcp_config.display().to_string()),
+                    shell_single_quote(&backend_native_disallowed_tools_csv()),
+                ),
+                None => format!("{} --system-prompt \"{}\"", base_command, shell_expr),
+            };
+            ensure_claude_inbound_settings(&cmd)
+        }
         Some(BackendKind::Codex) => {
             // Preferred: everything in a per-pane home's `config.toml`, so the
             // TUI carries no `-c` and will attach to an app-server OMAR can
@@ -1297,21 +1307,19 @@ pub fn build_ea_command(
             let base_command = ensure_codex_runtime_flags(base_command);
             let cmd = match materialize_claude_mcp_config(mcp_context) {
                 Some(mcp_config) => format!(
-                    "{} --system-prompt-file {} --mcp-config {} --disallowedTools {} {}",
+                    "{} --system-prompt-file {} --mcp-config {} --disallowedTools {}",
                     base_command,
                     shell_single_quote(&combined_path.display().to_string()),
                     shell_single_quote(&mcp_config.display().to_string()),
                     shell_single_quote(&backend_native_disallowed_tools_csv()),
-                    CLAUDE_INBOUND_SETTINGS
                 ),
                 None => format!(
-                    "{} --system-prompt-file {} {}",
+                    "{} --system-prompt-file {}",
                     base_command,
                     shell_single_quote(&combined_path.display().to_string()),
-                    CLAUDE_INBOUND_SETTINGS
                 ),
             };
-            (cmd, None)
+            (ensure_claude_inbound_settings(&cmd), None)
         }
         _ => {
             // Inline path for codex/agy/opencode/cursor/unknown. The
@@ -1965,6 +1973,20 @@ mod tests {
         }
         // The delivery side looks for this exact setting in the pane's argv.
         assert!(CLAUDE_INBOUND_SETTINGS.contains(crate::channel::CLAUDE_INBOUND_ACCEPT));
+    }
+
+    #[test]
+    fn a_raw_claude_command_is_told_to_accept_peer_messages_once() {
+        // Panes spawned from a raw command skip `build_agent_command`, so the
+        // same setting is added on that path — and not a second time.
+        let once = ensure_claude_inbound_settings("claude --dangerously-skip-permissions");
+        assert_eq!(
+            once,
+            r#"claude --dangerously-skip-permissions --settings '{"crossSessionInbound":"accept"}'"#
+        );
+        assert_eq!(ensure_claude_inbound_settings(&once), once);
+        assert_eq!(ensure_claude_inbound_settings("opencode"), "opencode");
+        assert_eq!(ensure_claude_inbound_settings("bash"), "bash");
     }
 
     #[test]
