@@ -32,6 +32,12 @@ const PROVISION_TIMEOUT: Duration = Duration::from_secs(90);
 /// A hook that is not firing would otherwise swallow every event silently.
 const SPOOL_STALE: Duration = Duration::from_secs(600);
 
+/// The setting a Claude Code session must be launched with before a peer
+/// message reaches the model instead of an approval dialog. This is how it
+/// appears in the process's argv, once the shell has stripped the quotes the
+/// launch command put around it.
+pub const CLAUDE_INBOUND_ACCEPT: &str = r#"{"crossSessionInbound":"accept"}"#;
+
 /// A side channel into a running agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Channel {
@@ -175,6 +181,7 @@ impl Channel {
                 let sessions = claude_sessions_dir()?;
                 std::iter::once(pane_pid)
                     .chain(child_pids(pane_pid))
+                    .filter(|pid| accepts_peer_messages(*pid))
                     .find_map(|pid| claude_peer(&sessions, pid))
             }
             _ => None,
@@ -798,6 +805,25 @@ fn claude_peer(sessions: &Path, pid: u32) -> Option<Channel> {
         .and_then(|key| key.get("peerToken")?.as_str().map(str::to_string))?;
 
     Some(Channel::ClaudePeer { socket, token })
+}
+
+/// Was this Claude Code process launched with inbound peer messages accepted?
+///
+/// A session that bypasses permission prompts holds a peer message behind an
+/// approval dialog unless it was launched with [`CLAUDE_INBOUND_ACCEPT`]. The
+/// socket takes the bytes either way, so the delivery looks successful while
+/// the event sits unread until a human approves it. A session without the
+/// setting — started by an older OMAR, or by hand — is left to the input box,
+/// which is a working path.
+fn accepts_peer_messages(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| {
+            String::from_utf8_lossy(&output.stdout).contains(CLAUDE_INBOUND_ACCEPT)
+        })
 }
 
 fn child_pids(parent: u32) -> Vec<u32> {
@@ -1559,6 +1585,35 @@ mod tests {
                 other => panic!("claude must resolve to a peer socket, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn only_a_session_launched_to_accept_peer_messages_is_offered_the_socket() {
+        // Stand-ins for a claude process: what matters is the argv, and `ps`
+        // shows a shell's arguments the way it shows claude's. `; :` keeps sh
+        // from exec'ing sleep in its place, which would replace the argv.
+        let mut accepting = Command::new("sh")
+            .args([
+                "-c",
+                "sleep 30; :",
+                "sh",
+                "--settings",
+                CLAUDE_INBOUND_ACCEPT,
+            ])
+            .spawn()
+            .unwrap();
+        let mut holding = Command::new("sh")
+            .args(["-c", "sleep 30; :", "sh", "--dangerously-skip-permissions"])
+            .spawn()
+            .unwrap();
+
+        assert!(accepts_peer_messages(accepting.id()));
+        assert!(!accepts_peer_messages(holding.id()));
+
+        let _ = accepting.kill();
+        let _ = holding.kill();
+        let _ = accepting.wait();
+        let _ = holding.wait();
     }
 
     #[test]

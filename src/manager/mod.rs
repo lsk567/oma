@@ -234,7 +234,8 @@ fn with_opencode_port(base_command: &str) -> String {
 /// covers the composer, so the held message is worse than no channel at all.
 ///
 /// `--settings` loads *additional* settings, so the operator's own settings
-/// files still apply.
+/// files still apply. `channel` checks a pane's argv for the same setting
+/// before using the socket, so a pane launched without it is typed at instead.
 const CLAUDE_INBOUND_SETTINGS: &str = "--settings '{\"crossSessionInbound\":\"accept\"}'";
 
 fn ensure_codex_runtime_flags(base_command: &str) -> String {
@@ -1962,6 +1963,8 @@ mod tests {
                 "claude must opt in to inbound peer messages: {cmd}"
             );
         }
+        // The delivery side looks for this exact setting in the pane's argv.
+        assert!(CLAUDE_INBOUND_SETTINGS.contains(crate::channel::CLAUDE_INBOUND_ACCEPT));
     }
 
     #[test]
