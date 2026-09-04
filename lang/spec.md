@@ -14,27 +14,41 @@ AI is used only inside prompt reactions, never for orchestration.
 ## 2. Syntax
 
 ```ebnf
-program     = "team", identifier, "(", agents, ")",
+program     = { team }, main ;
+
+team        = "team", identifier, [ "(", [ params ], ")" ],
+                                  [ "[", [ agents ], "]" ],
               "{", { declaration }, "}" ;
+params      = param, { ",", param } ;
+param       = identifier, ":", type ;
+agents      = agent, { ",", agent } ;
+agent       = identifier, ":", backend ;
+backend     = identifier ;
 
-agents      = [ agent, { ",", agent } ] ;
-agent       = identifier, ":", identifier ;
+main        = "main", [ identifier ], "{", { instance | wiring }, "}" ;
+wiring      = qualified, "->", qualified, [ "after", delay ] ;
 
-declaration = input | output | action | timer | connection | prompt ;
+declaration = input | output | action | timer | instance | connection
+            | prompt | ";" ;
 input       = "input", identifier, ":", type ;
 output      = "output", identifier, ":", type ;
 action      = "action", identifier, [ "(", "delay", "=", delay, ")" ],
               [ ":", type ] ;
 timer       = "timer", identifier, "(", delay, ",", delay, ")" ;
-connection  = identifier, "->", identifier, [ "after", delay ] ;
+instance    = identifier, "=", identifier, "(", [ args ], ")" ;
+args        = literal, { ",", literal } ;
+literal     = natural | string ;
+connection  = endpoint, "->", endpoint, [ "after", delay ] ;
+endpoint    = identifier | qualified ;
+qualified   = identifier, ".", identifier ;
 
-prompt      = "prompt", identifier, "(", triggers, ")",
-              "->", effects, [ deadline ], prompt-string ;
+prompt      = "prompt", identifier, "(", [ triggers ], ")",
+              "->", effects, [ deadline ], string ;
 deadline    = "within", "(", duration, ")" ;
 delay       = duration | "0" ;
 duration    = natural, unit ;
 unit        = "ns" | "us" | "ms" | "s" | "sec" | "min" | "h" | "hr" ;
-triggers    = [ identifier, { ",", identifier } ] ;
+triggers    = endpoint, { ",", endpoint } ;
 
 effects     = effect, { ",", effect } ;
 effect      = atom, [ "?" ]
@@ -50,7 +64,88 @@ natural     = digit, { digit } ;
 Identifiers are case-sensitive. `//` starts a line comment and `/* ... */`
 delimits a block comment.
 
-### 2.1 Declarations
+### 2.1 Teams, agents and main
+
+A team is a reusable unit. Its parameters go in `()`, its agents in `[]`, and
+both lists are optional — `team Name { ... }` is a team with neither.
+
+Declaring a team creates nothing; `main` instantiates. A program is the teams
+plus the `main` that uses them:
+
+```omar
+team Node(idx : int)[agent : Codex]
+{
+    input token : int
+    output out : int
+
+    prompt agent(token) -> out "You are node $(idx). Token: $(token)"
+}
+
+main Relay {
+    n1 = Node(1)
+    n2 = Node(2)
+
+    n1.out -> n2.token
+}
+```
+
+A parameter is read back in a prompt as `$(idx)`, the same spelling a trigger
+uses.
+
+An agent's backend names what answers its reactions: `Claude` (or
+`ClaudeCode`), `Codex`, `Cursor`, `OpenCode`, `Agy`, `Stub`, or `Web`. The
+compiler takes any identifier here; an unknown one compiles and fails when the
+runtime tries to start it. Case does not matter.
+
+An argument is an int or a string literal, and nothing else — there are no
+expressions. `main` may be named or bare; the name identifies the run, and a
+runtime allows only one run of a given name at a time. A program without a
+`main` does not compile.
+
+Wiring in `main` is `instance.port -> instance.port`. Both sides must be
+qualified, because in `main` there is nothing else for a bare name to mean.
+
+A team may also instantiate a team, so teams nest:
+
+```omar
+team Stage(role : string)[worker : Codex]
+{
+    input inp : string
+    output out : string
+
+    prompt worker(inp) -> out "You are the $(role) stage. Got $(inp)."
+}
+
+team Pipeline[reporter : Codex]
+{
+    input brief : string
+    output summary : string
+
+    draft = Stage("draft");
+    refine = Stage("refine");
+
+    brief -> draft.inp
+    draft.out -> refine.inp
+
+    prompt reporter(refine.out) -> summary "Report $(refine.out)."
+}
+
+main Nest {
+    run = Pipeline()
+}
+```
+
+Inside a team, what it instantiated is reached as `instance.port` — the same
+spelling `main` uses. A reaction may trigger on a contained instance's
+*output* (`reporter(refine.out)`), which is how a team observes what it
+contains; to send data the other way, connect to the contained input
+(`brief -> draft.inp`). A bare name is this team's own port. From outside,
+reach a nested port by its full path: `run.draft.out`.
+
+A `;` may separate declarations in a team body and means nothing else. It is
+not accepted in `main`.
+
+### 2.2 Declarations
 
 - `input` is a typed external entry point.
 - `output` is a typed externally observable result.
@@ -74,7 +169,7 @@ The prompt body is delivered to the agent. `$(name)` interpolates a trigger
 value and may only reference that prompt's triggers. If a declared trigger is
 not present in an invocation, its interpolation expands to `<absent>`.
 
-### 2.2 Effect contracts
+### 2.3 Effect contracts
 
 The expression after `->` declares the ports a reaction may set:
 
@@ -95,12 +190,12 @@ Every trigger must be an input or action. Every effect must be an output or
 action. A connection target must be an output or action, and its source and
 target types must match. Values must match their port types.
 
-### 2.3 Deadlines
+### 2.4 Deadlines
 
 `within(30s)` bounds how long one invocation may take, measured from when that
 invocation starts. Without it the run-wide timeout applies.
 
-See §2.4: a deadline is a duration like any other, and carries a unit.
+See §2.5: a deadline is a duration like any other, and carries a unit.
 
 What expiry does is read off the effect contract, so a deadline needs no
 second clause saying what to fall back to:
@@ -111,7 +206,7 @@ second clause saying what to fall back to:
 - a contract requiring an effect — `a`, `(a | b)` — has not been honoured.
   There is no value to invent, so the run fails.
 
-### 2.4 Durations
+### 2.5 Durations
 
 Every span of time in the language is a duration: `after`, a timer's offset and
 period, an action's `delay`, and `within`. All are stored as nanoseconds.
@@ -326,7 +421,7 @@ slow agent, and the runtime does not distinguish them:
 - it may write exactly its reaction's effects, because `omar_set_port` refuses
   anything else;
 - it is bound by `within` like any other reaction, and an expired deadline is
-  read off the contract as in §2.3.
+  read off the contract as in §2.4.
 
 An operator's decision is therefore recorded dataflow rather than a side effect
 on the run: it flows through the same completion path as a model's, so a run

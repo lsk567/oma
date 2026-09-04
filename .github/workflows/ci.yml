@@ -129,6 +129,33 @@ jobs:
             lake exe omarc "$source" "/tmp/omar-topology-suite/$name.json"
           done
 
+      - name: Compile the spec's example programs
+        working-directory: lang
+        run: |
+          mkdir -p /tmp/omar-spec-examples
+          python3 - <<'PY'
+          import pathlib
+          import re
+
+          # A fenced `omar` block that opens with `team` is a whole program.
+          # The fragments elsewhere in the spec -- effect contracts, a lone
+          # timer -- are not, and are skipped.
+          text = pathlib.Path("spec.md").read_text(encoding="utf-8")
+          programs = [
+              block
+              for block in re.findall(r"```omar\n(.*?)```", text, re.S)
+              if block.lstrip().startswith("team")
+          ]
+          assert programs, "spec.md has no complete example programs to check"
+          out = pathlib.Path("/tmp/omar-spec-examples")
+          for index, program in enumerate(programs):
+              (out / f"spec{index}.omar").write_text(program, encoding="utf-8")
+          PY
+          for source in /tmp/omar-spec-examples/*.omar; do
+            echo "--- $source"
+            lake exe omarc "$source" "${source%.omar}.json"
+          done
+
       - name: Verify top-level OMAR source execution
         env:
           OMARC_BIN: ${{ github.workspace }}/lang/.lake/build/bin/omarc
