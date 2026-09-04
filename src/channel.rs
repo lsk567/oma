@@ -32,6 +32,12 @@ const PROVISION_TIMEOUT: Duration = Duration::from_secs(90);
 /// A hook that is not firing would otherwise swallow every event silently.
 const SPOOL_STALE: Duration = Duration::from_secs(600);
 
+/// The setting a Claude Code session must be launched with before a peer
+/// message reaches the model instead of an approval dialog. This is how it
+/// appears in the process's argv, once the shell has stripped the quotes the
+/// launch command put around it.
+pub const CLAUDE_INBOUND_ACCEPT: &str = r#"{"crossSessionInbound":"accept"}"#;
+
 /// A side channel into a running agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Channel {
@@ -175,7 +181,9 @@ impl Channel {
                 let sessions = claude_sessions_dir()?;
                 std::iter::once(pane_pid)
                     .chain(child_pids(pane_pid))
-                    .find_map(|pid| claude_peer(&sessions, pid))
+                    .find_map(|pid| {
+                        claude_peer(&sessions, pid).filter(|_| accepts_peer_messages(pid))
+                    })
             }
             _ => None,
         }
@@ -798,6 +806,61 @@ fn claude_peer(sessions: &Path, pid: u32) -> Option<Channel> {
         .and_then(|key| key.get("peerToken")?.as_str().map(str::to_string))?;
 
     Some(Channel::ClaudePeer { socket, token })
+}
+
+/// Will this Claude Code session take a peer message, rather than hold it?
+///
+/// A session that bypasses permission prompts holds a peer message behind an
+/// approval dialog unless it was told to accept them — on its launch line, or
+/// in the operator's own settings. The socket takes the bytes either way, so
+/// the delivery looks successful while the event sits unread until a human
+/// approves it. A session told neither way — started by an older OMAR, or by
+/// hand — is left to the input box, which is a working path.
+fn accepts_peer_messages(pid: u32) -> bool {
+    launched_to_accept(pid) || settings_accept(&claude_user_settings())
+}
+
+/// Was `--settings` with [`CLAUDE_INBOUND_ACCEPT`] on the process's launch line?
+fn launched_to_accept(pid: u32) -> bool {
+    let pair = format!("--settings {}", CLAUDE_INBOUND_ACCEPT);
+    process_argv(pid).is_some_and(|argv| argv.contains(&pair))
+}
+
+/// A process's arguments, space-joined. `/proc` is exact and needs no other
+/// tool; `ps` covers macOS.
+fn process_argv(pid: u32) -> Option<String> {
+    if let Ok(raw) = std::fs::read(format!("/proc/{}/cmdline", pid)) {
+        return Some(String::from_utf8_lossy(&raw).replace('\0', " "));
+    }
+    Command::new("ps")
+        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Does a Claude Code settings file accept inbound peer messages?
+///
+/// A managed or repository setting can still tighten this to `hold`. That is
+/// the operator's stated wish, and the message is then shown to them.
+fn settings_accept(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .is_some_and(|settings| {
+            settings
+                .get("crossSessionInbound")
+                .and_then(|value| value.as_str())
+                == Some("accept")
+        })
+}
+
+fn claude_user_settings() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude")
+        .join("settings.json")
 }
 
 fn child_pids(parent: u32) -> Vec<u32> {
@@ -1559,6 +1622,46 @@ mod tests {
                 other => panic!("claude must resolve to a peer socket, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_launch_line_that_accepts_peer_messages_is_read_back_off_the_process() {
+        // Stand-ins for a claude process: what matters is the argv, and a
+        // shell's arguments are read the way claude's are. `; :` keeps sh
+        // from exec'ing sleep in its place, which would replace the argv.
+        let mut accepting = Command::new("sh")
+            .args([
+                "-c",
+                "sleep 30; :",
+                "sh",
+                "--settings",
+                CLAUDE_INBOUND_ACCEPT,
+            ])
+            .spawn()
+            .unwrap();
+        let mut holding = Command::new("sh")
+            .args(["-c", "sleep 30; :", "sh", "--dangerously-skip-permissions"])
+            .spawn()
+            .unwrap();
+
+        assert!(launched_to_accept(accepting.id()));
+        assert!(!launched_to_accept(holding.id()));
+
+        let _ = accepting.kill();
+        let _ = holding.kill();
+        let _ = accepting.wait();
+        let _ = holding.wait();
+    }
+
+    #[test]
+    fn an_operator_who_accepts_peer_messages_in_their_settings_is_believed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"theme":"dark","crossSessionInbound":"accept"}"#).unwrap();
+        assert!(settings_accept(&path));
+        std::fs::write(&path, r#"{"crossSessionInbound":"hold"}"#).unwrap();
+        assert!(!settings_accept(&path));
+        assert!(!settings_accept(&dir.path().join("missing.json")));
     }
 
     #[test]

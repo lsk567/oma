@@ -226,16 +226,51 @@ fn with_opencode_port(base_command: &str) -> String {
     }
 }
 
-/// Let OMAR deliver events over Claude Code's cross-session peer socket.
+/// `--settings '{"crossSessionInbound":"accept"}'`, as it goes on a launch line.
 ///
-/// Without this the session holds an inbound message behind an approval
-/// dialog — OMAR does not attest a permission mode, and an agent launched with
+/// It lets OMAR deliver events over Claude Code's cross-session peer socket.
+/// Without it the session holds an inbound message behind an approval dialog —
+/// OMAR does not attest a permission mode, and an agent launched with
 /// `--dangerously-skip-permissions` distrusts a sender that has not. The dialog
 /// covers the composer, so the held message is worse than no channel at all.
+/// `channel` looks for the same setting before it uses the socket.
+fn claude_inbound_settings() -> String {
+    format!(
+        "--settings {}",
+        shell_single_quote(crate::channel::CLAUDE_INBOUND_ACCEPT)
+    )
+}
+
+/// Put the inbound-peer setting on a claude launch line that has none.
 ///
-/// `--settings` loads *additional* settings, so the operator's own settings
-/// files still apply.
-const CLAUDE_INBOUND_SETTINGS: &str = "--settings '{\"crossSessionInbound\":\"accept\"}'";
+/// It goes right after the `claude` token: order means nothing to claude, and
+/// the end of the line may belong to a pipe or to a second command. A line
+/// that already carries `--settings` is the operator's and is left alone —
+/// Claude Code keeps only the last one it is given, so adding another would
+/// replace theirs. Other backends' lines come back unchanged.
+pub fn ensure_claude_inbound_settings(command: &str) -> String {
+    if detect_backend(command) != Some(BackendKind::Claude)
+        || command
+            .split_whitespace()
+            .any(|token| token == "--settings" || token.starts_with("--settings="))
+    {
+        return command.to_string();
+    }
+    let mut end = 0;
+    for token in command.split_whitespace() {
+        let start = end + command[end..].find(token).expect("token was cut from here");
+        end = start + token.len();
+        if detect_backend_token(token) == Some(BackendKind::Claude) {
+            break;
+        }
+    }
+    format!(
+        "{} {}{}",
+        &command[..end],
+        claude_inbound_settings(),
+        &command[end..]
+    )
+}
 
 fn ensure_codex_runtime_flags(base_command: &str) -> String {
     if detect_backend(base_command) != Some(BackendKind::Codex) {
@@ -1122,17 +1157,13 @@ pub fn build_agent_command(
         }
         Some(BackendKind::Claude) => match materialize_claude_mcp_config(mcp_context) {
             Some(mcp_config) => format!(
-                "{} --system-prompt \"{}\" --mcp-config {} --disallowedTools {} {}",
+                "{} --system-prompt \"{}\" --mcp-config {} --disallowedTools {}",
                 base_command,
                 shell_expr,
                 shell_single_quote(&mcp_config.display().to_string()),
                 shell_single_quote(&backend_native_disallowed_tools_csv()),
-                CLAUDE_INBOUND_SETTINGS
             ),
-            None => format!(
-                "{} --system-prompt \"{}\" {}",
-                base_command, shell_expr, CLAUDE_INBOUND_SETTINGS
-            ),
+            None => format!("{} --system-prompt \"{}\"", base_command, shell_expr),
         },
         Some(BackendKind::Codex) => {
             // Preferred: everything in a per-pane home's `config.toml`, so the
@@ -1296,18 +1327,16 @@ pub fn build_ea_command(
             let base_command = ensure_codex_runtime_flags(base_command);
             let cmd = match materialize_claude_mcp_config(mcp_context) {
                 Some(mcp_config) => format!(
-                    "{} --system-prompt-file {} --mcp-config {} --disallowedTools {} {}",
+                    "{} --system-prompt-file {} --mcp-config {} --disallowedTools {}",
                     base_command,
                     shell_single_quote(&combined_path.display().to_string()),
                     shell_single_quote(&mcp_config.display().to_string()),
                     shell_single_quote(&backend_native_disallowed_tools_csv()),
-                    CLAUDE_INBOUND_SETTINGS
                 ),
                 None => format!(
-                    "{} --system-prompt-file {} {}",
+                    "{} --system-prompt-file {}",
                     base_command,
                     shell_single_quote(&combined_path.display().to_string()),
-                    CLAUDE_INBOUND_SETTINGS
                 ),
             };
             (cmd, None)
@@ -1946,59 +1975,52 @@ mod tests {
     }
 
     #[test]
-    fn a_claude_session_accepts_events_from_omar_over_its_peer_socket() {
+    fn a_claude_launch_line_is_told_to_accept_peer_messages_once() {
         // Without this the session holds OMAR's messages behind an approval
         // dialog that covers the composer, and no event is ever delivered.
-        let dir = tempfile::tempdir().unwrap();
-        for base in ["claude --dangerously-skip-permissions", "claude"] {
-            let cmd = build_agent_command(
-                base,
-                Path::new("/tmp/prompts/ea.md"),
-                &[],
-                &test_mcp_context(dir.path()),
-            );
-            assert!(
-                cmd.contains(r#"--settings '{"crossSessionInbound":"accept"}'"#),
-                "claude must opt in to inbound peer messages: {cmd}"
-            );
-        }
+        let flag = r#"--settings '{"crossSessionInbound":"accept"}'"#;
+        let once = ensure_claude_inbound_settings("claude --dangerously-skip-permissions");
+        assert_eq!(
+            once,
+            format!("claude {flag} --dangerously-skip-permissions")
+        );
+        assert_eq!(ensure_claude_inbound_settings(&once), once);
+        // By the executable: the tail of a line may belong to another program.
+        assert_eq!(
+            ensure_claude_inbound_settings("TERM=xterm claude -p hi 2>&1 | tee run.log"),
+            format!("TERM=xterm claude {flag} -p hi 2>&1 | tee run.log")
+        );
+        // The delivery side looks for exactly this pair in the pane's argv.
+        assert!(once.contains(&format!(
+            "--settings '{}'",
+            crate::channel::CLAUDE_INBOUND_ACCEPT
+        )));
     }
 
     #[test]
-    fn the_ea_pane_accepts_events_from_omar_too() {
-        // The EA manager is the most common receiver of scheduled events, and
-        // it is built by a different function than the worker panes.
-        let dir = tempfile::tempdir().unwrap();
-        let (cmd, _) = build_ea_command(
-            "claude --dangerously-skip-permissions",
-            1,
-            "ea-one",
-            Path::new("/tmp/prompts/ea.md"),
-            &test_mcp_context(dir.path()),
-        );
-        assert!(
-            cmd.contains(r#"--settings '{"crossSessionInbound":"accept"}'"#),
-            "the EA pane must opt in to inbound peer messages: {cmd}"
-        );
+    fn an_operators_own_settings_are_not_replaced() {
+        // Claude Code keeps only the last `--settings`; adding ours after the
+        // operator's would silently drop theirs.
+        for line in [
+            "claude --settings ~/team.json",
+            "claude --settings=~/team.json --dangerously-skip-permissions",
+        ] {
+            assert_eq!(ensure_claude_inbound_settings(line), line);
+        }
     }
 
     #[test]
     fn only_claude_is_told_about_inbound_peer_messages() {
         // The flag is Claude Code's; handing it to another backend would be an
         // unrecognised argument at launch.
-        let dir = tempfile::tempdir().unwrap();
         for base in [
             "codex --no-alt-screen",
             "opencode",
             "cursor agent --yolo",
             "agy --dangerously-skip-permissions",
+            "bash",
         ] {
-            let cmd = build_agent_command(
-                base,
-                Path::new("/tmp/prompts/ea.md"),
-                &[],
-                &test_mcp_context(dir.path()),
-            );
+            let cmd = ensure_claude_inbound_settings(base);
             assert!(
                 !cmd.contains("crossSessionInbound"),
                 "{base} must not receive a Claude-only flag: {cmd}"

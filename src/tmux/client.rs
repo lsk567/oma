@@ -750,6 +750,11 @@ impl TmuxClient {
             args.extend(["-c", dir]);
         }
 
+        // Every launch passes through here, so this is where a claude pane is
+        // told to take OMAR's events over its peer socket.
+        let command = crate::manager::ensure_claude_inbound_settings(command);
+        let command = command.as_str();
+
         // cursor-agent takes no message from outside, but it runs hooks that
         // can hand context to the model. Point this pane at its own spool so
         // the hook knows whose events to collect.
@@ -1013,6 +1018,42 @@ mod tests {
         let size = String::from_utf8_lossy(&reported.stdout).trim().to_string();
         assert_ne!(size, "80x24", "the agent got tmux's default pane");
         assert_eq!(size, format!("{AGENT_COLUMNS}x{AGENT_ROWS}"));
+    }
+
+    #[test]
+    fn a_claude_pane_is_launched_to_accept_peer_messages() {
+        // Whatever path spawned it, the pane's launch line carries the setting
+        // that keeps a peer message out of Claude Code's approval dialog.
+        if !tmux_available() {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+        let session = "omar-test-claude-inbound";
+        let _ = tmux_command()
+            .args(["kill-session", "-t", session])
+            .output();
+        let _guard = SessionGuard(session.to_string());
+
+        TmuxClient::new("")
+            .new_session(session, "claude --version; exec sh", None)
+            .expect("session");
+
+        let reported = tmux_command()
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                session,
+                "#{pane_start_command}",
+            ])
+            .output()
+            .expect("tmux answers");
+        let launched = String::from_utf8_lossy(&reported.stdout);
+        // tmux escapes the quotes when it shows the line, so match loosely.
+        assert!(
+            launched.contains("claude --settings") && launched.contains("crossSessionInbound"),
+            "launch line was not given the setting: {launched}"
+        );
     }
 
     #[test]
