@@ -972,7 +972,7 @@ impl App {
             }
             match self.client.new_session(
                 &candidate,
-                &crate::manager::ensure_claude_inbound_settings(&self.config.agent.default_command),
+                &self.config.agent.default_command,
                 Some(&workdir),
             ) {
                 Ok(()) => {
