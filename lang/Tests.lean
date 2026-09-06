@@ -96,11 +96,11 @@ def testTopology (test : TopologyCase) : IO Unit := do
     assertEqual "option type" (program.ports.any (·.type == "option<string>")) true
     assertEqual "nested type" (program.ports.any (·.type == "list<option<int>>")) true
   if test.file == "RingCode.omar" then
-    -- A code reaction carries a body and no prompt, and a team parameter is
+    -- A reaction carries a body and no prompt, and a team parameter is
     -- substituted into it just as it is into a prompt.
     for reaction in program.reactions do
-      assertEqual "code reaction has no prompt" reaction.prompt ""
-      assertEqual "code reaction has a body" reaction.body.isSome true
+      assertEqual "reaction has no prompt" reaction.prompt ""
+      assertEqual "reaction has a body" reaction.body.isSome true
       assertEqual "parameter substituted into body"
         (mentions (reaction.body.getD "") "$(idx)") false
     assertEqual "body keeps its braces"
@@ -118,6 +118,12 @@ def testTopology (test : TopologyCase) : IO Unit := do
     assertEqual "declare_state carries the initial value"
       (mentions bytecode "{\"op\": \"declare_state\", \"instance\": \"leader\", \
         \"name\": \"leader.round\", \"type\": \"int\", \"initial\": 0}") true
+    -- A body may bound its own worst case, and the deadline reaches the
+    -- bytecode in nanoseconds beside the body rather than in place of it.
+    assertEqual "reaction keeps its deadline"
+      (program.reactions.any (fun r => r.within == some 5000000000)) true
+    assertEqual "deadline follows the body in the bytecode"
+      (mentions bytecode "\"within\": 5000000000") true
   if test.file == "Ring.omar" then
     -- Instances are structure, not a naming convention: the bytecode says which
     -- container each name belongs to rather than leaving it to be guessed from

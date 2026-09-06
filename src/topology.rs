@@ -59,7 +59,7 @@ pub enum Instruction {
         #[serde(default)]
         instance: String,
     },
-    /// `state round : int = 0`: a value a code reaction keeps between
+    /// `state round : int = 0`: a value a reaction keeps between
     /// invocations.
     DeclareState {
         name: String,
@@ -526,7 +526,13 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
             } => {
                 let order = state.reactions.len();
                 check_instance(&state, "reaction", id, instance)?;
-                if body.is_none() && !state.agents.contains_key(agent) {
+                // A body and an agent are exclusive: whichever the source
+                // gave, the other is empty.
+                if body.is_some() {
+                    if !agent.is_empty() || !prompt.is_empty() {
+                        bail!("reaction '{id}' has a body, so it names no agent or prompt");
+                    }
+                } else if !state.agents.contains_key(agent) {
                     bail!("reaction '{id}' references unknown agent '{agent}'");
                 }
                 for trigger in triggers {
@@ -644,7 +650,7 @@ pub fn must_follow(state: &VmState, id: &str) -> BTreeSet<String> {
                 .effects
                 .iter()
                 .any(|effect| reaction.effects.contains(effect));
-            // A code reaction has no agent, so two of them share nothing here.
+            // A reaction has no agent, so two of them share nothing here.
             let shares_agent = !reaction.agent.is_empty() && state_of.agent == reaction.agent;
             let shares_state = state_of.instance == reaction.instance
                 && state_of.body.is_some()
@@ -1330,7 +1336,8 @@ fn expired(invocation: &InvocationSpec, deadline: Duration) -> Result<BTreeMap<S
             "reaction '{}' invocation '{}': '{}' did not answer within {:?}, and contract '{}' requires an effect",
             invocation.reaction_id,
             invocation.id,
-            invocation.agent,
+            // A body has no agent to name.
+            if invocation.agent.is_empty() { "its body" } else { &invocation.agent },
             deadline,
             invocation.contract
         ),
@@ -1405,11 +1412,34 @@ impl ReactionExecutor for AgentReactionExecutor {
     }
 }
 
+/// A body reaches its own instance's state and no other's.
+///
+/// Codegen binds only the invoking instance's variables, so a body built here
+/// cannot reach further. The check is what the VM trusts instead of the
+/// binary, which it did not write.
+fn state_writes_stay_in_instance(
+    state: &VmState,
+    invocation: &InvocationSpec,
+    writes: &BTreeMap<String, Value>,
+) -> Result<()> {
+    match writes.keys().find(|name| {
+        state.state_vars.contains_key(*name) && !invocation.state_values.contains_key(*name)
+    }) {
+        Some(name) => bail!(
+            "reaction '{}' wrote state '{name}' outside its instance",
+            invocation.reaction_id
+        ),
+        None => Ok(()),
+    }
+}
+
 /// Sends a reaction to its compiled body when it has one, and to its agent
 /// otherwise. One run may hold both kinds.
 struct DispatchExecutor<'a, E: ReactionExecutor> {
     state: &'a VmState,
-    code: Option<crate::code_reaction::CodeReactions>,
+    code: Option<crate::reaction::Reactions>,
+    /// The run-wide timeout, which bounds a body that set no deadline.
+    timeout: Duration,
     agents: E,
 }
 
@@ -1417,12 +1447,20 @@ impl<E: ReactionExecutor> ReactionExecutor for DispatchExecutor<'_, E> {
     fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
         if let Some(code) = &self.code {
             if code.handles(&invocation.reaction_id) {
-                let writes = code.invoke(
+                let deadline = invocation.within.unwrap_or(self.timeout);
+                let Some(writes) = code.invoke(
                     self.state,
                     &invocation.reaction_id,
                     &invocation.trigger_values,
                     &invocation.state_values,
-                )?;
+                    deadline,
+                )?
+                else {
+                    // Killed with nothing written, so its instance keeps the
+                    // state it had before the invocation.
+                    return expired(&invocation, deadline);
+                };
+                state_writes_stay_in_instance(self.state, &invocation, &writes)?;
                 // State comes back beside the effects and is not one of them.
                 let effects: BTreeMap<_, _> = writes
                     .iter()
@@ -1585,13 +1623,12 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
     type Prepared = (
         InvocationServer,
         BTreeMap<String, Value>,
-        Option<crate::code_reaction::CodeReactions>,
+        Option<crate::reaction::Reactions>,
     );
     let prepared = (|| -> Result<Prepared> {
         // Before anything is spawned: compiling the bodies is the step most
         // likely to fail, and it costs nothing to find out first.
-        let code_reactions =
-            crate::code_reaction::build(&state, &config.omar_dir.join("code-cache"))?;
+        let reactions = crate::reaction::build(&state, &config.omar_dir.join("code-cache"))?;
         let invocation_server = InvocationServer::start()?;
         spawn_topology_agents(
             &state,
@@ -1602,9 +1639,9 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
             &mut spawned,
         )?;
         let inputs = parse_inputs(&state, config.inputs)?;
-        Ok((invocation_server, inputs, code_reactions))
+        Ok((invocation_server, inputs, reactions))
     })();
-    let (invocation_server, inputs, code_reactions) = match prepared {
+    let (invocation_server, inputs, reactions) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
             observer.run_failed(&error.to_string());
@@ -1631,7 +1668,8 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
     }
     let executor = DispatchExecutor {
         state: &state,
-        code: code_reactions,
+        code: reactions,
+        timeout: config.timeout,
         agents: AgentReactionExecutor {
             client,
             team: state.team.clone(),
@@ -4660,10 +4698,10 @@ mod tests {
         );
     }
 
-    /// Two code reactions with nothing in common but their instance are free
+    /// Two reactions with nothing in common but their instance are free
     /// to run together, until that instance keeps state.
     #[test]
-    fn code_reactions_of_a_stateful_instance_run_in_declaration_order() {
+    fn reactions_of_a_stateful_instance_run_in_declaration_order() {
         let second = r#"{"op":"define_port","instance":"c","kind":"output","name":"c.other","type":"int"},
             {"op":"install_reaction","instance":"c","id":"c.reaction.1","agent":"",
              "triggers":["c.tick"],"effects":["c.other"],"contract":"c.other","prompt":"","body":"unused"},"#;
@@ -4706,5 +4744,139 @@ mod tests {
             r#"{"op":"declare_state","instance":"c","name":"c.count","type":"float","initial":0}"#
         )
         .contains("unsupported type"));
+    }
+
+    /// A body answers for itself, so naming an agent or a prompt beside one
+    /// says two things at once and the VM refuses to pick.
+    #[test]
+    fn verify_refuses_a_body_that_also_names_an_agent_or_prompt() {
+        let with = |field: &str, value: &str| {
+            let mut bytecode = counter_bytecode("");
+            let installed = bytecode
+                .instructions
+                .iter()
+                .position(|i| matches!(i, Instruction::InstallReaction { .. }))
+                .unwrap();
+            let Instruction::InstallReaction { agent, prompt, .. } =
+                &mut bytecode.instructions[installed]
+            else {
+                unreachable!("the position above matched one");
+            };
+            match field {
+                "agent" => *agent = value.to_string(),
+                _ => *prompt = value.to_string(),
+            }
+            verify(&bytecode).unwrap_err().to_string()
+        };
+        assert!(with("agent", "writer").contains("names no agent or prompt"));
+        assert!(with("prompt", "decide").contains("names no agent or prompt"));
+
+        // A deadline is not one of the exclusive fields: a body may bound its
+        // own worst case the way a prompt does.
+        let mut bounded = counter_bytecode("");
+        let installed = bounded
+            .instructions
+            .iter()
+            .position(|i| matches!(i, Instruction::InstallReaction { .. }))
+            .unwrap();
+        if let Instruction::InstallReaction { within, .. } = &mut bounded.instructions[installed] {
+            *within = Some(5_000_000_000);
+        }
+        let state = verify(&bounded).unwrap();
+        assert_eq!(state.reactions["c.reaction.0"].within, Some(5_000_000_000));
+    }
+
+    /// Codegen binds only the invoking instance's variables, so this refuses
+    /// what only a binary the VM did not write could send.
+    #[test]
+    fn a_body_may_not_write_another_instances_state() {
+        let second = r#"{"op":"declare_instance","name":"d","parent":"","team":"Counter"},
+            {"op":"declare_state","instance":"d","name":"d.count","type":"int","initial":0},"#;
+        let state = verify(&counter_bytecode(second)).unwrap();
+        let entry = state.reactions.get_key_value("c.reaction.0").unwrap();
+        let spec = invocation_spec(
+            &state,
+            entry,
+            &BTreeMap::from([("c.tick".to_string(), json!(1))]),
+            &BTreeMap::from([
+                ("c.count".to_string(), json!(0)),
+                ("d.count".to_string(), json!(0)),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(spec.state_values.keys().collect::<Vec<_>>(), ["c.count"]);
+
+        let own = BTreeMap::from([("c.count".to_string(), json!(1))]);
+        assert!(state_writes_stay_in_instance(&state, &spec, &own).is_ok());
+
+        let reached = BTreeMap::from([("d.count".to_string(), json!(1))]);
+        let error = state_writes_stay_in_instance(&state, &spec, &reached)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("outside its instance"), "{error}");
+        assert!(error.contains("d.count"), "{error}");
+    }
+
+    /// A body that sleeps past its own deadline, so the wait has to end it.
+    fn slow_bytecode(contract: &str) -> Bytecode {
+        serde_json::from_str(&format!(
+            r#"{{
+              "version": 1,
+              "team": "Slow",
+              "instructions": [
+                {{"op":"begin_plan","team":"Slow"}},
+                {{"op":"declare_instance","name":"s","parent":"","team":"Slow"}},
+                {{"op":"define_port","instance":"s","kind":"input","name":"s.tick","type":"int"}},
+                {{"op":"define_port","instance":"s","kind":"output","name":"s.out","type":"int"}},
+                {{"op":"install_reaction","instance":"s","id":"s.reaction.0","agent":"",
+                  "triggers":["s.tick"],"effects":["s.out"],"contract":"{contract}","prompt":"",
+                  "body":"std::thread::sleep(std::time::Duration::from_secs(30)); out = Some(1);",
+                  "within":200000000}},
+                {{"op":"commit_plan"}}
+              ]
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    /// An overrunning body is killed with nothing written, and what that means
+    /// is read off the contract, exactly as a silent agent's expiry is.
+    #[test]
+    #[ignore = "shells out to cargo; run with --ignored"]
+    fn a_body_that_overruns_expires_on_its_contract() {
+        struct Unused;
+        impl ReactionExecutor for Unused {
+            fn invoke(&self, _: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+                panic!("the reaction has a body, so no agent is asked");
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let run = |contract: &str| {
+            let state = verify(&slow_bytecode(contract)).unwrap();
+            let code = crate::reaction::build(&state, dir.path()).unwrap().unwrap();
+            let spec = invocation_spec(
+                &state,
+                state.reactions.get_key_value("s.reaction.0").unwrap(),
+                &BTreeMap::from([("s.tick".to_string(), json!(1))]),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            DispatchExecutor {
+                state: &state,
+                code: Some(code),
+                timeout: Duration::from_secs(30),
+                agents: Unused,
+            }
+            .invoke(spec)
+        };
+
+        // `s.out ?` is a promise the body may keep by staying silent, so the
+        // tag completes with no writes.
+        assert_eq!(run("s.out ?").unwrap(), BTreeMap::new());
+
+        // `s.out` was required and never arrived. There is no value to invent.
+        let error = run("s.out").unwrap_err().to_string();
+        assert!(error.contains("requires an effect"), "{error}");
+        assert!(error.contains("its body"), "{error}");
     }
 }

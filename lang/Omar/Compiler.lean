@@ -515,22 +515,29 @@ private partial def parseDeclarations
         agent, triggers, effects, contract, prompt, within
       }
       parseDeclarations (reactionIndex + 1) ports timers connections (reactions.push reaction) instances states rest
-  -- `prompt` asks an agent, `reaction` just runs, so a code reaction names none.
+  -- `prompt` asks an agent, `reaction` just runs, so a reaction names none.
   | Token.word "reaction" :: rest => do
       let (_, rest) ← expectSym "(" rest
       let (triggers, rest) ← parseDependencies #[] rest
       let (_, rest) ← expectSym "->" rest
       let (contractTokens, rest) ← takeContract [] rest
+      -- `within(30s)` bounds a body the way it bounds an agent: an expired
+      -- body is killed unwritten, and expiry is read off the contract.
+      let (within, rest) ← match rest with
+        | Token.word "within" :: tail => do
+            let (_, tail) ← expectSym "(" tail
+            let (value, tail) ← duration tail
+            let (_, tail) ← expectSym ")" tail
+            pure (some value, tail)
+        | _ => pure (none, rest)
       let (body, rest) ← match rest with
         | Token.code body :: tail => pure (body, tail)
-        | Token.word "within" :: _ =>
-            throw "'within' bounds an agent, and a code reaction has none to wait for"
         | _ => throw "expected code block after production contract"
       let effects := productionTargets contractTokens
       let contract := String.intercalate " " (contractTokens.map tokenSource)
       let reaction := {
         id := s!"reaction.{reactionIndex}"
-        agent := "", triggers, effects, contract, prompt := "", body := some body
+        agent := "", triggers, effects, contract, prompt := "", body := some body, within
       }
       parseDeclarations (reactionIndex + 1) ports timers connections (reactions.push reaction) instances states rest
   | Token.word first :: rest => do

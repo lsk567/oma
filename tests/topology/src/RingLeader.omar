@@ -1,4 +1,4 @@
-// The sketch from the code reactions issue: one team whose reaction remembers
+// The sketch from the reactions issue: one team whose reaction remembers
 // how many rounds the token has made. Ring.omar carries its counter in the
 // token; this one keeps it in a state variable, which is what state is for.
 team RingLeader {
@@ -13,8 +13,8 @@ team RingLeader {
     =}
 
     // State rides on `self`. Its last value outlives the run: the deployment
-    // record keeps it.
-    reaction(token) -> (fwd | done) {=
+    // record keeps it. `within` bounds the body the way it bounds an agent.
+    reaction(token) -> (fwd | done) within(5s) {=
         if self.round < 10 {
             self.round += 1;
             fwd = token;

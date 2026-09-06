@@ -104,7 +104,7 @@ jobs:
         run: cargo test -- --test-threads=1
 
       - name: Run tests that shell out to cargo
-        run: cargo test --bin omar code_reaction -- --ignored --test-threads=1
+        run: cargo test --bin omar -- --ignored --test-threads=1
 
   omar-language:
     name: OMAR Language
@@ -143,7 +143,7 @@ jobs:
 
       # The first program CI runs that has a reaction. Its bodies are code, so
       # the ring is deterministic and costs no model call.
-      - name: Verify a code reaction end to end
+      - name: Verify a reaction end to end
         env:
           OMARC_BIN: ${{ github.workspace }}/lang/.lake/build/bin/omarc
         run: |

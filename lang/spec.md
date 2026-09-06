@@ -32,7 +32,8 @@ connection  = identifier, "->", identifier, [ "after", delay ] ;
 
 prompt      = "prompt", identifier, "(", triggers, ")",
               "->", effects, [ deadline ], prompt-string ;
-reaction    = "reaction", "(", triggers, ")", "->", effects, code-body ;
+reaction    = "reaction", "(", triggers, ")", "->", effects,
+              [ deadline ], code-body ;
 code-body   = "{=", rust, "=}" ;
 deadline    = "within", "(", duration, ")" ;
 delay       = duration | "0" ;
@@ -84,13 +85,12 @@ not present in an invocation, its interpolation expands to `<absent>`.
   local starting `None`; whatever is `Some` when the body ends is written. A
   team parameter `$(p)` is substituted before compilation. The bodies of a
   program are compiled once, std only, no dependencies, so running a program
-  with one needs cargo; a program of prompts never invokes it. `within` is not
-  accepted, there is no agent to wait for.
-- `state round : int = 0` declares a value a code reaction reads and writes as
+  with one needs cargo; a program of prompts never invokes it.
+- `state round : int = 0` declares a value a reaction reads and writes as
   `self.round`. It starts at the literal and keeps its last value from one
   invocation to the next. Types are `int`, `bool`, `string`, so the value a
-  run ends with can be kept in the deployment record and shown. Code reactions
-  of an instance that keeps state run in declaration order at a tag.
+  run ends with can be kept in the deployment record and shown. Reactions of
+  an instance that keeps state run in declaration order at a tag.
 
 ### 2.2 Effect contracts
 
@@ -128,6 +128,9 @@ second clause saying what to fall back to:
   absent, so whatever they feed does not fire.
 - a contract requiring an effect — `a`, `(a | b)` — has not been honoured.
   There is no value to invent, so the run fails.
+
+A body that expires is killed with nothing written, so its instance keeps the
+state it held before the invocation.
 
 ### 2.4 Durations
 
@@ -417,8 +420,8 @@ Reaction fields are ordered:
 op, id, agent, triggers, effects, contract, prompt, body, within
 ```
 
-`body` is a code reaction's Rust and is omitted for a prompt; `agent` is empty
-for a code reaction. `within` is nanoseconds, and is omitted when the reaction
+`body` is a reaction's Rust and is omitted for a prompt; `agent` is empty
+for a reaction. `within` is nanoseconds, and is omitted when the reaction
 declares no deadline.
 
 The VM verifies the complete plan before performing effects. Unknown

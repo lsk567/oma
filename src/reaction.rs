@@ -1,9 +1,11 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -138,7 +140,7 @@ fn main() {
 
 /// A built crate and the reactions it answers.
 #[derive(Debug)]
-pub struct CodeReactions {
+pub struct Reactions {
     binary: PathBuf,
     reactions: BTreeSet<String>,
 }
@@ -150,7 +152,7 @@ fn rust_type(ty: &str) -> Result<(&'static str, &'static str, &'static str)> {
         "float" => ("f64", "get_float", "put_float"),
         "bool" => ("bool", "get_bool", "put_bool"),
         "string" | "path" | "bytes" => ("String", "get_string", "put_string"),
-        other => bail!("code reactions do not support port type '{other}'"),
+        other => bail!("reactions do not support port type '{other}'"),
     })
 }
 
@@ -270,14 +272,14 @@ fn generate(state: &VmState) -> Result<(String, BTreeSet<String>)> {
     source.push_str(&format!(
         "\nfn dispatch(id: &str, t: &In) -> Result<Out, String> {{\n\
          \x20   match id {{\n{arms}        \
-         other => Err(format!(\"unknown code reaction '{{other}}'\")),\n    }}\n}}\n"
+         other => Err(format!(\"unknown reaction '{{other}}'\")),\n    }}\n}}\n"
     ));
     Ok((source, ids))
 }
 
 /// Generate, build, and return a handle, or `None` when the program has no
-/// code reaction and therefore needs no toolchain at all.
-pub fn build(state: &VmState, cache_root: &Path) -> Result<Option<CodeReactions>> {
+/// reaction and therefore needs no toolchain at all.
+pub fn build(state: &VmState, cache_root: &Path) -> Result<Option<Reactions>> {
     if state.reactions.values().all(|r| r.body.is_none()) {
         return Ok(None);
     }
@@ -287,7 +289,7 @@ pub fn build(state: &VmState, cache_root: &Path) -> Result<Option<CodeReactions>
     source.hash(&mut hasher);
     let key = format!("{:016x}", hasher.finish());
     let dir = cache_root.join(&key);
-    let name = "omar_code_reactions";
+    let name = "omar_reactions";
     let binary = dir.join("target").join("release").join(name);
 
     if !binary.exists() {
@@ -310,17 +312,17 @@ pub fn build(state: &VmState, cache_root: &Path) -> Result<Option<CodeReactions>
             .current_dir(&dir)
             .output()
             .context(
-                "failed to invoke cargo; code reactions are compiled, so a Rust \
+                "failed to invoke cargo; reactions are compiled, so a Rust \
                  toolchain must be installed to run a program that uses them",
             )?;
         if !output.status.success() {
             bail!(
-                "failed to compile code reactions:\n{}",
+                "failed to compile reactions:\n{}",
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
     }
-    Ok(Some(CodeReactions { binary, reactions }))
+    Ok(Some(Reactions { binary, reactions }))
 }
 
 /// The type a name carries on the wire, which the VM's tables decide. A timer
@@ -383,7 +385,7 @@ fn decode(raw: &str, ty: &str) -> Result<Value> {
     })
 }
 
-impl CodeReactions {
+impl Reactions {
     pub fn handles(&self, reaction_id: &str) -> bool {
         self.reactions.contains(reaction_id)
     }
@@ -394,11 +396,12 @@ impl CodeReactions {
         reaction_id: &str,
         triggers: &BTreeMap<String, Value>,
         state_values: &BTreeMap<String, Value>,
-    ) -> Result<BTreeMap<String, Value>> {
+        deadline: Duration,
+    ) -> Result<Option<BTreeMap<String, Value>>> {
         let mut request = format!("{reaction_id}\n");
         for (name, value) in triggers.iter().chain(state_values) {
             let ty = wire_type(state, name)
-                .with_context(|| format!("code reaction reads unknown name '{name}'"))?;
+                .with_context(|| format!("reaction reads unknown name '{name}'"))?;
             request.push_str(&format!("{name}\t{}\n", encode(value, ty)?));
         }
 
@@ -411,26 +414,49 @@ impl CodeReactions {
         child
             .stdin
             .take()
-            .context("code reaction subprocess has no stdin")?
+            .context("reaction subprocess has no stdin")?
             .write_all(request.as_bytes())?;
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            bail!(
-                "code reaction '{reaction_id}' failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+
+        // std has no timed wait, so the read runs in a thread and the deadline
+        // is enforced on the channel. A body that overruns is killed.
+        let mut stdout = child.stdout.take().context("reaction has no stdout")?;
+        let (done, finished) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let read = stdout.read_to_end(&mut out);
+            done.send(read.map(|_| out)).ok();
+        });
+        let out = match finished.recv_timeout(deadline) {
+            Ok(out) => out?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                child.kill().ok();
+                child.wait().ok();
+                return Ok(None);
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                child.kill().ok();
+                bail!("reaction '{reaction_id}' stopped without answering");
+            }
+        };
+        let status = child.wait()?;
+        if !status.success() {
+            let mut errors = String::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                stderr.read_to_string(&mut errors).ok();
+            }
+            bail!("reaction '{reaction_id}' failed: {}", errors.trim());
         }
 
         let mut writes = BTreeMap::new();
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
+        for line in String::from_utf8_lossy(&out).lines() {
             let Some((name, raw)) = line.split_once('\t') else {
                 continue;
             };
             let ty = wire_type(state, name)
-                .with_context(|| format!("code reaction wrote unknown name '{name}'"))?;
+                .with_context(|| format!("reaction wrote unknown name '{name}'"))?;
             writes.insert(name.to_string(), decode(raw, ty)?);
         }
-        Ok(writes)
+        Ok(Some(writes))
     }
 }
 
@@ -438,6 +464,10 @@ impl CodeReactions {
 mod tests {
     use super::*;
     use crate::topology::{verify, Bytecode};
+
+    /// Long enough that a body which finishes at all finishes inside it, so a
+    /// test that is not about the deadline never trips over one.
+    const PATIENT: Duration = Duration::from_secs(60);
 
     /// One node of the ring, with `body` where a prompt would be and no agent,
     /// which is what `omarc` emits for a `reaction`.
@@ -565,8 +595,9 @@ mod tests {
         // Under the limit the body forwards and counts. The count comes back
         // beside the effect; keeping the two apart is the VM's job.
         let writes = code
-            .invoke(&state, "leader.reaction.0", &token, &at(0))
-            .unwrap();
+            .invoke(&state, "leader.reaction.0", &token, &at(0), PATIENT)
+            .unwrap()
+            .expect("finished well inside its deadline");
         assert_eq!(
             writes,
             BTreeMap::from([
@@ -575,8 +606,9 @@ mod tests {
             ])
         );
         let writes = code
-            .invoke(&state, "leader.reaction.0", &token, &at(2))
-            .unwrap();
+            .invoke(&state, "leader.reaction.0", &token, &at(2), PATIENT)
+            .unwrap()
+            .expect("finished well inside its deadline");
         assert_eq!(
             writes,
             BTreeMap::from([
@@ -587,7 +619,13 @@ mod tests {
 
         // State is never absent, so an invocation that brings none is a bug.
         let error = code
-            .invoke(&state, "leader.reaction.0", &token, &BTreeMap::new())
+            .invoke(
+                &state,
+                "leader.reaction.0",
+                &token,
+                &BTreeMap::new(),
+                PATIENT,
+            )
             .unwrap_err()
             .to_string();
         assert!(error.contains("was not supplied"), "{error}");
@@ -603,7 +641,7 @@ mod tests {
     fn a_compiled_body_answers_its_invocation() {
         let dir = tempfile::tempdir().unwrap();
         let state = verify(&node_bytecode(RING_BODY)).unwrap();
-        let code = build(&state, dir.path()).unwrap().expect("a code reaction");
+        let code = build(&state, dir.path()).unwrap().expect("a reaction");
         assert!(code.handles("n1.reaction.0"));
 
         let forwarded = code
@@ -612,8 +650,10 @@ mod tests {
                 "n1.reaction.0",
                 &BTreeMap::from([("n1.token".to_string(), json!(0))]),
                 &BTreeMap::new(),
+                PATIENT,
             )
-            .unwrap();
+            .unwrap()
+            .expect("finished well inside its deadline");
         assert_eq!(
             forwarded,
             BTreeMap::from([("n1.out".to_string(), json!(1))])
@@ -625,8 +665,10 @@ mod tests {
                 "n1.reaction.0",
                 &BTreeMap::from([("n1.token".to_string(), json!(6))]),
                 &BTreeMap::new(),
+                PATIENT,
             )
-            .unwrap();
+            .unwrap()
+            .expect("finished well inside its deadline");
         assert_eq!(halted, BTreeMap::from([("n1.done".to_string(), json!(6))]));
 
         // Absence is free: nothing arrived, so nothing is written, and the
@@ -634,16 +676,19 @@ mod tests {
         let quiet = verify(&node_bytecode("let _ = token;")).unwrap();
         let code = build(&quiet, dir.path()).unwrap().unwrap();
         let writes = code
-            .invoke(&quiet, "n1.reaction.0", &BTreeMap::new(), &BTreeMap::new())
+            .invoke(
+                &quiet,
+                "n1.reaction.0",
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                PATIENT,
+            )
             .unwrap();
-        assert!(writes.is_empty());
+        assert!(writes.expect("answered").is_empty());
 
         // A body that does not typecheck stops the run before it starts.
         let broken = verify(&node_bytecode("out = \"not an int\";")).unwrap();
         let error = build(&broken, dir.path()).unwrap_err().to_string();
-        assert!(
-            error.contains("failed to compile code reactions"),
-            "{error}"
-        );
+        assert!(error.contains("failed to compile reactions"), "{error}");
     }
 }

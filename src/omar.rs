@@ -1,7 +1,6 @@
 mod app;
 mod backend_probe;
 mod channel;
-mod code_reaction;
 mod computer;
 mod config;
 mod deploy;
@@ -19,6 +18,7 @@ mod projects;
 // The generator runs under `cargo test`; nothing in a release build calls it.
 #[cfg(test)]
 mod protocol;
+mod reaction;
 mod scheduler;
 mod serve;
 mod stub_agent;
