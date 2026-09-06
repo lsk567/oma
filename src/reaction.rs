@@ -419,7 +419,17 @@ impl Reactions {
 
         // std has no timed wait, so the read runs in a thread and the deadline
         // is enforced on the channel. A body that overruns is killed.
+        //
+        // Both streams are drained at once. A body that fills one while the
+        // other is unread blocks there, and would be reported as slow rather
+        // than by whatever it said before it stopped.
         let mut stdout = child.stdout.take().context("reaction has no stdout")?;
+        let mut stderr = child.stderr.take().context("reaction has no stderr")?;
+        let said = std::thread::spawn(move || {
+            let mut text = String::new();
+            stderr.read_to_string(&mut text).ok();
+            text
+        });
         let (done, finished) = mpsc::channel();
         std::thread::spawn(move || {
             let mut out = Vec::new();
@@ -440,10 +450,7 @@ impl Reactions {
         };
         let status = child.wait()?;
         if !status.success() {
-            let mut errors = String::new();
-            if let Some(mut stderr) = child.stderr.take() {
-                stderr.read_to_string(&mut errors).ok();
-            }
+            let errors = said.join().unwrap_or_default();
             bail!("reaction '{reaction_id}' failed: {}", errors.trim());
         }
 
@@ -690,5 +697,33 @@ mod tests {
         let broken = verify(&node_bytecode("out = \"not an int\";")).unwrap();
         let error = build(&broken, dir.path()).unwrap_err().to_string();
         assert!(error.contains("failed to compile reactions"), "{error}");
+    }
+
+    /// A body that fails after saying more than a pipe holds.
+    ///
+    /// Its own account of the failure is what an operator needs, so reading
+    /// one stream while the other fills would lose it: the body would block
+    /// unread and be reported as slow rather than as broken.
+    #[test]
+    #[ignore = "shells out to cargo; run with --ignored"]
+    fn a_noisy_failure_is_reported_as_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = verify(&node_bytecode(
+            r#"for _ in 0..40000 { eprintln!("chatter chatter chatter chatter"); }
+               return Err("the body decided to fail".to_string());"#,
+        ))
+        .unwrap();
+        let code = build(&state, dir.path()).unwrap().unwrap();
+        let error = code
+            .invoke(
+                &state,
+                "n1.reaction.0",
+                &BTreeMap::from([("n1.token".to_string(), json!(0))]),
+                &BTreeMap::new(),
+                Duration::from_secs(10),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("the body decided to fail"), "{error}");
     }
 }
