@@ -67,6 +67,25 @@ that run's `diagram_address`, which the client observes over `/v1/diagram` and
 Nothing executes before the confirmation step, and the confirm button stays
 disabled unless the daemon is live. Both runtime surfaces are loopback-only.
 
+## Saved conversations
+
+**History** lists this runtime's chats. Start a **New chat**, search by title,
+or reopen an earlier conversation. Messages, commentary, diagram selections,
+and proposed programs (including inputs and topology previews) are saved
+before they are acknowledged, in `~/.omar/ea/<id>/chats.json` under the
+configured OMAR state directory. The file is private to the local user.
+
+Reloads and daemon restarts retain the transcript. Continuing a restored chat
+starts a fresh assistant and supplies its saved context. Reopening a proposal
+never deploys it. Wait for the current reply or run to finish before switching;
+all browser tabs connected to this EA follow the same active conversation.
+
+This saves Mission Control conversation context, not provider-internal model
+state, terminal scrollback, unsent composer text, manual source edits, or live
+run execution state. Chats already lost before this feature was installed
+cannot be recovered from memory. A corrupt or unwritable history file produces
+an error rather than silently replacing saved conversations.
+
 ## Architecture
 
 `app/lib/protocol.ts` holds both contracts: diagram protocol v1 and the

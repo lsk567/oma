@@ -49,7 +49,7 @@ export async function startFakeServe({
   /** @type {Map<string, {record: object, snapshot: object, subscribers: Set<import("node:http").ServerResponse>, sequence: number}>} */
   const runs = new Map();
 
-  const server = createServer((request, response) => {
+  const server = createServer(async (request, response) => {
     const url = new URL(request.url, `http://${request.headers.host}`);
 
     if (request.method === "OPTIONS") {
@@ -205,8 +205,23 @@ export async function startFakeServe({
       });
     }
     // Operator/EA conversation.
+    if (request.method === "GET" && url.pathname === "/v1/chats") {
+      return json(response, 200, { active_id: chat.id, conversations: [...chats.values()].map(chatSummary).sort((a, b) => b.updated_at - a.updated_at) });
+    }
+    if (request.method === "POST" && (url.pathname === "/v1/chats" || /^\/v1\/chats\/[^/]+\/activate$/.test(url.pathname))) {
+      await readBody(request);
+      if (chat.busy) return json(response, 409, { error: "The assistant is still replying." });
+      const id = url.pathname === "/v1/chats" ? null : url.pathname.split("/")[3];
+      const next = id ? chats.get(id) : newChat();
+      if (!next) return json(response, 404, { error: "unknown chat" });
+      for (const subscriber of chat.subscribers) subscriber.end();
+      chat.subscribers.clear();
+      chat = next;
+      chats.set(chat.id, chat);
+      return json(response, 200, chatSummary());
+    }
     if (request.method === "GET" && url.pathname === "/v1/chat") {
-      return json(response, 200, { messages: chat.messages });
+      return json(response, 200, { ...chatSummary(), messages: chat.messages });
     }
     if (request.method === "POST" && url.pathname === "/v1/chat") {
       return readBody(request).then((body) => converse(body, response));
@@ -259,7 +274,14 @@ export async function startFakeServe({
   });
 
   let backend = "codex";
-  const chat = { messages: [], subscribers: new Set(), sequence: 0 };
+  function newChat() {
+    return { id: randomUUID(), title: "New chat", created_at: Date.now(), updated_at: Date.now(), messages: [], subscribers: new Set(), sequence: 0, busy: false };
+  }
+  let chat = newChat();
+  const chats = new Map([[chat.id, chat]]);
+  function chatSummary(value = chat) {
+    return { id: value.id, title: value.title, created_at: value.created_at, updated_at: value.updated_at, message_count: value.messages.length };
+  }
   const agentToken = randomUUID();
 
   function publishChat(role, text, design, progress = false, selection = []) {
@@ -272,7 +294,11 @@ export async function startFakeServe({
       design: design ?? null,
       selection,
     };
+    if (role === "operator" && !chat.messages.some((m) => m.role === "operator")) chat.title = text.slice(0, 80);
     chat.messages.push(message);
+    chat.updated_at = Date.now();
+    if (role === "operator") chat.busy = true;
+    else if (!progress) chat.busy = false;
     const kind = design ? "design_proposed" : "message";
     const frame = `id: ${message.sequence}\nevent: ${kind}\ndata: ${JSON.stringify(message)}\n\n`;
     for (const subscriber of chat.subscribers) subscriber.write(frame);
@@ -286,6 +312,7 @@ export async function startFakeServe({
       "cache-control": "no-cache",
       connection: "keep-alive",
     });
+    response.write(`event: conversation\ndata: ${JSON.stringify(chatSummary())}\n\n`);
     response.write(": connected\n\n");
     // Replay, matching the real server, so a reload rejoins the conversation.
     for (const message of chat.messages) {
@@ -294,8 +321,9 @@ export async function startFakeServe({
         `id: ${message.sequence}\nevent: ${kind}\ndata: ${JSON.stringify(message)}\n\n`,
       );
     }
-    chat.subscribers.add(response);
-    response.on("close", () => chat.subscribers.delete(response));
+    const subscribedChat = chat;
+    subscribedChat.subscribers.add(response);
+    response.on("close", () => subscribedChat.subscribers.delete(response));
   }
 
   /**
@@ -318,6 +346,9 @@ export async function startFakeServe({
         error: `selection names more than ${MAX_SELECTION} components`,
       });
     }
+    if (request.conversation_id && request.conversation_id !== chat.id) return json(response, 409, { error: "The active chat changed." });
+    const targetChat = chat;
+    const publish = (...args) => { if (chat === targetChat) publishChat(...args); };
     const operator = publishChat("operator", request.text, null, false, selection);
     json(response, 202, operator);
 
@@ -326,12 +357,12 @@ export async function startFakeServe({
     );
     // Real assistants narrate while they work; that must not end the wait.
     setTimeout(
-      () => publishChat("assistant", "Reading the ports and reactions…", null, true),
+      () => publish("assistant", "Reading the ports and reactions…", null, true),
       Math.max(10, stepMs / 3),
     );
     setTimeout(() => {
       if (!asked) {
-        publishChat(
+        publish(
           "assistant",
           "Which agent should own the final write, the planner or the reviewer?",
         );
@@ -342,7 +373,7 @@ export async function startFakeServe({
       const preview = structuredClone(golden);
       preview.status = "ready";
       // Markdown, because that is what the EA actually writes.
-      publishChat(
+      publish(
         "assistant",
         "Drafted a **three-reaction** review loop.\n\n" +
           "- `planner` drafts the plan\n" +
@@ -357,7 +388,7 @@ export async function startFakeServe({
       // Real assistants comment straight after proposing. That must not look
       // like a withdrawal of the proposal.
       setTimeout(
-        () => publishChat("assistant", "It is in your queue for approval."),
+        () => publish("assistant", "It is in your queue for approval."),
         stepMs,
       );
     }, stepMs);

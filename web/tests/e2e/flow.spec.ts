@@ -1668,3 +1668,58 @@ test("a team inside a team is drawn as a box inside a box", async ({ page }) => 
   const tall = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
   expect(wide > 1 && tall > 1).toBe(false);
 });
+
+test("chat history restores messages and proposals after switching and reloading", async ({ page }) => {
+  await useFakeServe(page);
+  await draftUntilProposed(page);
+  await page.getByRole("button", { name: "Chat history" }).click();
+  const history = page.getByRole("dialog", { name: "Chat history" });
+  await expect(history).toBeVisible();
+  await expect(history.getByRole("list", { name: "Saved chats" })).toContainText("Review the release plan");
+  await history.getByRole("button", { name: "New chat" }).click();
+  await expect(history).toBeHidden();
+  await expect(page.locator(".messages")).not.toContainText("Review the release plan");
+  await expect(page.getByRole("group", { name: "Deploy design" })).toBeHidden();
+  await page.getByLabel("Describe a workflow").fill("Prepare a product launch");
+  await page.getByLabel("Draft workflow").click();
+  await expect(page.locator(".messages")).toContainText("Which agent should own");
+  await page.reload();
+  await expect(page.locator(".messages")).toContainText("Prepare a product launch");
+  await expect(page.locator(".messages")).not.toContainText("Review the release plan");
+
+  await page.getByRole("button", { name: "Chat history" }).click();
+  await history.getByLabel("Search chats").fill("release");
+  await expect(history.getByRole("listitem")).toHaveCount(1);
+  await history.getByRole("button", { name: /Review the release plan/ }).click();
+  await expect(page.locator(".messages")).toContainText("The planner");
+  await expect(page.locator(".messages")).not.toContainText("Prepare a product launch");
+  await expect(page.getByRole("group", { name: "Deploy design" })).toBeVisible();
+  await page.getByRole("button", { name: "Show the source pane" }).click();
+  await expect(page.locator(".source-code")).toContainText("team ReviewFlow[");
+  await expect(page.locator(".connection")).toHaveText("review");
+  // Merely reopening history must never deploy a saved proposal.
+  const runs = await page.request.get(`${FAKE_SERVE_URL}/v1/runs`);
+  expect((await runs.json()).runs).toHaveLength(0);
+  await page.getByLabel("Describe a workflow").fill("Keep the same requirements and add a final review");
+  await page.getByLabel("Draft workflow").click();
+  await expect(page.locator(".messages")).toContainText("Keep the same requirements");
+  await expect(page.getByRole("group", { name: "Deploy design" })).toBeVisible();
+});
+
+test("chat history reports load failures and prevents switching during a reply", async ({ page }) => {
+  await fake.close();
+  fake = (await startFakeServe({ stepMs: 3000, port: FAKE_SERVE_PORT })) as FakeServe;
+  await useFakeServe(page);
+  await page.getByLabel("Describe a workflow").fill("Review the release plan");
+  await page.getByLabel("Draft workflow").click();
+  await page.getByRole("button", { name: "Chat history" }).click();
+  const history = page.getByRole("dialog", { name: "Chat history" });
+  await expect(history.getByRole("button", { name: "New chat" })).toBeDisabled();
+  await expect(history).toContainText("Wait for the current reply");
+  await page.keyboard.press("Escape");
+  await expect(history).toBeHidden();
+  await expect(page.getByRole("button", { name: "Chat history" })).toBeFocused();
+  await page.route("**/v1/chats", (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "Cannot read saved chats" }) }));
+  await page.getByRole("button", { name: "Chat history" }).click();
+  await expect(history.getByRole("alert")).toContainText("Cannot read saved chats");
+});

@@ -2236,3 +2236,50 @@ h2 {
   color: #e0777f;
   font-size: 10.5px;
 }
+
+/* Saved conversations share the runtime's scope, including across reloads. */
+.history-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.chat-history {
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(680px, calc(100dvh - 48px));
+  padding: 24px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.chat-history::backdrop { background: rgba(0, 0, 0, 0.65); }
+.chat-history header, .history-actions { display: flex; align-items: center; gap: 12px; }
+.chat-history header { justify-content: space-between; }
+.chat-history h2 { margin: 0; font-size: 20px; }
+.chat-history p, .chat-history small { color: var(--muted); font-size: 13px; }
+.chat-history button, .chat-history input {
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.chat-history button:disabled { opacity: 0.5; cursor: default; }
+.chat-history button:hover:not(:disabled), .history-button:hover { border-color: var(--purple); }
+.history-actions input { min-width: 0; flex: 1; }
+.history-actions button { white-space: nowrap; }
+.chat-history ul { list-style: none; padding: 0; margin: 18px 0 0; }
+.chat-history li + li { margin-top: 8px; }
+.chat-history li button { width: 100%; text-align: left; display: grid; gap: 6px; }
+.chat-history li span { overflow-wrap: anywhere; }
+.chat-history [aria-current="true"] { border-color: var(--purple); background: var(--purple-soft); }
+.chat-history .history-error { color: #ffb4b4; }

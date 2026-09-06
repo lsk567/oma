@@ -12,6 +12,8 @@
  * from here and the split is invisible to callers.
  */
 export type {
+  Conversation,
+  ConversationSummary,
   ChatMessage,
   ChatRole,
   DiagramAgent,
@@ -202,6 +204,7 @@ export function assertChatMessage(value: unknown): ChatMessage {
 export type RunRequest = {
   program: string;
   inputs: Record<string, unknown>;
+  conversation_id?: string;
 };
 
 /**
