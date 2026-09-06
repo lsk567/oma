@@ -1353,40 +1353,32 @@ test("the diagram follows the text", async ({ page }) => {
   await expect(stats).not.toContainText("ready");
 });
 
-test("the assistant's terminal opens from the wait, not from a menu", async ({
-  page,
-}) => {
-  // The assistant is not on the diagram, so the gesture that opens an agent's
-  // terminal cannot reach it. It is offered beside the wait it belongs to: the
-  // moment there is something to look at is the moment it is drafting.
-  await fake.close();
-  fake = (await startFakeServe({ stepMs: 3000, port: FAKE_SERVE_PORT })) as FakeServe;
+test("the assistant terminal remains available before and after a topology opens", async ({ page }) => {
   await useFakeServe(page);
-
-  // Nothing is drafting yet, so there is nothing to inspect.
-  await expect(page.getByRole("button", { name: "Inspect on terminal" })).toBeHidden();
-
-  await page.getByLabel("Describe a workflow").fill("Review the release plan");
-  await page.keyboard.press("Enter");
-
   const inspect = page.getByRole("button", { name: "Inspect on terminal" });
-  await expect(inspect).toBeVisible();
-  // Beside the wait rather than under anything: one click, nothing to open.
-  const waitBox = (await page.locator(".waiting").boundingBox())!;
-  const inspectBox = (await inspect.boundingBox())!;
-  expect(inspectBox.x).toBeGreaterThanOrEqual(waitBox.x + waitBox.width - 1);
+  await expect(inspect).toBeEnabled();
   await inspect.click();
-
-  const terminal = page.getByRole("dialog");
-  await expect(terminal).toBeVisible();
+  const terminal = page.getByRole("dialog", { name: "Terminal for the assistant" });
   await expect(terminal).toContainText(/\d+×\d+ · attached/);
-  // Named as itself, not as an agent.
   await expect(terminal.locator("h2")).toHaveText("assistant");
-  // And said plainly: the chat drives this same pane.
   await expect(terminal).toContainText("same session the chat talks to");
-
   await page.getByRole("button", { name: "Close terminal" }).click();
-  await expect(terminal).toBeHidden();
+
+  await draftUntilProposed(page);
+  await expect(inspect).toBeEnabled();
+  await inspect.click();
+  await expect(terminal).toBeVisible();
+  await page.getByRole("button", { name: "Close terminal" }).click();
+  await expect(page.getByRole("group", { name: "Deploy design" })).toBeVisible();
+  await expect(page.locator(".messages")).toContainText("The planner");
+
+  // The topbar remains reachable even when the conversation is collapsed.
+  await dragDivider(page, "Resize the conversation", -2000);
+  await expect(inspect).toBeVisible();
+  await deploy(page);
+  await expect(page.locator(".connection")).toContainText("finished", { timeout: 30_000 });
+  await inspect.click();
+  await expect(terminal).toBeVisible();
 });
 
 test("dragging the canvas does not select the diagram", async ({ page }) => {
