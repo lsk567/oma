@@ -625,6 +625,17 @@ export function Studio({
           <span>OMAR <b>Mission Control</b></span>
         </div>
         <div className="runtime-controls">
+          {!isDemo ? (
+            <button
+              type="button"
+              className="terminal-button"
+              onClick={() => setTerminalAgent(ASSISTANT)}
+              disabled={daemon.state !== "live"}
+              aria-haspopup="dialog"
+            >
+              Inspect on terminal
+            </button>
+          ) : null}
           <span
             className={`daemon ${daemon.state}`}
             aria-label="Runtime mode"
@@ -673,24 +684,7 @@ export function Studio({
             {messages.map((message) => (
               <ChatMessageView key={message.sequence} message={message} />
             ))}
-            {phase === "drafting" ? (
-              // The assistant is not on the diagram, so the double click that
-              // opens an agent's terminal cannot reach it. Offered beside the
-              // wait it belongs to, rather than inside a menu that has to be
-              // opened first.
-              <div className="waiting-row">
-                <Waiting />
-                {daemon.state === "live" ? (
-                  <button
-                    type="button"
-                    className="waiting-inspect"
-                    onClick={() => setTerminalAgent(ASSISTANT)}
-                  >
-                    Inspect on terminal
-                  </button>
-                ) : null}
-              </div>
-            ) : null}
+            {phase === "drafting" ? <Waiting /> : null}
             {phase === "spawning" ? <Waiting label="Starting the run" /> : null}
           </div>
 
