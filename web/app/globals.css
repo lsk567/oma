@@ -63,6 +63,19 @@ button {
   backdrop-filter: blur(16px);
 }
 
+.terminal-button {
+  padding: 7px 10px;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.terminal-button:hover:not(:disabled) { border-color: var(--purple); }
+.terminal-button:disabled { opacity: 0.5; cursor: default; }
+
 .brand,
 .runtime-controls,
 .runtime-controls label,
@@ -1541,8 +1554,14 @@ h2 {
   .topbar {
     height: auto;
     align-items: flex-start;
+    flex-wrap: wrap;
     gap: 12px;
     padding: 12px;
+  }
+
+  .runtime-controls {
+    flex-wrap: wrap;
+    max-width: 100%;
   }
 
   .runtime-controls label {

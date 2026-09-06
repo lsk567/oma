@@ -1377,6 +1377,10 @@ test("the assistant terminal remains available before and after a topology opens
   await expect(inspect).toBeVisible();
   await deploy(page);
   await expect(page.locator(".connection")).toContainText("finished", { timeout: 30_000 });
+  await page.setViewportSize({ width: 390, height: 844 });
+  const bounds = (await inspect.boundingBox())!;
+  expect(bounds.x).toBeGreaterThanOrEqual(0);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
   await inspect.click();
   await expect(terminal).toBeVisible();
 });

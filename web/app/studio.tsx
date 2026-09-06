@@ -628,7 +628,7 @@ export function Studio({
           {!isDemo ? (
             <button
               type="button"
-              className="waiting-inspect"
+              className="terminal-button"
               onClick={() => setTerminalAgent(ASSISTANT)}
               disabled={daemon.state !== "live"}
               aria-haspopup="dialog"
