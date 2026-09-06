@@ -1541,8 +1541,14 @@ h2 {
   .topbar {
     height: auto;
     align-items: flex-start;
+    flex-wrap: wrap;
     gap: 12px;
     padding: 12px;
+  }
+
+  .runtime-controls {
+    flex-wrap: wrap;
+    max-width: 100%;
   }
 
   .runtime-controls label {
@@ -2252,6 +2258,7 @@ h2 {
 }
 
 .chat-history {
+  margin: auto;
   width: min(560px, calc(100vw - 32px));
   max-height: min(680px, calc(100dvh - 48px));
   padding: 24px;

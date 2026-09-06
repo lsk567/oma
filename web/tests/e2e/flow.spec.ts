@@ -1707,6 +1707,7 @@ test("chat history restores messages and proposals after switching and reloading
 });
 
 test("chat history reports load failures and prevents switching during a reply", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
   await fake.close();
   fake = (await startFakeServe({ stepMs: 3000, port: FAKE_SERVE_PORT })) as FakeServe;
   await useFakeServe(page);
@@ -1716,6 +1717,9 @@ test("chat history reports load failures and prevents switching during a reply",
   const history = page.getByRole("dialog", { name: "Chat history" });
   await expect(history.getByRole("button", { name: "New chat" })).toBeDisabled();
   await expect(history).toContainText("Wait for the current reply");
+  const bounds = (await history.boundingBox())!;
+  expect(bounds.x).toBeGreaterThanOrEqual(0);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
   await page.keyboard.press("Escape");
   await expect(history).toBeHidden();
   await expect(page.getByRole("button", { name: "Chat history" })).toBeFocused();
