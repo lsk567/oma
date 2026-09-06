@@ -103,6 +103,9 @@ jobs:
       - name: Run all tests
         run: cargo test -- --test-threads=1
 
+      - name: Run tests that shell out to cargo
+        run: cargo test --bin omar -- --ignored --test-threads=1
+
   omar-language:
     name: OMAR Language
     runs-on: ubuntu-latest
@@ -137,6 +140,29 @@ jobs:
             tests/ci/direct_run.omar --input run.request=hello --replace)
           echo "$output"
           grep -Fq 'Output run.result = "hello"' <<<"$output"
+
+      # The first program CI runs that has a reaction. Its bodies are code, so
+      # the ring is deterministic and costs no model call.
+      - name: Verify a reaction end to end
+        env:
+          OMARC_BIN: ${{ github.workspace }}/lang/.lake/build/bin/omarc
+        run: |
+          output=$(cargo run --quiet --bin omar -- run \
+            tests/topology/src/RingCode.omar --input n1.token=0 --replace)
+          echo "$output"
+          grep -Fq 'Output n1.done = 6' <<<"$output"
+
+      # No input at all: a timer starts it, and a state variable counts the
+      # rounds. The count a run ends with is printed beside its outputs.
+      - name: Verify state survives from one invocation to the next
+        env:
+          OMARC_BIN: ${{ github.workspace }}/lang/.lake/build/bin/omarc
+        run: |
+          output=$(cargo run --quiet --bin omar -- run \
+            tests/topology/src/RingLeader.omar --replace)
+          echo "$output"
+          grep -Fq 'Output leader.done = true' <<<"$output"
+          grep -Fq 'State leader.round = 10' <<<"$output"
 
       - name: Check bytecode layout and declared agent backends
         run: |
@@ -179,7 +205,8 @@ jobs:
               with open(path) as file:
                   bytecode = json.load(file)
               declared = declared_backends(os.path.basename(path)[: -len(".json")])
-              assert declared, (path, "source declares no agent")
+              spawns_agent = any(i["op"] == "spawn_agent" for i in bytecode["instructions"])
+              assert declared or not spawns_agent, (path, "source declares no agent")
               for instruction in bytecode["instructions"]:
                   keys = list(instruction)
                   assert keys[0] == "op", (path, keys)
@@ -194,9 +221,13 @@ jobs:
                       assert keys == ["op", "name", "parent", "team"], (path, keys)
                   if instruction["op"] == "declare_timer":
                       assert keys == ["op", "instance", "name", "offset", "period"], (path, keys)
+                  if instruction["op"] == "declare_state":
+                      assert keys == ["op", "instance", "name", "type", "initial"], (path, keys)
                   # Every member names the container it belongs to, so a client
                   # never has to infer the grouping from a dotted name.
-                  if instruction["op"] in ("spawn_agent", "define_port", "install_reaction"):
+                  if instruction["op"] in (
+                      "spawn_agent", "define_port", "declare_state", "install_reaction"
+                  ):
                       assert instruction["instance"], (path, instruction)
                   if instruction["op"] == "connect_ports":
                       # `after` is what buys a delay. A plain connection has
@@ -206,9 +237,13 @@ jobs:
                       ), (path, keys)
                   if instruction["op"] == "install_reaction":
                       # `within` is a deadline the reaction set for itself, and
-                      # is absent when it set none.
+                      # is absent when it set none. `body` carries a code
+                      # reaction's Rust, and is absent for a prompt.
                       assert keys in (
-                          reaction_order, reaction_order + ["within"]
+                          reaction_order,
+                          reaction_order + ["within"],
+                          reaction_order + ["body"],
+                          reaction_order + ["body", "within"],
                       ), (path, keys)
                   # A program picks its own backends; what CI pins is that the
                   # bytecode spawns the one its source asked for. Instantiating

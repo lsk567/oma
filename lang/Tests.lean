@@ -17,6 +17,7 @@ structure TopologyCase where
   ports : Nat
   connections : Nat := 0
   reactions : Nat
+  states : Nat := 0
   instructions : Nat
   codexOnly : Bool := true
 
@@ -51,6 +52,12 @@ def topologyCases : Array TopologyCase := #[
   -- Three instances of one team, so every count is the team's times three.
   { file := "Ring.omar", team := "Ring", agents := 3, ports := 9,
     connections := 3, reactions := 3, instructions := 23 },
+  -- Same shape as Ring with the reaction written as code, so no agent at all.
+  { file := "RingCode.omar", team := "RingCode", agents := 0, ports := 9,
+    connections := 3, reactions := 3, instructions := 20 },
+  -- The issue's sketch: a counter kept in state rather than carried in the token.
+  { file := "RingLeader.omar", team := "RingLeader", agents := 0, ports := 3,
+    connections := 1, reactions := 2, states := 1, instructions := 11 },
   { file := "SameAgentSerial.omar", team := "SameAgentSerial", agents := 2, ports := 4,
     reactions := 3, instructions := 12 },
   { file := "SuperdenseTime.omar", team := "SuperdenseTime", agents := 3, ports := 6,
@@ -69,6 +76,7 @@ def testTopology (test : TopologyCase) : IO Unit := do
   assertEqual s!"{test.file} port count" program.ports.size test.ports
   assertEqual s!"{test.file} connection count" program.connections.size test.connections
   assertEqual s!"{test.file} reaction count" program.reactions.size test.reactions
+  assertEqual s!"{test.file} state count" program.states.size test.states
   if test.codexOnly then
     for agent in program.agents do
       assertEqual s!"{test.file} backend for {agent.name}" agent.backend "Codex"
@@ -87,6 +95,35 @@ def testTopology (test : TopologyCase) : IO Unit := do
     assertEqual "list type" (program.ports.any (·.type == "list<int>")) true
     assertEqual "option type" (program.ports.any (·.type == "option<string>")) true
     assertEqual "nested type" (program.ports.any (·.type == "list<option<int>>")) true
+  if test.file == "RingCode.omar" then
+    -- A reaction carries a body and no prompt, and a team parameter is
+    -- substituted into it just as it is into a prompt.
+    for reaction in program.reactions do
+      assertEqual "reaction has no prompt" reaction.prompt ""
+      assertEqual "reaction has a body" reaction.body.isSome true
+      assertEqual "parameter substituted into body"
+        (mentions (reaction.body.getD "") "$(idx)") false
+    assertEqual "body keeps its braces"
+      (program.reactions.all (fun r => mentions (r.body.getD "") "out = Some(token + 1)")) true
+  if test.file == "RingLeader.omar" then
+    -- State is qualified like a port, typed as OMAR's int, and starts at 0.
+    let var ← match program.states[0]? with
+      | some var => pure var
+      | none => throw (IO.userError "RingLeader declares no state")
+    assertEqual "state name" var.name "leader.round"
+    assertEqual "state type" var.type "int"
+    assertEqual "state initial" (var.initial == .int 0) true
+    assertEqual "body reaches state through self"
+      (program.reactions.any (fun r => mentions (r.body.getD "") "self.round")) true
+    assertEqual "declare_state carries the initial value"
+      (mentions bytecode "{\"op\": \"declare_state\", \"instance\": \"leader\", \
+        \"name\": \"leader.round\", \"type\": \"int\", \"initial\": 0}") true
+    -- A body may bound its own worst case, and the deadline reaches the
+    -- bytecode in nanoseconds beside the body rather than in place of it.
+    assertEqual "reaction keeps its deadline"
+      (program.reactions.any (fun r => r.within == some 5000000000)) true
+    assertEqual "deadline follows the body in the bytecode"
+      (mentions bytecode "\"within\": 5000000000") true
   if test.file == "Ring.omar" then
     -- Instances are structure, not a naming convention: the bytecode says which
     -- container each name belongs to rather than leaving it to be guessed from
@@ -290,8 +327,31 @@ def rejectionCases : Array (String × String × String) := #[
   ("no main block at all",
     nodeTeam, "no main block"),
   ("a main block that instantiates nothing",
-    nodeTeam ++ " main { }", "instantiates no team")
+    nodeTeam ++ " main { }", "instantiates no team"),
+  -- State is typed as OMAR's types, and starts as a value of its own type.
+  ("state whose initial value is another type",
+    wireTeam "state n : int = \"zero\"", "starts as string"),
+  ("state without an initial value",
+    wireTeam "state n : int", "expected '='"),
+  ("state of a type a body cannot hold",
+    wireTeam "state xs : list<int> = 0", "is int, bool, or string"),
+  ("state named like a port",
+    wireTeam "state src : int = 0", "is also a port"),
+  ("state declared twice",
+    wireTeam "state n : int = 0 state n : int = 1", "duplicate state")
 ]
+
+/-- Every type state may have has a literal to start from. -/
+def testStateLiterals : IO Unit :=
+  let body := "state n : int = 3 state ok : bool = true state name : string = \"x\""
+  match lex (wireTeam body) >>= parse "Wire" with
+  | .ok program => do
+      assertEqual "state count" program.states.size 3
+      assertEqual "bool state"
+        (program.states.any (fun v => v.name == "w.ok" && v.initial == .bool true)) true
+      assertEqual "string state"
+        (program.states.any (fun v => v.name == "w.name" && v.initial == .str "x")) true
+  | .error message => throw (IO.userError s!"state literals: {message}")
 
 def testRejection (label : String) (source : String) (expected : String) : IO Unit :=
   match lex source >>= parse "check" with
@@ -330,6 +390,7 @@ def main : IO UInt32 := do
     testNamedMain
     testWithin
     testDelayUnits
+    testStateLiterals
     IO.println "compiler rejection tests passed"
     pure 0
   catch error =>

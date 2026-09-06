@@ -1,0 +1,33 @@
+// Ring.omar with the reaction written as code instead of a prompt.
+// The token travels round until a node stops forwarding it, exactly as the
+// prompt version does, but the result is deterministic and needs no model.
+team Node(idx : int)
+{
+    input token : int
+    output out : int
+    output done : int
+
+    // Triggers arrive as Option because absence is a value in the language.
+    // A team parameter is a compile-time constant, so `$(idx)` is substituted
+    // before the body ever reaches rustc.
+    reaction(token) -> (out | done) {=
+        let _node: i64 = $(idx);
+        if let Some(token) = token {
+            if token < 6 {
+                out = Some(token + 1);
+            } else {
+                done = Some(token);
+            }
+        }
+    =}
+}
+
+main {
+    n1 = Node(1)
+    n2 = Node(2)
+    n3 = Node(3)
+
+    n1.out -> n2.token after 0
+    n2.out -> n3.token after 0
+    n3.out -> n1.token after 0
+}

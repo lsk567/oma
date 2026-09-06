@@ -18,6 +18,7 @@ mod projects;
 // The generator runs under `cargo test`; nothing in a release build calls it.
 #[cfg(test)]
 mod protocol;
+mod reaction;
 mod scheduler;
 mod serve;
 mod stub_agent;
@@ -848,6 +849,9 @@ fn status_deployment(omar_dir: &std::path::Path, ea_id: ea::EaId, team: &str) ->
         }
     }
     println!("  agents: {}", record.sessions.len());
+    for (name, value) in &record.state_vars {
+        println!("  state {name} = {value}");
+    }
     println!("  files: {}", dir.display());
     Ok(())
 }

@@ -59,6 +59,16 @@ pub enum Instruction {
         #[serde(default)]
         instance: String,
     },
+    /// `state round : int = 0`: a value a reaction keeps between
+    /// invocations.
+    DeclareState {
+        name: String,
+        #[serde(rename = "type")]
+        ty: String,
+        initial: Value,
+        #[serde(default)]
+        instance: String,
+    },
     /// A trigger the runtime fires itself, from the logical clock.
     DeclareTimer {
         name: String,
@@ -82,6 +92,9 @@ pub enum Instruction {
         effects: Vec<String>,
         contract: String,
         prompt: String,
+        /// A Rust body, when the reaction is code rather than a prompt.
+        #[serde(default)]
+        body: Option<String>,
         #[serde(default)]
         instance: String,
         /// Nanoseconds one invocation may take before it is given up on.
@@ -143,6 +156,17 @@ pub struct TimerState {
     pub instance: String,
 }
 
+/// A state variable: typed as OMAR's types so its value can be recorded and
+/// shown, and starting from a value the program wrote down.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateVarState {
+    #[serde(rename = "type")]
+    pub ty: String,
+    pub initial: Value,
+    #[serde(default)]
+    pub instance: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionState {
     pub source: String,
@@ -161,6 +185,9 @@ pub struct ReactionState {
     pub effects: Vec<String>,
     pub contract: String,
     pub prompt: String,
+    /// A Rust body, when the reaction is code rather than a prompt.
+    #[serde(default)]
+    pub body: Option<String>,
     /// Nanoseconds one invocation may take. `None` uses the run-wide timeout.
     #[serde(default)]
     pub within: Option<u64>,
@@ -178,6 +205,8 @@ pub struct VmState {
     pub ports: BTreeMap<String, PortState>,
     pub connections: Vec<ConnectionState>,
     pub reactions: BTreeMap<String, ReactionState>,
+    #[serde(default)]
+    pub state_vars: BTreeMap<String, StateVarState>,
 }
 
 pub fn load_bytecode(path: &std::path::Path) -> Result<Bytecode> {
@@ -294,6 +323,7 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
         ports: BTreeMap::new(),
         connections: Vec::new(),
         reactions: BTreeMap::new(),
+        state_vars: BTreeMap::new(),
     };
     let mut committed = false;
 
@@ -393,6 +423,34 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                     bail!("duplicate port '{name}'");
                 }
             }
+            Instruction::DeclareState {
+                name,
+                ty,
+                initial,
+                instance,
+            } => {
+                check_instance(&state, "state", name, instance)?;
+                if state.ports.contains_key(name) || state.timers.contains_key(name) {
+                    bail!("state '{name}' is also a port or timer");
+                }
+                let starts_well = match ty.as_str() {
+                    "int" => initial.is_i64(),
+                    "bool" => initial.is_boolean(),
+                    "string" => initial.is_string(),
+                    other => bail!("state '{name}' has unsupported type '{other}'"),
+                };
+                if !starts_well {
+                    bail!("state '{name}' is {ty} but starts as {initial}");
+                }
+                let var = StateVarState {
+                    ty: ty.clone(),
+                    initial: initial.clone(),
+                    instance: instance.clone(),
+                };
+                if state.state_vars.insert(name.clone(), var).is_some() {
+                    bail!("duplicate state '{name}'");
+                }
+            }
             Instruction::DeclareTimer {
                 name,
                 offset,
@@ -462,12 +520,19 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                 effects,
                 contract,
                 prompt,
+                body,
                 instance,
                 within,
             } => {
                 let order = state.reactions.len();
                 check_instance(&state, "reaction", id, instance)?;
-                if !state.agents.contains_key(agent) {
+                // A body and an agent are exclusive: whichever the source
+                // gave, the other is empty.
+                if body.is_some() {
+                    if !agent.is_empty() || !prompt.is_empty() {
+                        bail!("reaction '{id}' has a body, so it names no agent or prompt");
+                    }
+                } else if !state.agents.contains_key(agent) {
                     bail!("reaction '{id}' references unknown agent '{agent}'");
                 }
                 for trigger in triggers {
@@ -507,6 +572,7 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                             effects: effects.clone(),
                             contract: contract.clone(),
                             prompt: prompt.clone(),
+                            body: body.clone(),
                             within: *within,
                         },
                     )
@@ -554,10 +620,12 @@ fn zero_delay_reach(state: &VmState, port: &str) -> BTreeSet<String> {
 
 /// Reaction ids that must run after `id` at a tag it fires in.
 ///
-/// Three reasons to be ordered: one writes a port the other is triggered by,
+/// Four reasons to be ordered: one writes a port the other is triggered by,
 /// so the second cannot decide whether its trigger is present until the first
-/// has run; both write the same port, so the later declaration wins; or they
-/// share an agent, which answers one invocation at a time.
+/// has run; both write the same port, so the later declaration wins; they
+/// share an agent, which answers one invocation at a time; or they are code
+/// reactions of one instance that keeps state, and each reads what the earlier
+/// one wrote.
 pub fn must_follow(state: &VmState, id: &str) -> BTreeSet<String> {
     let Some(reaction) = state.reactions.get(id) else {
         return BTreeSet::new();
@@ -582,11 +650,19 @@ pub fn must_follow(state: &VmState, id: &str) -> BTreeSet<String> {
                 .effects
                 .iter()
                 .any(|effect| reaction.effects.contains(effect));
-            let shares_agent = state_of.agent == reaction.agent;
-            // Declaration order decides the last two; only the first is a
+            // A reaction has no agent, so two of them share nothing here.
+            let shares_agent = !reaction.agent.is_empty() && state_of.agent == reaction.agent;
+            let shares_state = state_of.instance == reaction.instance
+                && state_of.body.is_some()
+                && reaction.body.is_some()
+                && state
+                    .state_vars
+                    .values()
+                    .any(|var| var.instance == reaction.instance);
+            // Declaration order decides the last three; only the first is a
             // dependency the program states rather than a tie to break.
             reads
-                || ((shares_port || shares_agent)
+                || ((shares_port || shares_agent || shares_state)
                     && state_of.order > reaction.order
                     && other.as_str() != id)
         })
@@ -1232,6 +1308,9 @@ struct InvocationSpec {
     agent: String,
     trigger_values: BTreeMap<String, Value>,
     allowed_effects: BTreeMap<String, String>,
+    /// Its instance's state variables as they stand, which a code body reads
+    /// as `self`.
+    state_values: BTreeMap<String, Value>,
     contract: String,
     prompt: String,
     /// What the program allows this invocation, overriding the run-wide
@@ -1257,7 +1336,8 @@ fn expired(invocation: &InvocationSpec, deadline: Duration) -> Result<BTreeMap<S
             "reaction '{}' invocation '{}': '{}' did not answer within {:?}, and contract '{}' requires an effect",
             invocation.reaction_id,
             invocation.id,
-            invocation.agent,
+            // A body has no agent to name.
+            if invocation.agent.is_empty() { "its body" } else { &invocation.agent },
             deadline,
             invocation.contract
         ),
@@ -1329,6 +1409,69 @@ impl ReactionExecutor for AgentReactionExecutor {
         };
         self.registry.remove(&invocation_id);
         result
+    }
+}
+
+/// A body reaches its own instance's state and no other's.
+///
+/// Codegen binds only the invoking instance's variables, so a body built here
+/// cannot reach further. The check is what the VM trusts instead of the
+/// binary, which it did not write.
+fn state_writes_stay_in_instance(
+    state: &VmState,
+    invocation: &InvocationSpec,
+    writes: &BTreeMap<String, Value>,
+) -> Result<()> {
+    match writes.keys().find(|name| {
+        state.state_vars.contains_key(*name) && !invocation.state_values.contains_key(*name)
+    }) {
+        Some(name) => bail!(
+            "reaction '{}' wrote state '{name}' outside its instance",
+            invocation.reaction_id
+        ),
+        None => Ok(()),
+    }
+}
+
+/// Sends a reaction to its compiled body when it has one, and to its agent
+/// otherwise. One run may hold both kinds.
+struct DispatchExecutor<'a, E: ReactionExecutor> {
+    state: &'a VmState,
+    code: Option<crate::reaction::Reactions>,
+    /// The run-wide timeout, which bounds a body that set no deadline.
+    timeout: Duration,
+    agents: E,
+}
+
+impl<E: ReactionExecutor> ReactionExecutor for DispatchExecutor<'_, E> {
+    fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+        if let Some(code) = &self.code {
+            if code.handles(&invocation.reaction_id) {
+                let deadline = invocation.within.unwrap_or(self.timeout);
+                let Some(writes) = code.invoke(
+                    self.state,
+                    &invocation.reaction_id,
+                    &invocation.trigger_values,
+                    &invocation.state_values,
+                    deadline,
+                )?
+                else {
+                    // Killed with nothing written, so its instance keeps the
+                    // state it had before the invocation.
+                    return expired(&invocation, deadline);
+                };
+                state_writes_stay_in_instance(self.state, &invocation, &writes)?;
+                // State comes back beside the effects and is not one of them.
+                let effects: BTreeMap<_, _> = writes
+                    .iter()
+                    .filter(|(name, _)| !self.state.state_vars.contains_key(*name))
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect();
+                validate_contract(&invocation.contract, &effects)?;
+                return Ok(writes);
+            }
+        }
+        self.agents.invoke(invocation)
     }
 }
 
@@ -1477,7 +1620,15 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
     // Only what this run spawned. A failure must not tear down a session it
     // refused to replace.
     let mut spawned: BTreeMap<String, String> = BTreeMap::new();
-    let prepared = (|| -> Result<(InvocationServer, BTreeMap<String, Value>)> {
+    type Prepared = (
+        InvocationServer,
+        BTreeMap<String, Value>,
+        Option<crate::reaction::Reactions>,
+    );
+    let prepared = (|| -> Result<Prepared> {
+        // Before anything is spawned: compiling the bodies is the step most
+        // likely to fail, and it costs nothing to find out first.
+        let reactions = crate::reaction::build(&state, &config.omar_dir.join("code-cache"))?;
         let invocation_server = InvocationServer::start()?;
         spawn_topology_agents(
             &state,
@@ -1488,9 +1639,9 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
             &mut spawned,
         )?;
         let inputs = parse_inputs(&state, config.inputs)?;
-        Ok((invocation_server, inputs))
+        Ok((invocation_server, inputs, reactions))
     })();
-    let (invocation_server, inputs) = match prepared {
+    let (invocation_server, inputs, reactions) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
             observer.run_failed(&error.to_string());
@@ -1515,12 +1666,17 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
             });
         }
     }
-    let executor = AgentReactionExecutor {
-        client,
-        team: state.team.clone(),
-        registry: invocation_server.registry.clone(),
+    let executor = DispatchExecutor {
+        state: &state,
+        code: reactions,
         timeout: config.timeout,
-        web,
+        agents: AgentReactionExecutor {
+            client,
+            team: state.team.clone(),
+            registry: invocation_server.registry.clone(),
+            timeout: config.timeout,
+            web,
+        },
     };
     advance_record(&record, &runtime_dir, DeploymentState::Running, None)?;
     // Flip RUNNING to STOPPING the moment a stop lands, even while the loop
@@ -1566,14 +1722,24 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
                 .lock()
                 .map(|guard| guard.sessions.clone())
                 .unwrap_or_default();
-            fail_deployment(&record, &runtime_dir, &executor.client, &sessions, &error);
+            fail_deployment(
+                &record,
+                &runtime_dir,
+                &executor.agents.client,
+                &sessions,
+                &error,
+            );
             return Err(error);
         }
     };
-    let (outputs, stopped) = match end {
-        LoopEnd::Completed(outputs) => (outputs, false),
-        LoopEnd::Stopped(outputs) => (outputs, true),
+    let (settled, stopped) = match end {
+        LoopEnd::Completed(settled) => (settled, false),
+        LoopEnd::Stopped(settled) => (settled, true),
     };
+    let Settled {
+        outputs,
+        state_vars,
+    } = settled;
     observer.run_completed(&outputs);
     write_json_atomic(&runtime_dir.join("state.json"), &state)?;
     write_json_atomic(&deploy::outputs_path(&runtime_dir), &outputs)?;
@@ -1581,9 +1747,11 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
         .lock()
         .map(|guard| guard.sessions.clone())
         .unwrap_or_default();
-    for failure in
-        deploy::teardown_sessions(&executor.client, &sessions, &deploy::logs_dir(&runtime_dir))
-    {
+    for failure in deploy::teardown_sessions(
+        &executor.agents.client,
+        &sessions,
+        &deploy::logs_dir(&runtime_dir),
+    ) {
         eprintln!("warning: session not cleaned up: {failure}");
     }
     {
@@ -1601,6 +1769,9 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
         } else {
             "run completed"
         };
+        // The record keeps the state a run ended with, the way it keeps
+        // the outputs, so a stopped run can be read back.
+        guard.state_vars = state_vars.clone();
         guard.advance(DeploymentState::Terminated, Some(detail))?;
         guard.save(&runtime_dir)?;
     }
@@ -1612,6 +1783,9 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
     }
     for (port, value) in outputs {
         println!("Output {port} = {value}");
+    }
+    for (name, value) in state_vars {
+        println!("State {name} = {value}");
     }
     Ok(if stopped {
         RunEnd::Stopped
@@ -2141,11 +2315,18 @@ pub enum Pace {
     Fast,
 }
 
+/// What a run leaves behind: its outputs, and the last value of every state
+/// variable.
+struct Settled {
+    outputs: BTreeMap<String, Value>,
+    state_vars: BTreeMap<String, Value>,
+}
+
 /// How the loop ended: the queue drained, or a stop closed the run at a tag
-/// boundary. Either way the outputs read so far come along.
+/// boundary. Either way what settled so far comes along.
 enum LoopEnd {
-    Completed(BTreeMap<String, Value>),
-    Stopped(BTreeMap<String, Value>),
+    Completed(Settled),
+    Stopped(Settled),
 }
 
 #[cfg(test)]
@@ -2162,7 +2343,7 @@ fn run_event_loop<E: ReactionExecutor>(
         Pace::Fast,
         None,
     )? {
-        LoopEnd::Completed(outputs) | LoopEnd::Stopped(outputs) => Ok(outputs),
+        LoopEnd::Completed(settled) | LoopEnd::Stopped(settled) => Ok(settled.outputs),
     }
 }
 
@@ -2190,6 +2371,13 @@ fn run_event_loop_observed<E: ReactionExecutor>(
             .insert(name.clone(), json!(timer.offset));
     }
     let mut outputs = BTreeMap::new();
+    // Every state variable starts where the program said and lives here for
+    // the run: an invocation sees its instance's, and hands back what it set.
+    let mut store: BTreeMap<String, Value> = state
+        .state_vars
+        .iter()
+        .map(|(name, var)| (name.clone(), var.initial.clone()))
+        .collect();
 
     // No bound on how many tags a run may pass through. A loop that costs a
     // microstep somewhere -- through an action, or a connection written
@@ -2209,7 +2397,10 @@ fn run_event_loop_observed<E: ReactionExecutor>(
         // An operator's stop ends the run here, between tags: nothing is in
         // flight at a boundary, so no invocation's contract is abandoned.
         if stop_now() {
-            return Ok(LoopEnd::Stopped(outputs));
+            return Ok(LoopEnd::Stopped(Settled {
+                outputs,
+                state_vars: store,
+            }));
         }
         // A tag nothing is present at is not a moment the run passed through.
         // No reaction can fire at one -- enabling asks whether any trigger is
@@ -2235,7 +2426,10 @@ fn run_event_loop_observed<E: ReactionExecutor>(
             // Sliced so a stop during a long wait is honoured within a beat.
             while let Some(remaining) = due.checked_sub(origin.elapsed()) {
                 if stop_now() {
-                    return Ok(LoopEnd::Stopped(outputs));
+                    return Ok(LoopEnd::Stopped(Settled {
+                        outputs,
+                        state_vars: store,
+                    }));
                 }
                 thread::sleep(remaining.min(Duration::from_millis(250)));
             }
@@ -2287,7 +2481,7 @@ fn run_event_loop_observed<E: ReactionExecutor>(
 
             let specs: Vec<_> = enabled
                 .iter()
-                .map(|entry| invocation_spec(state, *entry, &events))
+                .map(|entry| invocation_spec(state, *entry, &events, &store))
                 .collect::<Result<_>>()?;
             for spec in &specs {
                 observer.reaction_started(
@@ -2333,6 +2527,12 @@ fn run_event_loop_observed<E: ReactionExecutor>(
             completed.sort_by_key(|(order, _)| *order);
             for (_, writes) in completed {
                 for (port, value) in writes {
+                    // A state variable's new value stays with its instance
+                    // rather than travelling anywhere.
+                    if state.state_vars.contains_key(&port) {
+                        store.insert(port, value);
+                        continue;
+                    }
                     deliver(
                         state,
                         &mut events,
@@ -2359,13 +2559,17 @@ fn run_event_loop_observed<E: ReactionExecutor>(
             }
         }
     }
-    Ok(LoopEnd::Completed(outputs))
+    Ok(LoopEnd::Completed(Settled {
+        outputs,
+        state_vars: store,
+    }))
 }
 
 fn invocation_spec(
     state: &VmState,
     (reaction_id, reaction): (&String, &ReactionState),
     events: &BTreeMap<String, Value>,
+    store: &BTreeMap<String, Value>,
 ) -> Result<InvocationSpec> {
     let trigger_values = reaction
         .triggers
@@ -2387,12 +2591,20 @@ fn invocation_spec(
             Ok((effect.clone(), port.ty.clone()))
         })
         .collect::<Result<_>>()?;
+    // Only its own instance's: a body reaches state through `self`.
+    let state_values = state
+        .state_vars
+        .iter()
+        .filter(|(_, var)| var.instance == reaction.instance)
+        .filter_map(|(name, _)| store.get(name).map(|value| (name.clone(), value.clone())))
+        .collect();
     Ok(InvocationSpec {
         id: Uuid::new_v4().to_string(),
         reaction_id: reaction_id.clone(),
         agent: reaction.agent.clone(),
         trigger_values,
         allowed_effects,
+        state_values,
         contract: reaction.contract.clone(),
         prompt: reaction.prompt.clone(),
         within: reaction.within.map(Duration::from_nanos),
@@ -2550,7 +2762,7 @@ mod tests {
     /// The outputs however the loop ended; these tests never request a stop.
     fn loop_outputs(end: LoopEnd) -> BTreeMap<String, Value> {
         match end {
-            LoopEnd::Completed(outputs) | LoopEnd::Stopped(outputs) => outputs,
+            LoopEnd::Completed(settled) | LoopEnd::Stopped(settled) => settled.outputs,
         }
     }
 
@@ -2702,6 +2914,7 @@ mod tests {
         let mut state = VmState {
             version: 1,
             team: "HR".into(),
+            state_vars: BTreeMap::new(),
             instances: BTreeMap::new(),
             timers: BTreeMap::new(),
             agents: BTreeMap::from([
@@ -2793,6 +3006,7 @@ mod tests {
                     effects: effects.into_iter().map(str::to_string).collect(),
                     contract: contract.into(),
                     prompt: "prompt".into(),
+                    body: None,
                     within: None,
                 },
             );
@@ -3053,6 +3267,7 @@ mod tests {
             &state,
             (id, reaction),
             &BTreeMap::from([("topic".to_string(), json!("x"))]),
+            &BTreeMap::new(),
         )
         .unwrap()
     }
@@ -4409,9 +4624,259 @@ mod tests {
         )
         .unwrap();
         match end {
-            LoopEnd::Completed(outputs) => assert_eq!(outputs.get("out"), Some(&json!("ping"))),
+            LoopEnd::Completed(settled) => {
+                assert_eq!(settled.outputs.get("out"), Some(&json!("ping")))
+            }
             LoopEnd::Stopped(_) => panic!("nothing requested a stop"),
         }
         assert_eq!(*executor.calls.lock().unwrap(), 2);
+    }
+
+    /// A program of one instance whose reaction keeps a count in state. It
+    /// re-triggers itself through an action until the count reaches three.
+    fn counter_bytecode(extra: &str) -> Bytecode {
+        serde_json::from_str(&format!(
+            r#"{{
+              "version": 1,
+              "team": "Counter",
+              "instructions": [
+                {{"op":"begin_plan","team":"Counter"}},
+                {{"op":"declare_instance","name":"c","parent":"","team":"Counter"}},
+                {{"op":"define_port","instance":"c","kind":"input","name":"c.tick","type":"int"}},
+                {{"op":"define_port","instance":"c","kind":"action","name":"c.again","type":"int"}},
+                {{"op":"define_port","instance":"c","kind":"output","name":"c.total","type":"int"}},
+                {{"op":"declare_state","instance":"c","name":"c.count","type":"int","initial":0}},
+                {{"op":"install_reaction","instance":"c","id":"c.reaction.0","agent":"",
+                  "triggers":["c.tick","c.again"],"effects":["c.total","c.again"],
+                  "contract":"c.total , c.again ?","prompt":"","body":"unused"}},
+                {extra}
+                {{"op":"commit_plan"}}
+              ]
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    /// State a reaction hands back stays with its instance: it reaches the
+    /// next invocation, never a port, and its last value leaves with the run.
+    #[test]
+    fn state_rides_from_one_invocation_to_the_next() {
+        struct Counting;
+        impl ReactionExecutor for Counting {
+            fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+                let count = invocation.state_values["c.count"].as_i64().unwrap() + 1;
+                let mut writes = BTreeMap::from([
+                    ("c.count".to_string(), json!(count)),
+                    ("c.total".to_string(), json!(count * 10)),
+                ]);
+                if count < 3 {
+                    writes.insert("c.again".to_string(), json!(count));
+                }
+                Ok(writes)
+            }
+        }
+        let state = verify(&counter_bytecode("")).unwrap();
+        let end = run_event_loop_observed(
+            &state,
+            BTreeMap::from([("c.tick".to_string(), json!(1))]),
+            &Counting,
+            &NoopTopologyObserver,
+            Pace::Fast,
+            None,
+        )
+        .unwrap();
+        let LoopEnd::Completed(settled) = end else {
+            panic!("nothing requested a stop");
+        };
+        assert_eq!(
+            settled.outputs,
+            BTreeMap::from([("c.total".to_string(), json!(30))])
+        );
+        assert_eq!(
+            settled.state_vars,
+            BTreeMap::from([("c.count".to_string(), json!(3))])
+        );
+    }
+
+    /// Two reactions with nothing in common but their instance are free
+    /// to run together, until that instance keeps state.
+    #[test]
+    fn reactions_of_a_stateful_instance_run_in_declaration_order() {
+        let second = r#"{"op":"define_port","instance":"c","kind":"output","name":"c.other","type":"int"},
+            {"op":"install_reaction","instance":"c","id":"c.reaction.1","agent":"",
+             "triggers":["c.tick"],"effects":["c.other"],"contract":"c.other","prompt":"","body":"unused"},"#;
+        let stateful = verify(&counter_bytecode(second)).unwrap();
+        assert_eq!(
+            must_follow(&stateful, "c.reaction.0"),
+            BTreeSet::from(["c.reaction.1".to_string()])
+        );
+        assert!(must_follow(&stateful, "c.reaction.1").is_empty());
+
+        let mut bytecode = counter_bytecode(second);
+        bytecode
+            .instructions
+            .retain(|i| !matches!(i, Instruction::DeclareState { .. }));
+        let stateless = verify(&bytecode).unwrap();
+        assert!(must_follow(&stateless, "c.reaction.0").is_empty());
+    }
+
+    #[test]
+    fn verify_checks_a_state_declaration() {
+        let broken = |line: &str| {
+            let mut bytecode = counter_bytecode("");
+            let declared = bytecode
+                .instructions
+                .iter()
+                .position(|i| matches!(i, Instruction::DeclareState { .. }))
+                .unwrap();
+            bytecode.instructions[declared] = serde_json::from_str(line).unwrap();
+            verify(&bytecode).unwrap_err().to_string()
+        };
+        assert!(broken(
+            r#"{"op":"declare_state","instance":"c","name":"c.count","type":"int","initial":"0"}"#
+        )
+        .contains("starts as"));
+        assert!(broken(
+            r#"{"op":"declare_state","instance":"c","name":"c.tick","type":"int","initial":0}"#
+        )
+        .contains("is also a port"));
+        assert!(broken(
+            r#"{"op":"declare_state","instance":"c","name":"c.count","type":"float","initial":0}"#
+        )
+        .contains("unsupported type"));
+    }
+
+    /// A body answers for itself, so naming an agent or a prompt beside one
+    /// says two things at once and the VM refuses to pick.
+    #[test]
+    fn verify_refuses_a_body_that_also_names_an_agent_or_prompt() {
+        let with = |field: &str, value: &str| {
+            let mut bytecode = counter_bytecode("");
+            let installed = bytecode
+                .instructions
+                .iter()
+                .position(|i| matches!(i, Instruction::InstallReaction { .. }))
+                .unwrap();
+            let Instruction::InstallReaction { agent, prompt, .. } =
+                &mut bytecode.instructions[installed]
+            else {
+                unreachable!("the position above matched one");
+            };
+            match field {
+                "agent" => *agent = value.to_string(),
+                _ => *prompt = value.to_string(),
+            }
+            verify(&bytecode).unwrap_err().to_string()
+        };
+        assert!(with("agent", "writer").contains("names no agent or prompt"));
+        assert!(with("prompt", "decide").contains("names no agent or prompt"));
+
+        // A deadline is not one of the exclusive fields: a body may bound its
+        // own worst case the way a prompt does.
+        let mut bounded = counter_bytecode("");
+        let installed = bounded
+            .instructions
+            .iter()
+            .position(|i| matches!(i, Instruction::InstallReaction { .. }))
+            .unwrap();
+        if let Instruction::InstallReaction { within, .. } = &mut bounded.instructions[installed] {
+            *within = Some(5_000_000_000);
+        }
+        let state = verify(&bounded).unwrap();
+        assert_eq!(state.reactions["c.reaction.0"].within, Some(5_000_000_000));
+    }
+
+    /// Codegen binds only the invoking instance's variables, so this refuses
+    /// what only a binary the VM did not write could send.
+    #[test]
+    fn a_body_may_not_write_another_instances_state() {
+        let second = r#"{"op":"declare_instance","name":"d","parent":"","team":"Counter"},
+            {"op":"declare_state","instance":"d","name":"d.count","type":"int","initial":0},"#;
+        let state = verify(&counter_bytecode(second)).unwrap();
+        let entry = state.reactions.get_key_value("c.reaction.0").unwrap();
+        let spec = invocation_spec(
+            &state,
+            entry,
+            &BTreeMap::from([("c.tick".to_string(), json!(1))]),
+            &BTreeMap::from([
+                ("c.count".to_string(), json!(0)),
+                ("d.count".to_string(), json!(0)),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(spec.state_values.keys().collect::<Vec<_>>(), ["c.count"]);
+
+        let own = BTreeMap::from([("c.count".to_string(), json!(1))]);
+        assert!(state_writes_stay_in_instance(&state, &spec, &own).is_ok());
+
+        let reached = BTreeMap::from([("d.count".to_string(), json!(1))]);
+        let error = state_writes_stay_in_instance(&state, &spec, &reached)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("outside its instance"), "{error}");
+        assert!(error.contains("d.count"), "{error}");
+    }
+
+    /// A body that sleeps past its own deadline, so the wait has to end it.
+    fn slow_bytecode(contract: &str) -> Bytecode {
+        serde_json::from_str(&format!(
+            r#"{{
+              "version": 1,
+              "team": "Slow",
+              "instructions": [
+                {{"op":"begin_plan","team":"Slow"}},
+                {{"op":"declare_instance","name":"s","parent":"","team":"Slow"}},
+                {{"op":"define_port","instance":"s","kind":"input","name":"s.tick","type":"int"}},
+                {{"op":"define_port","instance":"s","kind":"output","name":"s.out","type":"int"}},
+                {{"op":"install_reaction","instance":"s","id":"s.reaction.0","agent":"",
+                  "triggers":["s.tick"],"effects":["s.out"],"contract":"{contract}","prompt":"",
+                  "body":"std::thread::sleep(std::time::Duration::from_secs(30)); out = Some(1);",
+                  "within":200000000}},
+                {{"op":"commit_plan"}}
+              ]
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    /// An overrunning body is killed with nothing written, and what that means
+    /// is read off the contract, exactly as a silent agent's expiry is.
+    #[test]
+    #[ignore = "shells out to cargo; run with --ignored"]
+    fn a_body_that_overruns_expires_on_its_contract() {
+        struct Unused;
+        impl ReactionExecutor for Unused {
+            fn invoke(&self, _: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+                panic!("the reaction has a body, so no agent is asked");
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let run = |contract: &str| {
+            let state = verify(&slow_bytecode(contract)).unwrap();
+            let code = crate::reaction::build(&state, dir.path()).unwrap().unwrap();
+            let spec = invocation_spec(
+                &state,
+                state.reactions.get_key_value("s.reaction.0").unwrap(),
+                &BTreeMap::from([("s.tick".to_string(), json!(1))]),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            DispatchExecutor {
+                state: &state,
+                code: Some(code),
+                timeout: Duration::from_secs(30),
+                agents: Unused,
+            }
+            .invoke(spec)
+        };
+
+        // `s.out ?` is a promise the body may keep by staying silent, so the
+        // tag completes with no writes.
+        assert_eq!(run("s.out ?").unwrap(), BTreeMap::new());
+
+        // `s.out` was required and never arrived. There is no value to invent.
+        let error = run("s.out").unwrap_err().to_string();
+        assert!(error.contains("requires an effect"), "{error}");
+        assert!(error.contains("its body"), "{error}");
     }
 }
