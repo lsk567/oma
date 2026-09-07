@@ -97,6 +97,11 @@ fn answer(topology: &TopologyMcpContext, fields: &BTreeMap<String, String>) -> R
 
 /// The simplest value the runtime's validator accepts for a declared type.
 fn stub_value(ty: &str) -> Value {
+    // A refined string admits only what it lists, so "stub" is not among the
+    // answers the validator would take. The first one always is.
+    if let Some(allowed) = crate::topology::string_enum(ty) {
+        return allowed.first().map(|o| json!(o)).unwrap_or(Value::Null);
+    }
     if let Some(inner) = ty.strip_prefix("list<").and_then(|t| t.strip_suffix('>')) {
         return json!([stub_value(inner)]);
     }
@@ -157,5 +162,17 @@ mod tests {
         let list = stub_value("list<int>");
         assert_eq!(list.as_array().map(|items| items.len()), Some(1));
         assert_eq!(list[0].as_i64(), Some(0));
+    }
+
+    #[test]
+    fn a_refined_string_stubs_to_a_value_it_admits() {
+        // "stub" is not one of these, so without the refinement branch every
+        // program declaring one would fail its first write.
+        assert_eq!(
+            stub_value("string in [\"continue\",\"stop\"]"),
+            json!("continue")
+        );
+        let list = stub_value("list<string in [\"a\",\"b\"]>");
+        assert_eq!(list, json!(["a"]));
     }
 }

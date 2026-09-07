@@ -1077,7 +1077,29 @@ fn validate_invocation_owner(team: &str, agent: &str, invocation: &InvocationRec
     Ok(())
 }
 
+/// The values a refined string type admits, or `None` if `ty` is not one.
+///
+/// A refinement travels inside the flat type string -- `string in ["a","b"]` --
+/// rather than in a field of its own. Nothing downstream has to learn a new
+/// shape: the bytecode's `type` stays a string, and connection checking stays
+/// equality over the canonical spelling `omarc` emits.
+pub(crate) fn string_enum(ty: &str) -> Option<Vec<String>> {
+    serde_json::from_str(ty.strip_prefix("string in ")?).ok()
+}
+
 fn validate_value(ty: &str, value: &Value) -> Result<()> {
+    if let Some(allowed) = string_enum(ty) {
+        // The agent acts on this message, so it names every legal answer
+        // rather than only reporting that this one was wrong.
+        let text = value
+            .as_str()
+            .with_context(|| format!("expected {ty}, got {value}"))?;
+        if !allowed.iter().any(|option| option == text) {
+            let options: Vec<String> = allowed.iter().map(|o| format!("\"{o}\"")).collect();
+            bail!("expected one of {}, got {value}", options.join(", "));
+        }
+        return Ok(());
+    }
     if let Some(inner) = generic_inner(ty, "list") {
         let values = value
             .as_array()
@@ -1755,6 +1777,12 @@ pub fn parse_inputs(state: &VmState, raw_inputs: &[String]) -> Result<BTreeMap<S
 }
 
 fn parse_input_value(ty: &str, value: &str) -> Result<Value> {
+    // A refined string is still supplied as bare text on the command line;
+    // whether it is one of the values the port admits is `validate_value`'s
+    // answer, not the parser's.
+    if string_enum(ty).is_some() {
+        return Ok(Value::String(value.to_string()));
+    }
     match ty {
         "bool" => Ok(Value::Bool(value.parse()?)),
         "int" => Ok(json!(value.parse::<i64>()?)),
@@ -2616,6 +2644,25 @@ mod tests {
         let mut program = program();
         program.instructions.pop();
         assert!(verify(&program).is_err());
+    }
+
+    #[test]
+    fn a_refined_string_admits_only_what_it_lists() {
+        let ty = "string in [\"continue\",\"stop\"]";
+        validate_value(ty, &json!("continue")).unwrap();
+        validate_value(ty, &json!("stop")).unwrap();
+
+        // The failure the refinement exists for: a value that is a perfectly
+        // good string and not one of the answers the port accepts.
+        let rejected = validate_value(ty, &json!("this is a terminal record, not a forward"))
+            .unwrap_err()
+            .to_string();
+        assert!(rejected.contains("\"continue\""), "{rejected}");
+        assert!(rejected.contains("\"stop\""), "{rejected}");
+
+        assert!(validate_value(ty, &json!(1)).is_err());
+        validate_value("list<string in [\"a\",\"b\"]>", &json!(["a", "b"])).unwrap();
+        assert!(validate_value("list<string in [\"a\",\"b\"]>", &json!(["c"])).is_err());
     }
 
     #[test]
