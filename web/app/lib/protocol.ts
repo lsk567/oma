@@ -12,6 +12,12 @@
  * from here and the split is invisible to callers.
  */
 export type {
+  PendingApproval,
+  ApprovalSnapshot,
+  ApprovalMonitor,
+  ApprovalConnection,
+  ApprovalOutcome,
+  ApprovalResolution,
   ChatMessage,
   ChatRole,
   DiagramAgent,

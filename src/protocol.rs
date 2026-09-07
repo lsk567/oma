@@ -23,6 +23,10 @@
 //! runtime one — a hand-written list inside `assertRunRecord`. The array is
 //! what that check can be written against.
 
+use crate::approvals::{
+    ApprovalConnection, ApprovalMonitor, ApprovalOutcome, ApprovalResolution,
+    ApprovalResolutionMode, ApprovalSnapshot, PendingApproval,
+};
 use ts_rs::{Config, TS};
 
 use crate::diagram::{
@@ -174,6 +178,13 @@ pub fn generate() -> String {
 
     // Declared after the vocabularies, because the structs refer to them.
     let mut decls = vec![
+        ApprovalConnection::decl(&config),
+        ApprovalOutcome::decl(&config),
+        ApprovalResolutionMode::decl(&config),
+        PendingApproval::decl(&config),
+        ApprovalMonitor::decl(&config),
+        ApprovalResolution::decl(&config),
+        ApprovalSnapshot::decl(&config),
         DiagramTag::decl(&config),
         DiagramInstance::decl(&config),
         DiagramAgent::decl(&config),

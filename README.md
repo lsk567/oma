@@ -86,6 +86,12 @@ the topology it compiles to.
 Nothing runs until you press **Confirm deploy**,
 then the diagram goes live.
 
+When a supported agent requests permission, its node shows an orange dot and
+**Waiting for approval**. The header counts pending requests, and the executive
+assistant has the same indicator before a topology exists. Review the request to
+see its scope and open that agent's terminal to respond. Other agents keep running.
+See [approval monitoring](docs/approvals.md) for supported sessions and behavior.
+
 ### Terminal UI (Legacy)
 
 Note: The legacy terminal UI does not yet implement the deterministic model in the mission control.
