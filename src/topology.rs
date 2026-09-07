@@ -374,6 +374,18 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                 if ty.trim().is_empty() {
                     bail!("port '{name}' has an empty type");
                 }
+                // A refinement that does not parse is a broken port, not a
+                // plain `string`. Saying so here, once, keeps `string_enum`
+                // free to answer "not refined" everywhere downstream.
+                if let Some(list) = ty.strip_prefix("string in ") {
+                    match serde_json::from_str::<Vec<String>>(list) {
+                        Ok(values) if !values.is_empty() => {}
+                        Ok(_) => bail!("port '{name}' admits no value"),
+                        Err(error) => {
+                            bail!("port '{name}' has an invalid string refinement: {error}")
+                        }
+                    }
+                }
                 if delay.is_some() && *kind != PortKind::Action {
                     bail!("only action ports may declare a fixed delay");
                 }
@@ -2645,6 +2657,26 @@ mod tests {
         assert_eq!(state.agents.len(), 1);
         assert_eq!(state.ports.len(), 2);
         assert_eq!(state.reactions.len(), 1);
+    }
+
+    #[test]
+    fn rejects_a_port_whose_refinement_does_not_parse() {
+        // `omarc` cannot emit either of these. Hand-written bytecode can, and
+        // the port is what is wrong -- not the first value written to it.
+        for (ty, expected) in [
+            (r#"string in [oops"#, "invalid string refinement"),
+            (r#"string in [1,2]"#, "invalid string refinement"),
+            (r#"string in []"#, "admits no value"),
+        ] {
+            let mut program = program();
+            program.instructions[2] = serde_json::from_str(&format!(
+                r#"{{"op":"define_port","kind":"input","name":"request","type":{}}}"#,
+                serde_json::to_string(ty).unwrap()
+            ))
+            .unwrap();
+            let error = verify(&program).unwrap_err().to_string();
+            assert!(error.contains(expected), "{ty} gave {error}");
+        }
     }
 
     #[test]
