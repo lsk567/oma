@@ -1094,8 +1094,16 @@ fn validate_value(ty: &str, value: &Value) -> Result<()> {
         let text = value
             .as_str()
             .with_context(|| format!("expected {ty}, got {value}"))?;
+        // `omarc` rejects an empty refinement, so this is reachable only from
+        // hand-written bytecode. Say what is wrong with the port rather than
+        // offering the agent a choice of nothing.
+        if allowed.is_empty() {
+            bail!("port type {ty} admits no value");
+        }
         if !allowed.iter().any(|option| option == text) {
-            let options: Vec<String> = allowed.iter().map(|o| format!("\"{o}\"")).collect();
+            // Quoted by serde rather than by hand: an admitted value may itself
+            // contain a quote or a newline, and the agent reads this message.
+            let options: Vec<String> = allowed.iter().map(|o| json!(o).to_string()).collect();
             bail!("expected one of {}, got {value}", options.join(", "));
         }
         return Ok(());
@@ -2663,6 +2671,24 @@ mod tests {
         assert!(validate_value(ty, &json!(1)).is_err());
         validate_value("list<string in [\"a\",\"b\"]>", &json!(["a", "b"])).unwrap();
         assert!(validate_value("list<string in [\"a\",\"b\"]>", &json!(["c"])).is_err());
+    }
+
+    #[test]
+    fn a_refinement_reports_awkward_values_readably() {
+        // An admitted value may contain a quote or a newline, and the agent
+        // reads the rejection, so the options are quoted by serde.
+        let ty = r#"string in ["say \"hi\"","two\nlines"]"#;
+        validate_value(ty, &json!("say \"hi\"")).unwrap();
+        let rejected = validate_value(ty, &json!("no")).unwrap_err().to_string();
+        assert!(rejected.contains(r#""say \"hi\"""#), "{rejected}");
+        assert!(rejected.contains(r#""two\nlines""#), "{rejected}");
+
+        // `omarc` rejects an empty refinement; hand-written bytecode can still
+        // carry one, and it is the port that is wrong, not the value.
+        let empty = validate_value("string in []", &json!("anything"))
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("admits no value"), "{empty}");
     }
 
     #[test]
