@@ -262,6 +262,7 @@ private partial def parseRefinement : Parser (Array String)
       let (tail, rest) ← parseRefinement rest
       pure (#[value] ++ tail, rest)
   | Token.text value :: Token.sym "]" :: rest => pure (#[value], rest)
+  | Token.sym "]" :: _ => throw "a string refinement must list at least one value"
   | tokens => throw s!"expected a quoted value in a string refinement, found {reprStr tokens.head?}"
 
 private partial def parseType : Parser String
