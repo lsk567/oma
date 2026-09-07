@@ -374,6 +374,7 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                 if ty.trim().is_empty() {
                     bail!("port '{name}' has an empty type");
                 }
+                check_refinement(name, ty)?;
                 if delay.is_some() && *kind != PortKind::Action {
                     bail!("only action ports may declare a fixed delay");
                 }
@@ -1077,7 +1078,37 @@ fn validate_invocation_owner(team: &str, agent: &str, invocation: &InvocationRec
     Ok(())
 }
 
+/// The values a refined string type admits, or `None` if `ty` is not one.
+///
+/// A refinement travels inside the flat type string -- `string in ["a","b"]` --
+/// rather than in a field of its own. Nothing downstream has to learn a new
+/// shape: the bytecode's `type` stays a string, and connection checking stays
+/// equality over the canonical spelling `omarc` emits.
+pub(crate) fn string_enum(ty: &str) -> Option<Vec<String>> {
+    serde_json::from_str(ty.strip_prefix("string in ")?).ok()
+}
+
 fn validate_value(ty: &str, value: &Value) -> Result<()> {
+    if let Some(allowed) = string_enum(ty) {
+        // The agent acts on this message, so it names every legal answer
+        // rather than only reporting that this one was wrong.
+        let text = value
+            .as_str()
+            .with_context(|| format!("expected {ty}, got {value}"))?;
+        // `omarc` rejects an empty refinement, so this is reachable only from
+        // hand-written bytecode. Say what is wrong with the port rather than
+        // offering the agent a choice of nothing.
+        if allowed.is_empty() {
+            bail!("port type {ty} admits no value");
+        }
+        if !allowed.iter().any(|option| option == text) {
+            // Quoted by serde rather than by hand: an admitted value may itself
+            // contain a quote or a newline, and the agent reads this message.
+            let options: Vec<String> = allowed.iter().map(|o| json!(o).to_string()).collect();
+            bail!("expected one of {}, got {value}", options.join(", "));
+        }
+        return Ok(());
+    }
     if let Some(inner) = generic_inner(ty, "list") {
         let values = value
             .as_array()
@@ -1108,6 +1139,29 @@ fn validate_value(ty: &str, value: &Value) -> Result<()> {
         bail!("expected {ty}, got {value}");
     }
     Ok(())
+}
+
+/// Reject a refinement that does not parse, wherever it sits in the type.
+///
+/// A refinement that is not well formed is a broken port, not a plain `string`.
+/// Saying so once, here, keeps `string_enum` free to answer "not refined"
+/// everywhere downstream. `validate_value` looks inside `list` and `option`, so
+/// this has to as well, or a nested one would reach the agent and be reported
+/// against the value it wrote rather than against the port.
+fn check_refinement(name: &str, ty: &str) -> Result<()> {
+    for outer in ["list", "option"] {
+        if let Some(inner) = generic_inner(ty, outer) {
+            return check_refinement(name, inner);
+        }
+    }
+    let Some(list) = ty.strip_prefix("string in ") else {
+        return Ok(());
+    };
+    match serde_json::from_str::<Vec<String>>(list) {
+        Ok(values) if !values.is_empty() => Ok(()),
+        Ok(_) => bail!("port '{name}' admits no value"),
+        Err(error) => bail!("port '{name}' has an invalid string refinement: {error}"),
+    }
 }
 
 fn generic_inner<'a>(ty: &'a str, outer: &str) -> Option<&'a str> {
@@ -1755,6 +1809,12 @@ pub fn parse_inputs(state: &VmState, raw_inputs: &[String]) -> Result<BTreeMap<S
 }
 
 fn parse_input_value(ty: &str, value: &str) -> Result<Value> {
+    // A refined string is still supplied as bare text on the command line;
+    // whether it is one of the values the port admits is `validate_value`'s
+    // answer, not the parser's.
+    if string_enum(ty).is_some() {
+        return Ok(Value::String(value.to_string()));
+    }
     match ty {
         "bool" => Ok(Value::Bool(value.parse()?)),
         "int" => Ok(json!(value.parse::<i64>()?)),
@@ -2612,10 +2672,74 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_port_whose_refinement_does_not_parse() {
+        // `omarc` cannot emit either of these. Hand-written bytecode can, and
+        // the port is what is wrong -- not the first value written to it.
+        for (ty, expected) in [
+            (r#"string in [oops"#, "invalid string refinement"),
+            (r#"string in [1,2]"#, "invalid string refinement"),
+            (r#"string in []"#, "admits no value"),
+            // `validate_value` looks inside these, so `verify` must too.
+            (r#"list<string in [oops>"#, "invalid string refinement"),
+            (r#"option<string in []>"#, "admits no value"),
+            (
+                r#"list<option<string in [1,2]>>"#,
+                "invalid string refinement",
+            ),
+        ] {
+            let mut program = program();
+            program.instructions[2] = serde_json::from_str(&format!(
+                r#"{{"op":"define_port","kind":"input","name":"request","type":{}}}"#,
+                serde_json::to_string(ty).unwrap()
+            ))
+            .unwrap();
+            let error = verify(&program).unwrap_err().to_string();
+            assert!(error.contains(expected), "{ty} gave {error}");
+        }
+    }
+
+    #[test]
     fn rejects_incomplete_topology() {
         let mut program = program();
         program.instructions.pop();
         assert!(verify(&program).is_err());
+    }
+
+    #[test]
+    fn a_refined_string_admits_only_what_it_lists() {
+        let ty = "string in [\"continue\",\"stop\"]";
+        validate_value(ty, &json!("continue")).unwrap();
+        validate_value(ty, &json!("stop")).unwrap();
+
+        // The failure the refinement exists for: a value that is a perfectly
+        // good string and not one of the answers the port accepts.
+        let rejected = validate_value(ty, &json!("this is a terminal record, not a forward"))
+            .unwrap_err()
+            .to_string();
+        assert!(rejected.contains("\"continue\""), "{rejected}");
+        assert!(rejected.contains("\"stop\""), "{rejected}");
+
+        assert!(validate_value(ty, &json!(1)).is_err());
+        validate_value("list<string in [\"a\",\"b\"]>", &json!(["a", "b"])).unwrap();
+        assert!(validate_value("list<string in [\"a\",\"b\"]>", &json!(["c"])).is_err());
+    }
+
+    #[test]
+    fn a_refinement_reports_awkward_values_readably() {
+        // An admitted value may contain a quote or a newline, and the agent
+        // reads the rejection, so the options are quoted by serde.
+        let ty = r#"string in ["say \"hi\"","two\nlines"]"#;
+        validate_value(ty, &json!("say \"hi\"")).unwrap();
+        let rejected = validate_value(ty, &json!("no")).unwrap_err().to_string();
+        assert!(rejected.contains(r#""say \"hi\"""#), "{rejected}");
+        assert!(rejected.contains(r#""two\nlines""#), "{rejected}");
+
+        // `omarc` rejects an empty refinement; hand-written bytecode can still
+        // carry one, and it is the port that is wrong, not the value.
+        let empty = validate_value("string in []", &json!("anything"))
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("admits no value"), "{empty}");
     }
 
     #[test]

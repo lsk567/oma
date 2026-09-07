@@ -254,10 +254,28 @@ private def natural : Parser Nat
   | Token.nat value :: rest => pure (value, rest)
   | tokens => throw s!"expected natural number, found {reprStr tokens.head?}"
 
+/-- The quoted values of a `string in [...]` refinement, up to the closing
+    bracket. Empty is rejected here: a port no value satisfies is a mistake,
+    and saying so at compile time beats failing every write at run time. -/
+private partial def parseRefinement : Parser (Array String)
+  | Token.text value :: Token.sym "," :: rest => do
+      let (tail, rest) ← parseRefinement rest
+      pure (#[value] ++ tail, rest)
+  | Token.text value :: Token.sym "]" :: rest => pure (#[value], rest)
+  | Token.sym "]" :: _ => throw "a string refinement must list at least one value"
+  | tokens => throw s!"expected a quoted value in a string refinement, found {reprStr tokens.head?}"
+
 private partial def parseType : Parser String
   | Token.word "bool" :: rest => pure ("bool", rest)
   | Token.word "int" :: rest => pure ("int", rest)
   | Token.word "float" :: rest => pure ("float", rest)
+  -- A refinement rides inside the type string rather than in a field of its
+  -- own, so the bytecode format is unchanged and connection checking stays
+  -- equality over this one canonical spelling.
+  | Token.word "string" :: Token.word "in" :: rest => do
+      let (_, rest) ← expectSym "[" rest
+      let (values, rest) ← parseRefinement rest
+      pure (s!"string in {(Json.arr (values.map toJson)).compress}", rest)
   | Token.word "string" :: rest => pure ("string", rest)
   | Token.word "path" :: rest => pure ("path", rest)
   | Token.word "bytes" :: rest => pure ("bytes", rest)
