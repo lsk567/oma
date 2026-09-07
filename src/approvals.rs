@@ -673,6 +673,24 @@ impl Connection {
     }
 }
 
+fn subscribe_details(
+    connection: &mut Connection,
+    tracker: &mut Tracker,
+    hub: &ApprovalHub,
+    key: &str,
+    id: &str,
+) -> bool {
+    // An empty thread can expose status before its history is materialized.
+    if let Ok(history) = connection.call("thread/read", json!({"threadId":id,"includeTurns":true}))
+    {
+        tracker.reconcile(hub, key, &history["thread"]);
+    }
+    // Omitted options preserve the pane's model and permission configuration.
+    connection
+        .call("thread/resume", json!({"threadId":id,"excludeTurns":true}))
+        .is_ok()
+}
+
 fn monitor(hub: ApprovalHub, key: String, session: String, fixed_socket: Option<PathBuf>) {
     let client = crate::tmux::TmuxClient::new("");
     let mut tracker = Tracker::default();
@@ -705,11 +723,11 @@ fn monitor(hub: ApprovalHub, key: String, session: String, fixed_socket: Option<
                 };
             }
             let read =
-                connection.call("thread/read", json!({"threadId":id,"includeTurns":true}))?;
+                connection.call("thread/read", json!({"threadId":id,"includeTurns":false}))?;
             tracker.reconcile(&hub, &key, &read["thread"]);
-            // Resume subscribes this connection and replays unresolved server
-            // requests. Omitted options preserve the pane's configuration.
-            connection.call("thread/resume", json!({"threadId":id,"excludeTurns":true}))?;
+            // Some app-server builds can read active status but cannot list
+            // turns. That must not disable the explicit approval-flag fallback.
+            let mut subscribed = subscribe_details(&mut connection, &mut tracker, &hub, &key, &id);
             for event in connection.queued.drain(..) {
                 tracker.event(&hub, &key, &event);
             }
@@ -724,11 +742,19 @@ fn monitor(hub: ApprovalHub, key: String, session: String, fixed_socket: Option<
                     if listed["data"] != json!([id]) {
                         bail!("pane thread changed");
                     }
-                    let read = connection.call("thread/read", json!({"threadId":id}))?;
+                    let read = connection
+                        .call("thread/read", json!({"threadId":id,"includeTurns":false}))?;
                     for event in connection.queued.drain(..) {
                         tracker.event(&hub, &key, &event);
                     }
                     tracker.reconcile(&hub, &key, &read["thread"]);
+                    if !subscribed {
+                        subscribed =
+                            subscribe_details(&mut connection, &mut tracker, &hub, &key, &id);
+                        for event in connection.queued.drain(..) {
+                            tracker.event(&hub, &key, &event);
+                        }
+                    }
                     checked = Instant::now();
                 }
             }
@@ -1002,5 +1028,82 @@ mod tests {
             server.join().unwrap(),
             ["initialize", "initialized", "thread/resume"]
         );
+    }
+
+    #[test]
+    fn monitor_still_reports_explicit_approval_when_history_and_resume_are_unsupported() {
+        use std::os::unix::net::UnixListener;
+        use std::sync::mpsc;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("approval.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (stop, stopped) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            loop {
+                let tungstenite::Message::Text(raw) = socket.read().unwrap() else {
+                    continue;
+                };
+                let value: Value = serde_json::from_str(&raw).unwrap();
+                let method = value["method"]
+                    .as_str()
+                    .expect("observer never sends decisions");
+                if method == "initialized" {
+                    continue;
+                }
+                let unsupported =
+                    method == "thread/resume" || value["params"]["includeTurns"] == true;
+                let response = if unsupported {
+                    json!({"id":value["id"],"error":{"code":-32601,"message":"list_turns is not supported yet"}})
+                } else {
+                    let result = if method == "thread/loaded/list" {
+                        json!({"data":["thread"]})
+                    } else if method == "thread/read" {
+                        json!({"thread":{"status":{"type":"active","activeFlags":["waitingOnApproval"]}}})
+                    } else {
+                        json!({})
+                    };
+                    json!({"id":value["id"],"result":result})
+                };
+                socket
+                    .send(tungstenite::Message::Text(response.to_string()))
+                    .unwrap();
+                if method == "thread/resume" {
+                    stopped.recv_timeout(Duration::from_secs(5)).unwrap();
+                    return;
+                }
+            }
+        });
+        let hub = ApprovalHub::default();
+        hub.watch(
+            "unused".into(),
+            "assistant".into(),
+            "Executive assistant".into(),
+            None,
+            Some(path),
+            true,
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline
+            && !hub
+                .snapshot()
+                .monitors
+                .iter()
+                .any(|m| m.state == ApprovalConnection::Connected)
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let snapshot = hub.snapshot();
+        hub.shutdown();
+        stop.send(()).unwrap();
+        server.join().unwrap();
+        assert_eq!(snapshot.monitors[0].state, ApprovalConnection::Connected);
+        assert_eq!(snapshot.requests.len(), 1);
+        assert_eq!(snapshot.requests[0].tool_name, "Backend permission request");
+        assert!(snapshot.requests[0].command.is_none());
     }
 }

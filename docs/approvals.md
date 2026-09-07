@@ -26,6 +26,11 @@ terminal for the exact scope; its timer starts when Omar detects it. Detailed
 requests use the backend's timestamp where available. MCP approval questions are
 recognized by the backend's `mcp_tool_call_approval_` question marker.
 
+If the backend supports status reads but rejects history/resume, Omar keeps
+polling the explicit approval flag. Full details and MCP questions that are only
+classified as general user input may be unavailable on those builds; the
+observer does not guess their meaning from inactivity or terminal text.
+
 Other backends, older versions without these APIs, command wrappers that prevent
 attachment, and ambiguous panes with multiple loaded threads cannot provide full
 monitoring. The API reports connection availability independently; the assistant
