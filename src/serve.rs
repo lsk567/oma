@@ -194,6 +194,8 @@ struct Context_ {
     /// whose program has no `Web` agent, which is what makes the panel routes
     /// 404 rather than offer an empty panel.
     panels: Panels,
+    activity: Arc<Mutex<BTreeMap<String, crate::activity::ActivityRun>>>,
+    role_settings: crate::activity::RoleSettings,
     chat: Arc<Mutex<Chat>>,
     /// Authenticates the EA's MCP sidecar on the agent-only endpoints.
     agent_token: String,
@@ -290,6 +292,10 @@ impl Serve {
             health_idle_warning: config.health.idle_warning,
             runs: Runs::default(),
             panels: Panels::default(),
+            activity: Arc::new(Mutex::new(BTreeMap::new())),
+            role_settings: crate::activity::RoleSettings::load(
+                omar_dir.join(format!("role-settings-{ea_id}.json")),
+            ),
             chat: Arc::new(Mutex::new(Chat::default())),
             agent_token: agent_token.clone(),
             command: Arc::new(Mutex::new(config.agent.default_command.clone())),
@@ -607,6 +613,45 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
         }
         ("POST", "/v1/chat") => send_to_ea(&context, &read_body(content_length)?),
         ("GET", "/v1/agent") => (200, describe_agent(&context)),
+        ("GET", "/v1/role-settings") => {
+            let models = activity_models(&context);
+            (
+                200,
+                json!(crate::activity::RoleSettingsSnapshot {
+                    roles: context.role_settings.all(),
+                    capabilities_available: !models.is_empty(),
+                    codex_models: models,
+                }),
+            )
+        }
+        ("POST", "/v1/role-settings") if content_length > 16 * 1024 => {
+            (413, json!({"error":"role settings body too large"}))
+        }
+        ("POST", "/v1/role-settings") => {
+            match serde_json::from_slice::<crate::activity::SavedRoleSettings>(&read_body(
+                content_length,
+            )?) {
+                Ok(role) => match context.role_settings.save(role, &activity_models(&context)) {
+                    Ok(()) => (200, json!({"saved":true, "applies_to":"next_invocation"})),
+                    Err(error) => (400, json!({"error":error.to_string()})),
+                },
+                Err(_) => (400, json!({"error":"invalid role settings"})),
+            }
+        }
+        ("GET", rest) if rest.starts_with("/v1/runs/") && rest.ends_with("/activity") => {
+            let id = rest
+                .trim_start_matches("/v1/runs/")
+                .trim_end_matches("/activity");
+            match context
+                .activity
+                .lock()
+                .expect("activity runs poisoned")
+                .get(id)
+            {
+                Some(activity) => (200, json!(activity.snapshot())),
+                None => (404, json!({"error":"activity unavailable for this run"})),
+            }
+        }
         ("POST", "/v1/agent/backend") => switch_backend(&context, &read_body(content_length)?),
         // EA-only, authenticated with the token handed to its MCP sidecar.
         ("POST", "/v1/agent/reply") => agent_reply(&context, &read_body(content_length)?),
@@ -1398,6 +1443,42 @@ fn panel_answer(context: &Arc<Context_>, run_id: &str, body: &[u8]) -> (u16, Val
     }
 }
 
+/// Discover capabilities from an existing pane only; this never launches an
+/// agent, changes its backend, or treats a cached catalog as live support.
+fn activity_models(context: &Context_) -> Vec<crate::activity::SupportedModel> {
+    let client = TmuxClient::new(crate::ea::ea_prefix(context.ea_id, &context.session_prefix));
+    let ea = crate::ea::ea_manager_session(context.ea_id, &context.session_prefix);
+    let mut sockets = Vec::new();
+    if let Some(stamp) = client.session_delivery(&ea) {
+        if let Some(path) = stamp.strip_prefix("codex:") {
+            sockets.push(PathBuf::from(path));
+        }
+    }
+    let agents: Vec<String> = context
+        .activity
+        .lock()
+        .expect("activity runs poisoned")
+        .values()
+        .flat_map(|run| {
+            run.backends
+                .iter()
+                .filter(|(_, b)| b.as_str() == "codex")
+                .map(|(a, _)| a.clone())
+        })
+        .collect();
+    for agent in agents {
+        if let Some(socket) = crate::activity::codex_socket(&client, &agent) {
+            sockets.push(socket);
+        }
+    }
+    for socket in sockets {
+        if let Ok(models) = crate::activity::models_from_socket(&socket) {
+            return models;
+        }
+    }
+    Vec::new()
+}
+
 fn spawn_run_thread(
     context: &Arc<Context_>,
     run_id: &str,
@@ -1431,11 +1512,34 @@ fn spawn_run_thread(
     } else {
         topology::Pace::RealTime
     };
+    let state = topology::verify(&bytecode).expect("admitted bytecode is verified");
+    let activity = crate::activity::ActivityRun::new(
+        run_id.clone(),
+        state.team.clone(),
+        state
+            .agents
+            .iter()
+            .map(|(name, agent)| {
+                (
+                    name.clone(),
+                    topology::canonical_backend(&agent.backend).to_string(),
+                )
+            })
+            .collect(),
+        context.role_settings.clone(),
+        PathBuf::from(&context.default_workdir),
+    );
+    context
+        .activity
+        .lock()
+        .expect("activity runs poisoned")
+        .insert(run_id.clone(), activity.clone());
     thread::spawn(move || {
         let diagram_address: SocketAddr = "127.0.0.1:0".parse().expect("loopback address");
         let outcome = topology::run_topology(
             &bytecode,
             TopologyRunConfig {
+                activity: Some(activity),
                 ea_id: context.ea_id,
                 omar_dir: &context.omar_dir,
                 base_prefix: &context.session_prefix,

@@ -9,6 +9,8 @@ import {
   useRef,
   useState,
 } from "react";
+import type { ActivitySnapshot } from "../lib/protocol-generated";
+import { activityState, elapsedLabel, latestInvocation } from "../lib/activity";
 import { formatDuration, webAgents, type DiagramSnapshot } from "../lib/protocol";
 
 /**
@@ -452,6 +454,7 @@ function reactionWidth(labels: ReactionLabels, within: number | null): number {
   const widest = Math.max(
     textWidth(labels.name, 6.9),
     textWidth(labels.meta, 5.2),
+    textWidth("Waiting for dependencies", 5.2),
   );
   // A deadline is drawn between the text and the point, so the node has to be
   // wider for it rather than the stopwatch sitting on top of the name.
@@ -1115,6 +1118,8 @@ export function componentName(id: string): string {
 
 export function DiagramCanvas({
   snapshot,
+  activity,
+  activityNow = 0,
   selection = [],
   onToggleComponent,
   onOpenTerminal,
@@ -1122,6 +1127,8 @@ export function DiagramCanvas({
   highlight,
 }: {
   snapshot: DiagramSnapshot;
+  activity?: ActivitySnapshot | null;
+  activityNow?: number;
   selection?: string[];
   onToggleComponent?: (component: string) => void;
   /** Given only while agents are actually running and can be attached to. */
@@ -1533,7 +1540,7 @@ export function DiagramCanvas({
                   key={reaction.id}
                   {...selectable(
                     reaction.id,
-                    `omar-reaction ${reaction.status}${reaction.web ? " web" : ""}`,
+                    `omar-reaction ${latestInvocation(activity ?? null, reaction.id)?.execution ?? reaction.status}${reaction.web ? " web" : ""}`,
                   )}
                   onDoubleClick={(event) => {
                     // The canvas resets the view on double click; a reaction
@@ -1579,7 +1586,11 @@ export function DiagramCanvas({
                     x={REACTION_TEXT_X}
                     y={reaction.box.height / 2 + 12}
                   >
-                    {reaction.meta}
+                    {(() => {
+                      const invocation = latestInvocation(activity ?? null, reaction.id);
+                      return invocation ? `${activityState(invocation)} · ${elapsedLabel(invocation.started_at, invocation.finished_at ?? activityNow)}`
+                        : reaction.status === "idle" && snapshot.status !== "ready" ? (snapshot.status === "running" ? "Waiting for dependencies" : "Not invoked") : reaction.meta;
+                    })()}
                   </text>
                   {/* A deadline the program set for itself. A stopwatch rather
                       than a clock: a timer fires on its own, this counts down

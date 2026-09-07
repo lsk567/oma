@@ -530,14 +530,15 @@ fn provision_codex(home: &Path) -> Option<String> {
 /// performs the upgrade: it wants a URL only to build the request line and
 /// `Host` header, so a placeholder is fine — the bytes go wherever the stream
 /// already points, which here is a socket path.
-struct CodexSession {
+pub(crate) struct CodexSession {
     socket: tungstenite::WebSocket<UnixStream>,
     next_id: u64,
+    notifications: Vec<serde_json::Value>,
 }
 
 impl CodexSession {
     /// Connect, upgrade, and complete the app-server's opening handshake.
-    fn open(path: &Path) -> Result<CodexSession> {
+    pub(crate) fn open(path: &Path) -> Result<CodexSession> {
         let stream =
             UnixStream::connect(path).with_context(|| format!("connect to {}", path.display()))?;
         stream.set_read_timeout(Some(WRITE_TIMEOUT))?;
@@ -559,7 +560,11 @@ impl CodexSession {
             }
         })?;
 
-        let mut session = CodexSession { socket, next_id: 1 };
+        let mut session = CodexSession {
+            socket,
+            next_id: 1,
+            notifications: Vec::new(),
+        };
         session
             .call(
                 "initialize",
@@ -594,7 +599,11 @@ impl CodexSession {
     ///
     /// The server pushes notifications of its own down the same socket, so a
     /// reply is found by id rather than by being the next message.
-    fn call(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    pub(crate) fn call(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let id = self.next_id;
         self.next_id += 1;
         self.send(serde_json::json!({
@@ -612,6 +621,17 @@ impl CodexSession {
             let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
                 continue;
             };
+            if value.get("method").is_some() {
+                // Bounded: readers project only allowlisted lifecycle events.
+                if matches!(
+                    value["method"].as_str(),
+                    Some("turn/started" | "turn/completed" | "item/started" | "item/completed")
+                ) && self.notifications.len() < 2048
+                {
+                    self.notifications.push(value);
+                }
+                continue;
+            }
             if value.get("id").and_then(serde_json::Value::as_u64) != Some(id) {
                 continue;
             }
@@ -622,8 +642,12 @@ impl CodexSession {
         }
     }
 
+    pub(crate) fn take_notifications(&mut self) -> Vec<serde_json::Value> {
+        std::mem::take(&mut self.notifications)
+    }
+
     /// The thread the pane is showing, when that is unambiguous.
-    fn only_thread(&mut self) -> Result<String> {
+    pub(crate) fn only_thread(&mut self) -> Result<String> {
         let listed = self.call("thread/loaded/list", serde_json::json!({}))?;
         only_thread(&listed).context("the pane has no single loaded thread to inject into")
     }

@@ -4,6 +4,14 @@
 // file makes the client disagree with the daemon, which is the failure the
 // generator exists to make impossible.
 
+/** Runtime invocation outcome, independent of monitoring. */
+export const ACTIVITY_EXECUTIONS = ["running", "completed", "failed"] as const;
+export type ActivityExecution = (typeof ACTIVITY_EXECUTIONS)[number];
+
+/** Availability of the backend monitoring connection. */
+export const ACTIVITY_CONNECTIONS = ["connecting", "connected", "disconnected", "unsupported"] as const;
+export type ActivityConnection = (typeof ACTIVITY_CONNECTIONS)[number];
+
 /** Every status `omar serve` can report a run in. */
 export const RUN_STATUSES = ["starting", "running", "stopping", "completed", "stopped", "failed"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
@@ -31,6 +39,24 @@ export type DiagramEventKind = (typeof DIAGRAM_EVENT_KINDS)[number];
 /** Who spoke. */
 export const CHAT_ROLES = ["operator", "assistant"] as const;
 export type ChatRole = (typeof CHAT_ROLES)[number];
+
+export type ActivityEvent = { id: string, at: number, time_source: string, kind: string, summary: string, tool_id: string | null, exit_code: number | null, };
+
+export type ObservedTool = { id: string, summary: string, started_at: number | null, observed_at: number, };
+
+export type ChangedArtifact = { id: string, path: string, change: string, observed_at: number, diff: string | null, diff_truncated: boolean, verification: string, };
+
+export type RoleSelection = { model: string | null, effort: string | null, };
+
+export type InvocationActivity = { invocation_id: string, reaction_id: string, agent_name: string, backend: string, started_at: number, finished_at: number | null, execution: ActivityExecution, connection: ActivityConnection, last_activity_at: number, events: Array<ActivityEvent>, active_tools: Array<ObservedTool>, artifacts: Array<ChangedArtifact>, requested: RoleSelection, confirmed: RoleSelection, reported_thread_settings: RoleSelection, settings_application: string, };
+
+export type ActivitySnapshot = { run_id: string, sequence: number, server_time: number, invocations: Array<InvocationActivity>, };
+
+export type SupportedModel = { model: string, name: string, efforts: Array<string>, default_effort: string | null, };
+
+export type SavedRoleSettings = { team: string, agent: string, backend: string, selection: RoleSelection, };
+
+export type RoleSettingsSnapshot = { roles: Array<SavedRoleSettings>, codex_models: Array<SupportedModel>, capabilities_available: boolean, };
 
 export type DiagramTag = { timestamp: number, microstep: number, };
 
