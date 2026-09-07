@@ -374,18 +374,7 @@ pub fn verify(bytecode: &Bytecode) -> Result<VmState> {
                 if ty.trim().is_empty() {
                     bail!("port '{name}' has an empty type");
                 }
-                // A refinement that does not parse is a broken port, not a
-                // plain `string`. Saying so here, once, keeps `string_enum`
-                // free to answer "not refined" everywhere downstream.
-                if let Some(list) = ty.strip_prefix("string in ") {
-                    match serde_json::from_str::<Vec<String>>(list) {
-                        Ok(values) if !values.is_empty() => {}
-                        Ok(_) => bail!("port '{name}' admits no value"),
-                        Err(error) => {
-                            bail!("port '{name}' has an invalid string refinement: {error}")
-                        }
-                    }
-                }
+                check_refinement(name, ty)?;
                 if delay.is_some() && *kind != PortKind::Action {
                     bail!("only action ports may declare a fixed delay");
                 }
@@ -1150,6 +1139,29 @@ fn validate_value(ty: &str, value: &Value) -> Result<()> {
         bail!("expected {ty}, got {value}");
     }
     Ok(())
+}
+
+/// Reject a refinement that does not parse, wherever it sits in the type.
+///
+/// A refinement that is not well formed is a broken port, not a plain `string`.
+/// Saying so once, here, keeps `string_enum` free to answer "not refined"
+/// everywhere downstream. `validate_value` looks inside `list` and `option`, so
+/// this has to as well, or a nested one would reach the agent and be reported
+/// against the value it wrote rather than against the port.
+fn check_refinement(name: &str, ty: &str) -> Result<()> {
+    for outer in ["list", "option"] {
+        if let Some(inner) = generic_inner(ty, outer) {
+            return check_refinement(name, inner);
+        }
+    }
+    let Some(list) = ty.strip_prefix("string in ") else {
+        return Ok(());
+    };
+    match serde_json::from_str::<Vec<String>>(list) {
+        Ok(values) if !values.is_empty() => Ok(()),
+        Ok(_) => bail!("port '{name}' admits no value"),
+        Err(error) => bail!("port '{name}' has an invalid string refinement: {error}"),
+    }
 }
 
 fn generic_inner<'a>(ty: &'a str, outer: &str) -> Option<&'a str> {
@@ -2667,6 +2679,13 @@ mod tests {
             (r#"string in [oops"#, "invalid string refinement"),
             (r#"string in [1,2]"#, "invalid string refinement"),
             (r#"string in []"#, "admits no value"),
+            // `validate_value` looks inside these, so `verify` must too.
+            (r#"list<string in [oops>"#, "invalid string refinement"),
+            (r#"option<string in []>"#, "admits no value"),
+            (
+                r#"list<option<string in [1,2]>>"#,
+                "invalid string refinement",
+            ),
         ] {
             let mut program = program();
             program.instructions[2] = serde_json::from_str(&format!(
