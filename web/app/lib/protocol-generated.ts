@@ -32,6 +32,20 @@ export type DiagramEventKind = (typeof DIAGRAM_EVENT_KINDS)[number];
 export const CHAT_ROLES = ["operator", "assistant"] as const;
 export type ChatRole = (typeof CHAT_ROLES)[number];
 
+export type ApprovalConnection = "connecting" | "connected" | "disconnected" | "unsupported";
+
+export type ApprovalOutcome = "resolved" | "denied" | "cancelled";
+
+export type ApprovalResolutionMode = "terminal";
+
+export type PendingApproval = { request_id: string, agent_id: string, agent_name: string, run_id: string | null, invocation_id: string | null, requested_at: number, summary: string, tool_name: string, scope: string, command: string | null, cwd: string | null, resolution_mode: ApprovalResolutionMode, };
+
+export type ApprovalMonitor = { agent_id: string, run_id: string | null, state: ApprovalConnection, };
+
+export type ApprovalResolution = { request: PendingApproval, outcome: ApprovalOutcome, resolved_at: number, };
+
+export type ApprovalSnapshot = { sequence: number, requests: Array<PendingApproval>, monitors: Array<ApprovalMonitor>, recent: Array<ApprovalResolution>, };
+
 export type DiagramTag = { timestamp: number, microstep: number, };
 
 export type DiagramInstance = { id: string, name: string, 

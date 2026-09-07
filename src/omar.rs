@@ -1,4 +1,5 @@
 mod app;
+mod approvals;
 mod backend_probe;
 mod channel;
 mod computer;
@@ -518,6 +519,7 @@ async fn async_main() -> Result<()> {
                     // `omar run` has no HTTP surface to hang a panel on, so a
                     // web-backed reaction in a CLI run waits out its deadline.
                     panel_ready: None,
+                    approvals: None,
                 },
             )
             .map(|_| ())
