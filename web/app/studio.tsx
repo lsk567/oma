@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatMessage as ChatMessageView } from "./chat-message";
+import { AgentActivity, ActivitySummary, RoleSettings, useActivity, useInactivityThreshold } from "./agent-activity";
 import { AgentTerminal } from "./agent-terminal";
 import { Timeline } from "./timeline";
 import { BackendMenu } from "./backend-menu";
@@ -18,6 +19,7 @@ import {
 import { reviewProgram, reviewWorkflow } from "./lib/fixtures";
 import {
   applyDiagramEvent,
+  assertDiagramSnapshot,
   formatDuration,
   isRunFinished,
   openInputs,
@@ -137,6 +139,9 @@ export function Studio({
   /** Diagram components the operator has highlighted for the next message. */
   const [selection, setSelection] = useState<string[]>([]);
   /** The agent whose terminal is open, if any. */
+  const [activityAgent, setActivityAgent] = useState<string | null>(null);
+  const activity = useActivity(serveUrl, run?.run_id);
+  const [inactivitySeconds, setInactivitySeconds] = useInactivityThreshold();
   const [terminalAgent, setTerminalAgent] = useState<string | null>(null);
   /** The web agent whose port panel is open. A program may declare several,
       each with its own ports and prompts, so this names one rather than
@@ -174,6 +179,19 @@ export function Studio({
   const checkTokenRef = useRef(0);
   // Read by the check, which must not re-run every time a run advances.
   const runRef = useRef<RunRecord | null>(null);
+  const restoration = useRef<{ run_id: string; snapshot: DiagramSnapshot; sequence: number } | null>(null);
+  const replayedProposal = useRef(0);
+  const resumeKey = `omar.activity.run:${serveUrl}`;
+  useEffect(() => {
+    if (isDemo) return;
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(resumeKey) ?? "null");
+      if (saved && typeof saved.run_id === "string") {
+        restoration.current = { ...saved, snapshot: assertDiagramSnapshot(saved.snapshot) };
+        replayedProposal.current = saved.sequence ?? 0;
+      }
+    } catch { /* Storage may be disabled or belong to an older client. */ }
+  }, [isDemo, resumeKey]);
   useEffect(() => {
     runRef.current = run;
   }, [run]);
@@ -255,6 +273,7 @@ export function Studio({
           }
           return;
         }
+        if (message.sequence <= replayedProposal.current) return;
         setConfirming(false);
         setDesign(message.design);
         setSource(message.design.program);
@@ -432,6 +451,36 @@ export function Studio({
     },
     [serveUrl, loadPanel],
   );
+
+  // A browser reload reattaches to the exact selected run. Only topology
+  // structure/status is cached; activity and outcomes are re-fetched from the
+  // daemon. This is not saved chat history.
+  useEffect(() => {
+    if (isDemo) return;
+    const saved = restoration.current;
+    if (!saved) return;
+    let cancelled = false;
+    void fetchRun(serveUrl, saved.run_id).then((record) => {
+      if (cancelled || runRef.current) return;
+      runRef.current = record;
+      setRun(record);
+      setSnapshot(saved.snapshot);
+      setPhase(isRunFinished(record.status) ? record.status === "failed" ? "failed" : "finished" : "observing");
+      setInspectorWidth(0);
+      setBuilderWidth(DEFAULT_BUILDER);
+      if (!isRunFinished(record.status)) observe(record);
+    }).catch(() => { /* Daemon restart has no resumable run; no outcome inferred. */ });
+    return () => { cancelled = true; };
+  }, [isDemo, serveUrl, observe]);
+  useEffect(() => {
+    if (isDemo || !run || !snapshot || snapshot.team !== run.team) return;
+    try {
+      sessionStorage.setItem(resumeKey, JSON.stringify({ run_id: run.run_id,
+        sequence: Math.max(replayedProposal.current, ...messages.map((m) => m.sequence)),
+        snapshot: { ...snapshot, ports: snapshot.ports.map((port) => ({ ...port, value: null })) },
+      }));
+    } catch { /* Quota/disabled storage must not affect execution. */ }
+  }, [isDemo, run, snapshot, messages, resumeKey]);
 
   async function confirmDesign() {
     if (!design || phase !== "review") return;
@@ -853,7 +902,22 @@ export function Studio({
             </div>
             ) : null}
           </div>
+          {run ? <ActivitySummary snapshot={activity.snapshot} now={activity.now} connected={activity.connection === "connected"} seconds={inactivitySeconds} /> : null}
+          {!isDemo ? <RoleSettings serveUrl={serveUrl} snapshot={snapshot} /> : null}
+          <div className="activity-summary" aria-label="Inspect agents">
+            <label>Inspect agent <select aria-label="Inspect agent" value={activityAgent ?? ""} onChange={(event) => setActivityAgent(event.target.value || null)}>
+              <option value="">Choose an agent…</option>
+              {snapshot.agents.map((agent) => <option key={agent.id} value={agent.name}>{agent.name}</option>)}
+            </select></label>
+            {selection.slice(-1).flatMap((name) => {
+              const reaction = snapshot.reactions.find((r) => r.id === `reaction::${name}`);
+              const agent = snapshot.agents.find((a) => a.id === reaction?.agent || a.name === name);
+              return agent ? [<button key={agent.id} className="secondary-button" type="button" onClick={() => setActivityAgent(agent.name)}>View {agent.name} activity</button>] : [];
+            })}
+          </div>
           <DiagramCanvas
+            activity={activity.snapshot}
+            activityNow={activity.now}
             snapshot={snapshot}
             selection={selection}
             onToggleComponent={toggleComponent}
@@ -957,6 +1021,10 @@ export function Studio({
         ) : null}
       </section>
 
+      {activityAgent ? <AgentActivity key={activityAgent} agent={activityAgent} activity={activity.snapshot} connection={activity.connection}
+        now={activity.now} seconds={inactivitySeconds} onThreshold={setInactivitySeconds}
+        onOpenTerminal={canRun && run && snapshot?.agents.find((a) => a.name === activityAgent)?.backend.toLowerCase() !== "web" ? () => setTerminalAgent(activityAgent) : undefined}
+        onClose={() => setActivityAgent(null)} /> : null}
       {panelAgent && snapshot ? (
         <PortPanel
           agent={panelAgent}

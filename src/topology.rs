@@ -1265,6 +1265,7 @@ fn expired(invocation: &InvocationSpec, deadline: Duration) -> Result<BTreeMap<S
 }
 
 struct AgentReactionExecutor {
+    activity: Option<crate::activity::ActivityRun>,
     client: TmuxClient,
     team: String,
     registry: InvocationRegistry,
@@ -1277,6 +1278,23 @@ struct AgentReactionExecutor {
 
 impl ReactionExecutor for AgentReactionExecutor {
     fn invoke(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
+        if let Some(activity) = &self.activity {
+            activity.start(&invocation.id, &invocation.reaction_id, &invocation.agent);
+        }
+        let id = invocation.id.clone();
+        let result = self.invoke_observed(invocation);
+        if let Some(activity) = &self.activity {
+            activity.finish(
+                &id,
+                result.is_ok(),
+                result.as_ref().map(|w| w.len()).unwrap_or(0),
+            );
+        }
+        result
+    }
+}
+impl AgentReactionExecutor {
+    fn invoke_observed(&self, invocation: InvocationSpec) -> Result<BTreeMap<String, Value>> {
         let invocation_id = invocation.id.clone();
         let rendered = render_prompt(&invocation.prompt, &invocation.trigger_values)?;
         let record = InvocationRecord {
@@ -1292,6 +1310,7 @@ impl ReactionExecutor for AgentReactionExecutor {
             completed: false,
         };
         let completion = self.registry.register(record)?;
+        let mut monitor_guard = None;
 
         // A web agent has no pane to deliver to: nothing was spawned for it,
         // and the registration above is the work item a panel asks for. What
@@ -1306,16 +1325,36 @@ impl ReactionExecutor for AgentReactionExecutor {
                 invocation.contract,
                 rendered
             );
+            let mut configured = false;
+            if let Some(activity) = &self.activity {
+                let mut monitor = crate::activity::InvocationMonitor::prepare(
+                    activity.clone(),
+                    &invocation_id,
+                    &self.client,
+                    &invocation.agent,
+                );
+                match monitor.deliver_configured(&message) {
+                    Ok(sent) => configured = sent,
+                    Err(_) => {
+                        activity.application(&invocation_id, "Requested settings could not be applied; invocation was not retried. Inspect terminal before retrying.");
+                        self.registry.remove(&invocation_id);
+                        bail!("requested role settings could not be applied; invocation was not retried");
+                    }
+                }
+                monitor_guard = Some(monitor.spawn());
+            }
             let session = self.client.session_for(&invocation.agent);
-            if let Err(error) = self
-                .client
-                .deliver_prompt_until(&session, &message, &DeliveryOptions::default(), &|| {
-                    self.registry.answered(&invocation_id)
-                })
-                .with_context(|| format!("failed to deliver {}", invocation.reaction_id))
-            {
-                self.registry.remove(&invocation_id);
-                return Err(error);
+            if !configured {
+                if let Err(error) = self
+                    .client
+                    .deliver_prompt_until(&session, &message, &DeliveryOptions::default(), &|| {
+                        self.registry.answered(&invocation_id)
+                    })
+                    .with_context(|| format!("failed to deliver {}", invocation.reaction_id))
+                {
+                    self.registry.remove(&invocation_id);
+                    return Err(error);
+                }
             }
         }
 
@@ -1328,11 +1367,22 @@ impl ReactionExecutor for AgentReactionExecutor {
             )),
         };
         self.registry.remove(&invocation_id);
+        let ended_at = crate::activity::now_ms();
+        drop(monitor_guard);
+        if let Some(activity) = &self.activity {
+            activity.finish_at(
+                &invocation_id,
+                result.is_ok(),
+                result.as_ref().map(|w| w.len()).unwrap_or(0),
+                ended_at,
+            );
+        }
         result
     }
 }
 
 pub struct TopologyRunConfig<'a> {
+    pub activity: Option<crate::activity::ActivityRun>,
     pub ea_id: crate::ea::EaId,
     pub omar_dir: &'a Path,
     pub base_prefix: &'a str,
@@ -1516,6 +1566,7 @@ pub fn run_topology(bytecode: &Bytecode, config: TopologyRunConfig<'_>) -> Resul
         }
     }
     let executor = AgentReactionExecutor {
+        activity: config.activity.clone(),
         client,
         team: state.team.clone(),
         registry: invocation_server.registry.clone(),
@@ -2529,7 +2580,7 @@ fn is_web_backend(backend: &str) -> bool {
     canonical_backend(backend) == "web"
 }
 
-fn canonical_backend(backend: &str) -> &str {
+pub(crate) fn canonical_backend(backend: &str) -> &str {
     match backend.to_ascii_lowercase().as_str() {
         "claude" | "claudecode" => "claude",
         "web" => "web",
@@ -3300,6 +3351,7 @@ mod tests {
         .unwrap();
         let state = verify(&bytecode).unwrap();
         let executor = AgentReactionExecutor {
+            activity: None,
             client: TmuxClient::new("omar-test"),
             team: state.team.clone(),
             registry: server.registry.clone(),
@@ -4413,5 +4465,91 @@ mod tests {
             LoopEnd::Stopped(_) => panic!("nothing requested a stop"),
         }
         assert_eq!(*executor.calls.lock().unwrap(), 2);
+    }
+    #[test]
+    fn activity_records_each_concurrent_completion_before_the_layer_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let activity = crate::activity::ActivityRun::new(
+            "run".into(),
+            "Team".into(),
+            BTreeMap::from([("one".into(), "web".into()), ("two".into(), "web".into())]),
+            crate::activity::RoleSettings::load(dir.path().join("roles.json")),
+            dir.path().into(),
+        );
+        let server = InvocationServer::start().unwrap();
+        let executor = AgentReactionExecutor {
+            activity: Some(activity.clone()),
+            client: TmuxClient::new("unused"),
+            team: "Team".into(),
+            registry: server.registry.clone(),
+            timeout: Duration::from_secs(10),
+            web: BTreeSet::from(["one".into(), "two".into()]),
+        };
+        thread::scope(|scope| {
+            let invoke = |id: &str, agent: &str| {
+                executor.invoke(InvocationSpec {
+                    id: id.into(),
+                    reaction_id: format!("r-{id}"),
+                    agent: agent.into(),
+                    trigger_values: BTreeMap::new(),
+                    allowed_effects: BTreeMap::new(),
+                    contract: String::new(),
+                    prompt: "fixture".into(),
+                    within: None,
+                })
+            };
+            let one = scope.spawn(move || invoke("a", "one"));
+            let two = scope.spawn(move || invoke("b", "two"));
+            for _ in 0..200 {
+                if server.registry.entries.lock().unwrap().len() == 2 {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(server.registry.entries.lock().unwrap().len(), 2);
+            // Complete through the actual scoped invocation registry. Empty
+            // writes satisfy this fixture's empty contract.
+            server
+                .registry
+                .execute(
+                    "Team",
+                    "one",
+                    InvocationCommand::Complete(CompleteArgs {
+                        invocation_id: "a".into(),
+                    }),
+                )
+                .unwrap();
+            one.join().unwrap().unwrap();
+            let snapshot = activity.snapshot();
+            assert_eq!(
+                snapshot
+                    .invocations
+                    .iter()
+                    .find(|i| i.invocation_id == "a")
+                    .unwrap()
+                    .execution,
+                crate::activity::ActivityExecution::Completed
+            );
+            assert_eq!(
+                snapshot
+                    .invocations
+                    .iter()
+                    .find(|i| i.invocation_id == "b")
+                    .unwrap()
+                    .execution,
+                crate::activity::ActivityExecution::Running
+            );
+            server
+                .registry
+                .execute(
+                    "Team",
+                    "two",
+                    InvocationCommand::Complete(CompleteArgs {
+                        invocation_id: "b".into(),
+                    }),
+                )
+                .unwrap();
+            two.join().unwrap().unwrap();
+        });
     }
 }

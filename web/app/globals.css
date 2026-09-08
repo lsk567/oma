@@ -2236,3 +2236,35 @@ h2 {
   color: #e0777f;
   font-size: 10.5px;
 }
+
+/* Evidence-based agent activity; topology remains a compact overview. */
+.activity-summary { display: flex; flex-wrap: wrap; gap: 8px 20px; padding: 10px 20px; border-bottom: 1px solid var(--line, #263335); font-size: 12px; }
+.role-settings { padding: 12px 20px; border-bottom: 1px solid var(--line, #263335); font-size: 12px; }
+.role-settings summary, .agent-activity summary { cursor: pointer; padding: 6px 0; }
+.role-settings-table { display: grid; gap: 10px; }
+.role-settings-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
+.role-settings-row > span:first-child { min-width: 150px; }
+.role-settings-row label, .agent-activity label { display: grid; gap: 5px; }
+.role-settings small, .activity-events small { display: block; opacity: .65; }
+.role-settings select, .agent-activity select { color: inherit; background: var(--panel, #18201e); border: 1px solid #46534e; border-radius: 4px; padding: 6px; max-width: 100%; }
+.agent-activity { position: fixed; z-index: 30; right: 0; top: 0; bottom: 0; width: min(500px, 100vw); overflow-y: auto; box-sizing: border-box; padding: 24px; color: #e6eae6; background: #111015; border-left: 1px solid #45404e; box-shadow: -12px 0 40px #0005; font-size: 13px; }
+.agent-activity header, .activity-state { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.agent-activity h2 { overflow-wrap: anywhere; }
+.agent-activity h3 { margin-top: 24px; font-size: 13px; }
+.agent-activity > label, .activity-state { margin-top: 18px; }
+.activity-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.activity-facts dt { color: #aaa4b6; font-size: 11px; margin-bottom: 4px; }
+.activity-facts dd { margin: 0; overflow-wrap: anywhere; }
+.activity-note { color: #aaa4b6; font-size: 11px; line-height: 1.6; }
+.inactivity-notice { padding: 12px; background: #25222d; border-left: 3px solid #b6adc7; line-height: 1.6; }
+.activity-events { list-style: none; padding: 0; }
+.activity-events li { display: grid; grid-template-columns: 75px 1fr; gap: 12px; border-top: 1px solid #35313c; padding: 10px 0; }
+.activity-events time { color: #aaa4b6; font-size: 11px; }
+.artifact { overflow-wrap: anywhere; border-top: 1px solid #35313c; padding: 8px 0; }
+.artifact pre { overflow: auto; max-height: 350px; font-size: 11px; padding: 12px; background: #09080c; white-space: pre; }
+.agent-activity-button { margin-left: 8px; }
+@media (max-width: 600px) { .agent-activity { padding: 16px; } .activity-facts { grid-template-columns: 1fr; } }
+
+.diagram-panel .activity-summary, .diagram-panel .role-settings { color: #34313d; background: #f8f7fa; border-color: #d9d5df; flex-shrink: 0; }
+.diagram-panel .role-settings[open] { max-height: 220px; overflow-y: auto; }
+.diagram-panel .activity-summary select, .diagram-panel .role-settings select { color: #34313d; background: white; border: 1px solid #b9b4c3; border-radius: 4px; padding: 5px; }

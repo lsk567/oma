@@ -469,6 +469,19 @@ describe(
 
       assert.equal(latest.status, "completed", JSON.stringify(latest));
       assert.equal(latest.error, null);
+      const activity = await (await fetch(`${real.url}/v1/runs/${record.run_id}/activity`)).json();
+      assert.equal(activity.run_id, record.run_id);
+      assert.equal(activity.invocations.length, 2);
+      for (const invocation of activity.invocations) {
+        assert.equal(invocation.execution, "completed");
+        assert.equal(invocation.connection, "unsupported", "a stub has runtime timing, no invented tool telemetry");
+        assert.ok(invocation.finished_at >= invocation.started_at);
+        assert.deepEqual(invocation.artifacts, []);
+        assert.equal(invocation.events[0].kind, "invocation_started");
+        assert.equal(invocation.events.at(-1).kind, "invocation_ended");
+      }
+      const reloaded = await (await fetch(`${real.url}/v1/runs/${record.run_id}/activity`)).json();
+      assert.deepEqual(reloaded.invocations, activity.invocations, "completion stays readable after diagram server exits");
     });
   },
 );
