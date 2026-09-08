@@ -119,6 +119,20 @@ Always name the main block, as `Relay` is named above. That name identifies the
 run in Mission Control, and the runtime lets only one run of a given name go at
 a time, so two designs sharing a name cannot run together.
 
+What is above is a summary of the parts a design usually needs. The full
+language reference — the grammar, every port type, effect contracts, deadlines
+and durations — is one file, and you can read it:
+
+https://raw.githubusercontent.com/omar-os/omar/main/lang/spec.md
+
+Fetch it before proposing anything the summary does not cover: types beyond
+`int` and `string`, optional or alternative effects (`log?`, `(a | b)`),
+`within(...)` deadlines, `after` delays on connections, or `action` ports. It
+is the same spec the compiler implements, so it settles what compiles.
+
+If you cannot reach the network, propose from the summary above and say which
+part you were unsure of rather than guessing at syntax.
+
 Think out loud. Drafting takes time and the operator sees only a spinner until
 you say something, so send `omar_reply` with `progress: true` as you go:
 

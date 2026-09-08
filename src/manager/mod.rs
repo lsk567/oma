@@ -1908,6 +1908,28 @@ mod tests {
         }
     }
 
+    /// The EA is told where the language reference is, and it is there.
+    ///
+    /// The prompt teaches a summary of the language and points past it at
+    /// `lang/spec.md` on GitHub, because the summary does not cover the whole
+    /// language and a proposal that misses is a compile error the operator
+    /// waits through. Moving or renaming the spec would leave the EA fetching
+    /// a 404 -- silently, since nothing else in the tree reads this URL.
+    #[test]
+    fn the_ea_is_pointed_at_a_language_spec_that_is_there() {
+        const RAW: &str = "https://raw.githubusercontent.com/omar-os/omar/main/";
+        let url = PROMPT_EA
+            .split_whitespace()
+            .find(|word| word.starts_with(RAW))
+            .expect("the EA prompt names the language spec");
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(url.trim_start_matches(RAW));
+        assert!(
+            path.exists(),
+            "the EA prompt points at {url}, which is not {}",
+            path.display()
+        );
+    }
+
     #[test]
     fn embedded_prompts_forbid_backend_native_wake_tools() {
         for prompt in [PROMPT_EA, PROMPT_AGENT] {
