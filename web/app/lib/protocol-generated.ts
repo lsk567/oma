@@ -115,5 +115,9 @@ progress: boolean, design: ProposedDesign | null,
  */
 selection: Array<string>, };
 
+export type Conversation = { id: string, title: string, created_at: number, updated_at: number, messages: Array<ChatMessage>, };
+
+export type ConversationSummary = { id: string, title: string, created_at: number, updated_at: number, message_count: number, };
+
 export type RunRecord = { run_id: string, team: string, status: RunStatus, diagram_address: string | null, started_at: number, finished_at: number | null, error: string | null, };
 

@@ -1,5 +1,5 @@
 import { reviewProgram, reviewWorkflow } from "./fixtures";
-import type { ChatMessage } from "./protocol";
+import type { ChatMessage, ConversationSummary } from "./protocol";
 import { sendChat, subscribeToChat } from "./runtime-client";
 
 /**
@@ -14,15 +14,20 @@ export type DesignAgent = {
   subscribe(
     onMessage: (message: ChatMessage) => void,
     onConnectionChange: (connected: boolean) => void,
+    onConversation?: (conversation: ConversationSummary) => void,
   ): () => void;
 };
 
 /** Backed by the real EA through `omar serve`. */
 export function eaDesignAgent(serveUrl: string): DesignAgent {
+  let conversationId: string | undefined;
   return {
-    send: (text, selection) => sendChat(serveUrl, text, selection ?? []),
-    subscribe: (onMessage, onConnectionChange) =>
-      subscribeToChat(serveUrl, onMessage, onConnectionChange),
+    send: (text, selection) => sendChat(serveUrl, text, selection ?? [], undefined, conversationId),
+    subscribe: (onMessage, onConnectionChange, onConversation) =>
+      subscribeToChat(serveUrl, onMessage, onConnectionChange, (conversation) => {
+        conversationId = conversation.id;
+        onConversation?.(conversation);
+      }),
   };
 }
 

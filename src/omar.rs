@@ -1,6 +1,7 @@
 mod app;
 mod backend_probe;
 mod channel;
+mod chat_history;
 mod computer;
 mod config;
 mod deploy;

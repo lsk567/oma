@@ -3,6 +3,7 @@ import {
   assertDiagramSnapshot,
   assertRunRecord,
   type ChatMessage,
+  type ConversationSummary,
   type DiagramEvent,
   type DiagramSnapshot,
   type PendingInvocation,
@@ -92,12 +93,13 @@ export async function sendChat(
   text: string,
   selection: string[] = [],
   signal?: AbortSignal,
+  conversationId?: string,
 ): Promise<void> {
   const base = normalizeRuntimeUrl(serveUrl);
   const response = await fetch(`${base}/v1/chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text, selection }),
+    body: JSON.stringify({ text, selection, conversation_id: conversationId }),
     signal,
   });
   if (!response.ok) {
@@ -113,8 +115,12 @@ export function subscribeToChat(
   serveUrl: string,
   onMessage: (message: ChatMessage) => void,
   onConnectionChange: (connected: boolean) => void,
+  onConversation?: (conversation: ConversationSummary) => void,
 ): () => void {
   const stream = new EventSource(`${normalizeRuntimeUrl(serveUrl)}/v1/chat/events`);
+  stream.addEventListener("conversation", (raw) => {
+    onConversation?.(JSON.parse((raw as MessageEvent<string>).data) as ConversationSummary);
+  });
   stream.onopen = () => onConnectionChange(true);
   stream.onerror = () => onConnectionChange(false);
   for (const kind of ["message", "design_proposed"]) {
@@ -372,4 +378,25 @@ export function subscribeToDiagram(
     });
   }
   return () => stream.close();
+}
+
+/** Conversations are saved by this runtime, shared by its connected tabs. */
+export async function fetchConversations(serveUrl: string, signal?: AbortSignal): Promise<{
+  active_id: string;
+  conversations: ConversationSummary[];
+}> {
+  const response = await fetch(`${normalizeRuntimeUrl(serveUrl)}/v1/chats`, { signal });
+  if (!response.ok) throw new Error(await readError(response));
+  return response.json();
+}
+
+export async function selectConversation(serveUrl: string, id?: string): Promise<ConversationSummary> {
+  const path = id ? `/v1/chats/${encodeURIComponent(id)}/activate` : "/v1/chats";
+  const response = await fetch(`${normalizeRuntimeUrl(serveUrl)}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  return response.json();
 }

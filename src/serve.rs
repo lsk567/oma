@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 use ts_rs::TS;
 use uuid::Uuid;
 
+use crate::chat_history::History;
 use crate::config::Config;
 use crate::ea::EaId;
 use crate::tmux::{DeliveryOptions, TmuxClient};
@@ -58,6 +59,8 @@ pub struct RunRecord {
 #[derive(Debug, Deserialize)]
 struct StartRunRequest {
     program: String,
+    #[serde(default)]
+    conversation_id: Option<String>,
     #[serde(default)]
     inputs: BTreeMap<String, Value>,
     /// A daemon re-runs the same team repeatedly, so stale agent sessions are
@@ -127,7 +130,7 @@ impl RunStatus {
 
 /// One entry in the operator/EA conversation. `design` is set only on
 /// proposals, and carries a program the operator has *not* yet approved.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct ChatMessage {
     pub sequence: u64,
     pub role: ChatRole,
@@ -171,16 +174,19 @@ struct AgentProposal {
 
 #[derive(Debug, Deserialize)]
 struct ChatRequest {
+    #[serde(default)]
+    conversation_id: Option<String>,
     text: String,
     #[serde(default)]
     selection: Vec<String>,
 }
 
-#[derive(Default)]
 struct Chat {
-    messages: Vec<ChatMessage>,
+    history: History,
     subscribers: Vec<mpsc::SyncSender<ChatMessage>>,
-    sequence: u64,
+    busy: bool,
+    needs_context: bool,
+    needs_relaunch: bool,
 }
 
 struct Context_ {
@@ -196,7 +202,9 @@ struct Context_ {
     panels: Panels,
     chat: Arc<Mutex<Chat>>,
     /// Authenticates the EA's MCP sidecar on the agent-only endpoints.
-    agent_token: String,
+    agent_token: Mutex<String>,
+    /// Serialize switches, sends and replies so no response crosses chats.
+    chat_operation: Mutex<()>,
     /// The command the assistant runs, and where to reach this server when it
     /// is relaunched on a different backend.
     command: Arc<Mutex<String>>,
@@ -210,7 +218,7 @@ impl Context_ {
         text: String,
         progress: bool,
         design: Option<ProposedDesign>,
-    ) -> ChatMessage {
+    ) -> Result<ChatMessage> {
         self.publish_with_selection(role, text, progress, design, Vec::new())
     }
 
@@ -221,21 +229,22 @@ impl Context_ {
         progress: bool,
         design: Option<ProposedDesign>,
         selection: Vec<String>,
-    ) -> ChatMessage {
+    ) -> Result<ChatMessage> {
         let mut chat = self.chat.lock().expect("serve chat poisoned");
-        chat.sequence += 1;
-        let message = ChatMessage {
-            sequence: chat.sequence,
+        let message = chat.history.append(ChatMessage {
+            sequence: 0,
             role,
             text,
             progress,
             design,
             selection,
-        };
-        chat.messages.push(message.clone());
+        })?;
+        if role == ChatRole::Assistant && !progress {
+            chat.busy = false;
+        }
         chat.subscribers
             .retain(|subscriber| subscriber.try_send(message.clone()).is_ok());
-        message
+        Ok(message)
     }
 }
 
@@ -282,6 +291,8 @@ impl Serve {
             .with_context(|| format!("failed to bind serve at {address}"))?;
         let address = listener.local_addr()?;
         let agent_token = Uuid::new_v4().to_string();
+        let history = History::load(crate::ea::ea_state_dir(ea_id, omar_dir).join("chats.json"))?;
+        let has_history = !history.active().messages.is_empty();
         let context = Arc::new(Context_ {
             omar_dir: omar_dir.to_path_buf(),
             ea_id,
@@ -290,8 +301,15 @@ impl Serve {
             health_idle_warning: config.health.idle_warning,
             runs: Runs::default(),
             panels: Panels::default(),
-            chat: Arc::new(Mutex::new(Chat::default())),
-            agent_token: agent_token.clone(),
+            chat: Arc::new(Mutex::new(Chat {
+                history,
+                subscribers: Vec::new(),
+                busy: false,
+                needs_context: has_history,
+                needs_relaunch: has_history,
+            })),
+            agent_token: Mutex::new(agent_token.clone()),
+            chat_operation: Mutex::new(()),
             command: Arc::new(Mutex::new(config.agent.default_command.clone())),
             address,
         });
@@ -556,6 +574,19 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
     // `<base>ea-<id>` rather than `<base><id>-<name>`, so no agent name
     // reaches it and it needs a route of its own.
     if method == "GET" && path == "/v1/agent/terminal" {
+        if context
+            .chat
+            .lock()
+            .expect("serve chat poisoned")
+            .needs_relaunch
+        {
+            return write_json(
+                &mut stream,
+                409,
+                &json!({"error": "Send a message to resume this chat's assistant terminal."}),
+                origin_header.as_deref(),
+            );
+        }
         let session = crate::ea::ea_manager_session(context.ea_id, &context.session_prefix);
         return attach_terminal(
             stream,
@@ -589,6 +620,17 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
         Ok(raw)
     };
 
+    if content_length > MAX_BODY_BYTES
+        && (path.starts_with("/v1/chats") || path == "/v1/agent/reply")
+    {
+        return write_json(
+            &mut stream,
+            413,
+            &json!({"error": "request too large"}),
+            origin,
+        );
+    }
+
     let (status, body) = match (method.as_str(), path.as_str()) {
         ("GET", "/health") => (
             200,
@@ -603,9 +645,33 @@ fn handle_client(mut stream: TcpStream, context: Arc<Context_>) -> Result<()> {
         }
         ("GET", "/v1/chat") => {
             let chat = context.chat.lock().expect("serve chat poisoned");
-            (200, json!({"messages": chat.messages}))
+            (200, json!(chat.history.active()))
         }
-        ("POST", "/v1/chat") => send_to_ea(&context, &read_body(content_length)?),
+        ("POST", "/v1/chat") => {
+            if content_length > MAX_BODY_BYTES {
+                (413, json!({"error": "message too large"}))
+            } else {
+                send_to_ea(&context, &read_body(content_length)?)
+            }
+        }
+        ("GET", "/v1/chats") => {
+            let chat = context.chat.lock().expect("serve chat poisoned");
+            (
+                200,
+                json!({"active_id": chat.history.active_id, "conversations": chat.history.list()}),
+            )
+        }
+        ("POST", "/v1/chats") => {
+            let _ = read_body(content_length)?;
+            select_chat(&context, None)
+        }
+        ("POST", rest) if rest.starts_with("/v1/chats/") && rest.ends_with("/activate") => {
+            let _ = read_body(content_length)?;
+            let id = rest
+                .trim_start_matches("/v1/chats/")
+                .trim_end_matches("/activate");
+            select_chat(&context, Some(id))
+        }
         ("GET", "/v1/agent") => (200, describe_agent(&context)),
         ("POST", "/v1/agent/backend") => switch_backend(&context, &read_body(content_length)?),
         // EA-only, authenticated with the token handed to its MCP sidecar.
@@ -822,6 +888,10 @@ fn describe_agent(context: &Arc<Context_>) -> Value {
 /// operator's call to make, which is why this is an explicit request rather
 /// than something inferred.
 fn switch_backend(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
+    let _operation = context
+        .chat_operation
+        .lock()
+        .expect("chat operation poisoned");
     #[derive(Deserialize)]
     struct Request {
         backend: String,
@@ -844,6 +914,10 @@ fn switch_backend(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
     match relaunch_ea(context, &command) {
         Ok(session) => {
             *context.command.lock().expect("serve command poisoned") = command;
+            let mut chat = context.chat.lock().expect("serve chat poisoned");
+            chat.needs_context = true;
+            chat.needs_relaunch = false;
+            chat.busy = false;
             (200, json!({"backend": request.backend, "session": session}))
         }
         Err(error) => (502, json!({"error": format!("{error:#}")})),
@@ -874,14 +948,67 @@ fn relaunch_ea(context: &Arc<Context_>, command: &str) -> Result<String> {
             // Without this the new process has no way to answer the operator.
             serve: Some(crate::manager::ServeMcpContext {
                 endpoint: context.address.to_string(),
-                token: context.agent_token.clone(),
+                token: context
+                    .agent_token
+                    .lock()
+                    .expect("agent token poisoned")
+                    .clone(),
             }),
         },
     )?;
     Ok(session)
 }
 
+/// Selecting a chat changes only the conversation. A new assistant process
+/// is launched on the next send, with that chat's saved transcript.
+fn select_chat(context: &Arc<Context_>, id: Option<&str>) -> (u16, Value) {
+    let _operation = context
+        .chat_operation
+        .lock()
+        .expect("chat operation poisoned");
+    let mut chat = context.chat.lock().expect("serve chat poisoned");
+    if id == Some(chat.history.active_id.as_str()) {
+        return (200, json!(chat.history.active().summary()));
+    }
+    if chat.busy {
+        return (
+            409,
+            json!({"error": "The assistant is still replying. Wait for it to finish before switching chats."}),
+        );
+    }
+    if context
+        .runs
+        .lock()
+        .expect("serve runs poisoned")
+        .values()
+        .any(|run| run.status.is_active())
+    {
+        return (
+            409,
+            json!({"error": "Wait for the current run to finish before switching chats."}),
+        );
+    }
+    if id.is_some_and(|id| !chat.history.conversations.iter().any(|c| c.id == id)) {
+        return (404, json!({"error": "unknown chat"}));
+    }
+    if let Err(error) = chat.history.select(id) {
+        return (500, json!({"error": format!("{error:#}")}));
+    }
+    // Reject any late tool calls from the previous assistant, including a
+    // final answer emitted just after a proposal ended its visible wait.
+    *context.agent_token.lock().expect("agent token poisoned") = Uuid::new_v4().to_string();
+    chat.needs_context = true;
+    chat.needs_relaunch = true;
+    // Closing the streams makes every connected tab rejoin the active chat.
+    chat.subscribers.clear();
+    (200, json!(chat.history.active().summary()))
+}
+
 fn send_to_ea(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
+    let _operation = context
+        .chat_operation
+        .lock()
+        .expect("chat operation poisoned");
     let request: ChatRequest = match serde_json::from_slice(body) {
         Ok(request) => request,
         Err(error) => return (400, json!({"error": format!("invalid request: {error}")})),
@@ -907,16 +1034,77 @@ fn send_to_ea(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
             json!({"error": format!("selected component name is empty or too long: '{name}'")}),
         );
     }
-    let message = context.publish_with_selection(
+    let (resume, relaunch) = {
+        let chat = context.chat.lock().expect("serve chat poisoned");
+        if request
+            .conversation_id
+            .as_ref()
+            .is_some_and(|id| id != &chat.history.active_id)
+        {
+            return (
+                409,
+                json!({"error": "The active chat changed. Reopen it before sending."}),
+            );
+        }
+        if chat.busy {
+            return (409, json!({"error": "The assistant is still replying."}));
+        }
+        let resume = if chat.needs_context {
+            match chat.history.active().resume_context() {
+                Ok(context) => context,
+                Err(error) => return (500, json!({"error": error.to_string()})),
+            }
+        } else {
+            String::new()
+        };
+        (resume, chat.needs_relaunch)
+    };
+    if relaunch {
+        let command = context
+            .command
+            .lock()
+            .expect("serve command poisoned")
+            .clone();
+        if let Err(error) = relaunch_ea(context, &command) {
+            return (
+                502,
+                json!({"error": format!("could not resume assistant: {error:#}")}),
+            );
+        }
+        context
+            .chat
+            .lock()
+            .expect("serve chat poisoned")
+            .needs_relaunch = false;
+    }
+    let message = match context.publish_with_selection(
         ChatRole::Operator,
         request.text.clone(),
         false,
         None,
         request.selection.clone(),
-    );
-    match deliver_to_ea(context, &request.text, &request.selection) {
-        Ok(()) => (202, json!(message)),
-        Err(error) => (502, json!({"error": format!("{error:#}")})),
+    ) {
+        Ok(message) => message,
+        Err(error) => return (500, json!({"error": format!("{error:#}")})),
+    };
+    context.chat.lock().expect("serve chat poisoned").busy = true;
+    match deliver_to_ea(
+        context,
+        &format!("{resume}{}", request.text),
+        &request.selection,
+    ) {
+        Ok(()) => {
+            context
+                .chat
+                .lock()
+                .expect("serve chat poisoned")
+                .needs_context = false;
+            (202, json!(message))
+        }
+        Err(error) => {
+            context.chat.lock().expect("serve chat poisoned").busy = false;
+            (502, json!({"error": format!("{error:#}")}))
+        }
     }
 }
 
@@ -969,25 +1157,35 @@ fn deliver_to_ea(context: &Arc<Context_>, text: &str, selection: &[String]) -> R
 }
 
 fn agent_reply(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
+    let _operation = context
+        .chat_operation
+        .lock()
+        .expect("chat operation poisoned");
     let reply: AgentReply = match serde_json::from_slice(body) {
         Ok(reply) => reply,
         Err(error) => return (400, json!({"error": format!("invalid request: {error}")})),
     };
-    if reply.token != context.agent_token {
+    if reply.token != *context.agent_token.lock().expect("agent token poisoned") {
         return (403, json!({"error": "forbidden"}));
     }
-    context.publish(ChatRole::Assistant, reply.text, reply.progress, None);
-    (202, json!({"status": "delivered"}))
+    match context.publish(ChatRole::Assistant, reply.text, reply.progress, None) {
+        Ok(_) => (202, json!({"status": "delivered"})),
+        Err(error) => (500, json!({"error": format!("{error:#}")})),
+    }
 }
 
 /// A proposal is a program the operator has not approved. It is published to
 /// the conversation and nothing more — only the operator can start a run.
 fn agent_proposal(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
+    let _operation = context
+        .chat_operation
+        .lock()
+        .expect("chat operation poisoned");
     let proposal: AgentProposal = match serde_json::from_slice(body) {
         Ok(proposal) => proposal,
         Err(error) => return (400, json!({"error": format!("invalid request: {error}")})),
     };
-    if proposal.token != context.agent_token {
+    if proposal.token != *context.agent_token.lock().expect("agent token poisoned") {
         return (403, json!({"error": "forbidden"}));
     }
     // Compile before publishing. The operator never sees an unbuildable
@@ -997,7 +1195,7 @@ fn agent_proposal(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
         Ok(state) => state,
         Err(error) => return (400, json!({"error": format!("{error:#}")})),
     };
-    context.publish(
+    if let Err(error) = context.publish(
         ChatRole::Assistant,
         proposal.summary,
         false,
@@ -1006,7 +1204,9 @@ fn agent_proposal(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
             inputs: proposal.inputs,
             preview: crate::diagram::DiagramSnapshot::from_vm_state(&state),
         }),
-    );
+    ) {
+        return (500, json!({"error": format!("{error:#}")}));
+    }
     (202, json!({"status": "proposed"}))
 }
 
@@ -1028,11 +1228,19 @@ fn stream_chat(mut stream: TcpStream, context: &Arc<Context_>, origin: Option<&s
         crate::diagram::cors_origin_header(origin)
     )?;
     let (sender, receiver) = mpsc::sync_channel(CHAT_QUEUE);
-    let backlog = {
+    let (conversation, backlog) = {
         let mut chat = context.chat.lock().expect("serve chat poisoned");
         chat.subscribers.push(sender);
-        chat.messages.clone()
+        (
+            chat.history.active().summary(),
+            chat.history.active().messages.clone(),
+        )
     };
+    writeln!(
+        stream,
+        "event: conversation\ndata: {}\n",
+        serde_json::to_string(&conversation)?
+    )?;
     // Replay so a reload does not lose the conversation.
     stream.write_all(b": connected\n\n")?;
     for message in backlog {
@@ -1081,11 +1289,28 @@ fn write_chat_event(stream: &mut TcpStream, message: &ChatMessage) -> Result<()>
 }
 
 fn start_run(context: &Arc<Context_>, body: &[u8]) -> (u16, Value) {
+    let _operation = context
+        .chat_operation
+        .lock()
+        .expect("chat operation poisoned");
     let request: StartRunRequest = match serde_json::from_slice(body) {
         Ok(request) => request,
         Err(error) => return (400, json!({"error": format!("invalid request: {error}")})),
     };
 
+    if request.conversation_id.as_ref().is_some_and(|id| {
+        id != &context
+            .chat
+            .lock()
+            .expect("serve chat poisoned")
+            .history
+            .active_id
+    }) {
+        return (
+            409,
+            json!({"error": "The active chat changed. Reopen the proposal before deploying."}),
+        );
+    }
     let run_id = Uuid::new_v4().to_string();
     let run_dir = crate::ea::ea_state_dir(context.ea_id, &context.omar_dir)
         .join("serve")
@@ -1680,6 +1905,260 @@ mod tests {
             0,
         )
         .expect("server starts")
+    }
+
+    #[test]
+    fn chat_history_routes_reopen_only_the_selected_conversation() {
+        let server = test_server();
+        let first = server
+            .context
+            .chat
+            .lock()
+            .unwrap()
+            .history
+            .active_id
+            .clone();
+        server
+            .context
+            .publish_with_selection(
+                ChatRole::Operator,
+                "Release planning".into(),
+                false,
+                None,
+                vec!["flow.planner".into()],
+            )
+            .unwrap();
+        let created = request(server.address(), "POST", "/v1/chats", Some("{}"));
+        assert!(created.contains(" 200 "), "{created}");
+        let second = server
+            .context
+            .chat
+            .lock()
+            .unwrap()
+            .history
+            .active_id
+            .clone();
+        assert_ne!(first, second);
+        let empty = request(server.address(), "GET", "/v1/chat", None);
+        assert!(empty.contains("\"messages\":[]"), "{empty}");
+        let list = request(server.address(), "GET", "/v1/chats", None);
+        assert!(
+            list.contains("Release planning") && list.contains(&second),
+            "{list}"
+        );
+        let reopened = request(
+            server.address(),
+            "POST",
+            &format!("/v1/chats/{first}/activate"),
+            Some("{}"),
+        );
+        assert!(reopened.contains(" 200 "), "{reopened}");
+        let chat = request(server.address(), "GET", "/v1/chat", None);
+        assert!(
+            chat.contains("Release planning") && chat.contains("flow.planner"),
+            "{chat}"
+        );
+        assert!(request(
+            server.address(),
+            "POST",
+            "/v1/chats/unknown/activate",
+            Some("{}")
+        )
+        .contains(" 404 "));
+        let stale_run =
+            json!({"conversation_id": second, "program": "must not be compiled"}).to_string();
+        assert!(request(server.address(), "POST", "/v1/runs", Some(&stale_run)).contains(" 409 "));
+        let stale =
+            json!({"conversation_id": second, "text": "This belongs elsewhere"}).to_string();
+        assert!(request(server.address(), "POST", "/v1/chat", Some(&stale)).contains(" 409 "));
+        assert!(
+            !request(server.address(), "GET", "/v1/chat", None).contains("This belongs elsewhere")
+        );
+        assert_eq!(server.context.runs.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn switching_waits_for_replies_and_runs_and_rejects_late_tool_calls() {
+        let server = test_server();
+        server.context.chat.lock().unwrap().busy = true;
+        assert!(request(server.address(), "POST", "/v1/chats", Some("{}")).contains(" 409 "));
+        server
+            .context
+            .publish(ChatRole::Assistant, "Still working".into(), true, None)
+            .unwrap();
+        assert!(request(server.address(), "POST", "/v1/chats", Some("{}")).contains(" 409 "));
+        server
+            .context
+            .publish(ChatRole::Assistant, "Done".into(), false, None)
+            .unwrap();
+        server
+            .context
+            .runs
+            .lock()
+            .unwrap()
+            .insert("live".into(), record("Team", RunStatus::Running));
+        assert!(request(server.address(), "POST", "/v1/chats", Some("{}")).contains(" 409 "));
+        server.context.runs.lock().unwrap().clear();
+        assert!(request(server.address(), "POST", "/v1/chats", Some("{}")).contains(" 200 "));
+        let old_reply =
+            json!({"token": server.agent_token, "text": "Late answer from the previous chat"})
+                .to_string();
+        assert!(request(
+            server.address(),
+            "POST",
+            "/v1/agent/reply",
+            Some(&old_reply)
+        )
+        .contains(" 403 "));
+        assert!(server
+            .context
+            .chat
+            .lock()
+            .unwrap()
+            .history
+            .active()
+            .messages
+            .is_empty());
+    }
+
+    #[test]
+    fn history_save_errors_are_returned_before_a_reply_is_published() {
+        let server = test_server();
+        let path = crate::ea::ea_state_dir(0, &server.context.omar_dir).join("chats.json");
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let body = json!({"token": server.agent_token, "text": "Cannot persist this"}).to_string();
+        let response = request(server.address(), "POST", "/v1/agent/reply", Some(&body));
+        assert!(response.contains(" 500 "), "{response}");
+        assert!(server
+            .context
+            .chat
+            .lock()
+            .unwrap()
+            .history
+            .active()
+            .messages
+            .is_empty());
+    }
+
+    #[test]
+    fn restarting_restores_proposals_and_supplies_context_to_a_fresh_assistant() {
+        if crate::tmux::tmux_command().arg("-V").output().is_err() {
+            eprintln!("skipping: tmux is not installed");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let captured = dir.path().join("captured.txt");
+        let mut config = Config::default();
+        config.dashboard.session_prefix = format!("omar-history-test-{}-", Uuid::new_v4());
+        config.agent.default_workdir = dir.path().display().to_string();
+        // A recording terminal replaces the LLM; this exercises the real
+        // assistant relaunch and delivery paths without using model credentials.
+        let recorder = dir.path().join("recorder.py");
+        fs::write(
+            &recorder,
+            r#"import os, sys, tty
+tty.setraw(0)
+buffer = b''
+shown = False
+with open(sys.argv[1], 'ab', buffering=0) as output:
+    while True:
+        chunk = os.read(0, 65536)
+        output.write(chunk)
+        buffer += chunk
+        if b'<UserPromptEnds:' in buffer and buffer.rstrip().endswith(b'>') and not shown:
+            os.write(1, b'[Pasted text #1]')
+            shown = True
+        if shown and b'\r' in chunk:
+            os.write(1, b'\r\nRecorded submission\r\n')
+"#,
+        )
+        .unwrap();
+        config.agent.default_command =
+            format!("python3 '{}' '{}'", recorder.display(), captured.display());
+        let session = crate::ea::ea_manager_session(0, &config.dashboard.session_prefix);
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = crate::tmux::tmux_command()
+                    .args(["kill-session", "-t", &format!("={}", self.0)])
+                    .output();
+            }
+        }
+        let _cleanup = Cleanup(session);
+        let first = Serve::start("127.0.0.1:0".parse().unwrap(), &config, dir.path(), 0).unwrap();
+        first
+            .context
+            .publish_with_selection(
+                ChatRole::Operator,
+                "Preserve the launch requirements".into(),
+                false,
+                None,
+                vec!["flow.planner".into()],
+            )
+            .unwrap();
+        let proposal = ProposedDesign {
+            program: include_str!("../web/tests/fixtures/review-flow.omar").into(),
+            inputs: BTreeMap::from([("flow.request".into(), json!("release evidence"))]),
+            preview: serde_json::from_str(include_str!(
+                "../web/tests/fixtures/diagram-snapshot.v1.json"
+            ))
+            .unwrap(),
+        };
+        first
+            .context
+            .publish(
+                ChatRole::Assistant,
+                "Saved proposal".into(),
+                false,
+                Some(proposal),
+            )
+            .unwrap();
+        let first_id = first.context.chat.lock().unwrap().history.active_id.clone();
+        drop(first);
+        let resumed = Serve::start("127.0.0.1:0".parse().unwrap(), &config, dir.path(), 0).unwrap();
+        let body = request(resumed.address(), "GET", "/v1/chat", None);
+        assert!(
+            body.contains("Saved proposal") && body.contains("release evidence"),
+            "{body}"
+        );
+        assert_eq!(
+            resumed.context.chat.lock().unwrap().history.active_id,
+            first_id
+        );
+        let response = request(
+            resumed.address(),
+            "POST",
+            "/v1/chat",
+            Some(r#"{"text":"Continue with a final review"}"#),
+        );
+        assert!(response.contains(" 202 "), "{response}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let text = loop {
+            let text = fs::read_to_string(&captured).unwrap_or_default();
+            if text.contains("Continue with a final review")
+                || std::time::Instant::now() >= deadline
+            {
+                break text;
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+        for expected in [
+            "Preserve the launch requirements",
+            "flow.planner",
+            "release evidence",
+            "Saved proposal",
+            "Continue with a final review",
+        ] {
+            assert!(
+                text.contains(expected),
+                "missing {expected} in delivered context: {text}"
+            );
+        }
+        assert!(
+            resumed.context.runs.lock().unwrap().is_empty(),
+            "restoring a proposal never deploys it"
+        );
     }
 
     /// Stopping is a request the runner reads, not a kill.
